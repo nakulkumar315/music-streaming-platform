@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
+import { requireRoles } from "../../common/auth/requireRoles";
 import { pool } from "../../common/db";
 import { logger } from "../../common/logger";
 import { getMediaConfig } from "../../config/media.config";
@@ -14,13 +15,14 @@ import {
 import { mapStreamAccessError } from "./stream-access-error";
 
 const router = Router();
+const requireFan = requireRoles("FAN");
 
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-router.post("/access", requireAuth, async (req: any, res: any) => {
+router.post("/access", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const contentId = positiveInteger(req.body?.contentId);
   const userId = positiveInteger(req.user?.id);
@@ -100,7 +102,7 @@ router.post("/access", requireAuth, async (req: any, res: any) => {
 });
 
 /** Client should refresh the exact issued session every 30-60 seconds. */
-router.post("/heartbeat", requireAuth, async (req: any, res: any) => {
+router.post("/heartbeat", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const userId = positiveInteger(req.user?.id);
   const sessionId = positiveInteger(req.body?.sessionId);
@@ -147,7 +149,7 @@ router.post("/heartbeat", requireAuth, async (req: any, res: any) => {
 });
 
 /** Explicitly revokes the exact playback session. */
-router.post("/terminate", requireAuth, async (req: any, res: any) => {
+router.post("/terminate", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const userId = positiveInteger(req.user?.id);
   const sessionId = positiveInteger(req.body?.sessionId);
