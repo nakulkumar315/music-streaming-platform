@@ -65,8 +65,6 @@ export const initiateRefund = async (req: any, res: Response) => {
   const actorId = Number(req.user?.id);
   const role = String(req.user?.role || "").toUpperCase();
 
-  // Phase 1 is full-refund only. Do not accept an amount that could override
-  // the authoritative captured payment amount.
   if (
     req.body?.amount !== undefined ||
     req.body?.refundAmount !== undefined ||
@@ -87,13 +85,18 @@ export const initiateRefund = async (req: any, res: Response) => {
     });
 
     const completed = result.request.status === "COMPLETED";
+    const failed = result.request.status === "FAILED";
     AuditService.log({
-      action: completed ? "REFUND_COMPLETED" : "REFUND_INITIATED",
+      action: completed
+        ? "REFUND_COMPLETED"
+        : failed
+          ? "REFUND_FAILED"
+          : "REFUND_INITIATED",
       entity: "refund_request",
       entityId: result.request.id,
       performedBy: actorId,
       role: auditRole(role),
-      status: completed ? "success" : "pending",
+      status: completed ? "success" : failed ? "failed" : "pending",
       correlationId,
       metadata: {
         payment_id: result.request.paymentId,
@@ -103,6 +106,17 @@ export const initiateRefund = async (req: any, res: Response) => {
         idempotent: result.idempotent,
       },
     });
+
+    if (failed) {
+      return res.status(409).json({
+        success: false,
+        code: result.request.failureCode || "REFUND_FAILED",
+        message: "The existing refund request is in a failed state and was not sent again",
+        refund: serialize(result.request),
+        idempotent: true,
+        correlationId,
+      });
+    }
 
     return res.status(completed ? 200 : 202).json({
       success: true,
@@ -155,13 +169,29 @@ export const reconcileRefund = async (req: any, res: Response) => {
       entityId: request.id,
       performedBy: req.user?.id,
       role: "admin",
-      status: request.status === "COMPLETED" ? "success" : "pending",
+      status:
+        request.status === "COMPLETED"
+          ? "success"
+          : request.status === "FAILED"
+            ? "failed"
+            : "pending",
       correlationId,
       metadata: {
         refund_status: request.status,
         provider_refund_id: request.providerRefundId,
       },
     });
+
+    if (request.status === "FAILED") {
+      return res.status(409).json({
+        success: false,
+        code: request.failureCode || "REFUND_FAILED",
+        message: "Provider reconciliation confirms that the refund failed",
+        refund: serialize(request),
+        correlationId,
+      });
+    }
+
     return res.status(request.status === "COMPLETED" ? 200 : 202).json({
       success: true,
       refund: serialize(request),
