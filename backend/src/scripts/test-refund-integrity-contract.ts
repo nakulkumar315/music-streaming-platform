@@ -24,12 +24,16 @@ function main() {
   const cancellation = source("modules/subscription/subscription.cancellation.service.ts");
   const subscriptionController = source("controllers/admin/adminSubscriptionController.ts");
   const paymentController = source("controllers/paymentController.ts");
-  const mediaAccess = source("modules/media/media-access.service.ts");
+  const entitlement = source("shared/security/artist-entitlement.service.ts");
+  const schemaReadiness = source("common/db/schema-readiness.ts");
 
   assert.equal(migration.includes("CREATE TABLE refund_requests"), true);
   assert.equal(migration.includes("UNIQUE (payment_id)"), true, "One Phase-1 full refund must map to one payment intent");
   assert.equal(migration.includes("RECONCILIATION_REQUIRED"), true);
   assert.equal(migration.includes("provider_refund_id"), true);
+
+  assert.equal(schemaReadiness.includes('LATEST_SCHEMA_VERSION = "20260913_0006_refund_intent_integrity"'), true, "Service startup must require the refund schema");
+  assert.equal(schemaReadiness.includes("refund_requests"), true, "Refund ledger columns must be checked at startup");
 
   assert.equal(refundService.includes("full-refund:${String(payment.id)}"), true, "Refund identity must be server-derived");
   assert.equal(refundService.includes("PARTIAL_REFUND_NOT_SUPPORTED"), true, "Partial refund is outside approved Phase-1 scope");
@@ -38,6 +42,7 @@ function main() {
   assert.equal(refundService.includes("LOCAL_REFUND_FINALIZATION_FAILED"), true, "Provider success plus local failure must reconcile rather than retry");
   assert.equal(refundService.includes("PROVIDER_REFUND_FAILED"), true, "Asynchronous provider failure must be terminal and explicit");
   assert.equal(refundService.includes('refund.status === "failed"'), true, "Provider failed state must not remain pending");
+  assert.equal(refundService.includes("Canonical financial lock order is payment/subscription -> refund request"), true, "Webhook/API refund paths must use one lock order");
   assert.equal(refundService.includes("UPDATE payments SET status = 'REFUNDED'"), true);
   assert.equal(refundService.includes("SET status = 'CANCELLED'"), true, "Confirmed full refund must revoke subscription entitlement");
   assert.equal(refundService.includes("refund_amount = $2"), true, "Refund must preserve captured amount and write refund amount separately");
@@ -65,7 +70,8 @@ function main() {
 
   assert.equal(paymentController.includes('case "refund.processed"'), true, "Verified refund webhook remains authoritative final signal");
   assert.equal(paymentController.includes("finalizeRefund(client"), true, "Webhook must converge on canonical refund service");
-  assert.equal(mediaAccess.includes("ACTIVE"), true, "Phase-02 entitlement must continue to require active subscription state");
+  assert.equal(entitlement.includes("s.status = 'ACTIVE'"), true, "Refund/cancellation status transition must revoke Phase-02 entitlement");
+  assert.equal(entitlement.includes("s.next_billing_date > now()"), true, "Entitlement remains time-bound as well as state-bound");
 
   console.log("Phase 01A refund/cancellation contract checks passed.");
 }
