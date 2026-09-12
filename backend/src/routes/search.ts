@@ -1,13 +1,16 @@
 import { Router } from "express";
 
 import { requireAuth } from "../common/auth/requireAuth";
+import { requireRoles } from "../common/auth/requireRoles";
 import { prisma } from "../common/db/prisma";
 
 const router = Router();
-
+const requireFan = requireRoles("FAN");
 const prismaAny = prisma as any;
 
-router.post("/history", requireAuth, async (req: any, res) => {
+router.use(requireAuth, requireFan);
+
+router.post("/history", async (req: any, res) => {
   try {
     const userIdRaw = req.user?.id;
     const userId = Number(userIdRaw);
@@ -45,7 +48,7 @@ router.post("/history", requireAuth, async (req: any, res) => {
   }
 });
 
-router.get("/history", requireAuth, async (req: any, res) => {
+router.get("/history", async (req: any, res) => {
   try {
     const userIdRaw = req.user?.id;
     const userId = Number(userIdRaw);
@@ -71,7 +74,7 @@ router.get("/history", requireAuth, async (req: any, res) => {
   }
 });
 
-router.delete("/history/:id", requireAuth, async (req: any, res) => {
+router.delete("/history/:id", async (req: any, res) => {
   try {
     const userIdRaw = req.user?.id;
     const userId = Number(userIdRaw);
