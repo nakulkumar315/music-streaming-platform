@@ -54,8 +54,6 @@ async function createSessionWithClient(
 
   await client.query("SELECT pg_advisory_xact_lock($1)", [userId]);
 
-  // JWTs issued by the current auth contract expire after 24 hours. Old
-  // session rows therefore carry no authority and can be pruned safely.
   await client.query(
     `DELETE FROM user_sessions
       WHERE user_id = $1
@@ -63,8 +61,8 @@ async function createSessionWithClient(
     [userId, SESSION_TTL_HOURS]
   );
 
-  // Re-login on the same physical/browser device rotates the server session
-  // so previously issued tokens from that device become invalid immediately.
+  // Re-login on the same physical/browser device rotates the server session,
+  // invalidating any previously issued JWT for that device immediately.
   await client.query(
     "DELETE FROM user_sessions WHERE user_id = $1 AND device_id = $2",
     [userId, normalizedDeviceId]
@@ -117,11 +115,6 @@ export class SessionService {
     }
   }
 
-  /**
-   * Create/rotate a session inside a caller-owned transaction. The caller is
-   * responsible for BEGIN/COMMIT/ROLLBACK and must not reuse the returned
-   * session authority before its transaction commits.
-   */
   static async createSessionInTransaction(
     client: PoolClient,
     input: CreateSessionInput
@@ -145,19 +138,41 @@ export class SessionService {
     return result.rowCount === 1;
   }
 
+  static async listSessions(userId: number, currentSessionId: number) {
+    const result = await pool.query(
+      `SELECT id, device_id, device_name, last_active_at, created_at
+         FROM user_sessions
+        WHERE user_id = $1
+          AND created_at > now() - ($2 * interval '1 hour')
+        ORDER BY last_active_at DESC`,
+      [userId, SESSION_TTL_HOURS]
+    );
+
+    return result.rows.map((row) => ({
+      id: Number(row.id),
+      deviceId: String(row.device_id),
+      deviceName: row.device_name ? String(row.device_name) : null,
+      lastActiveAt: row.last_active_at,
+      createdAt: row.created_at,
+      current: Number(row.id) === currentSessionId,
+    }));
+  }
+
   static async revokeSession(userId: number, sessionId: number) {
-    await pool.query(
-      "DELETE FROM user_sessions WHERE user_id = $1 AND id = $2",
+    const result = await pool.query(
+      "DELETE FROM user_sessions WHERE user_id = $1 AND id = $2 RETURNING id",
       [userId, sessionId]
     );
+    return result.rowCount === 1;
   }
 
   static async revokeDeviceSession(userId: number, deviceId: string) {
     const normalizedDeviceId = normalizeDeviceId(deviceId);
-    await pool.query(
-      "DELETE FROM user_sessions WHERE user_id = $1 AND device_id = $2",
+    const result = await pool.query(
+      "DELETE FROM user_sessions WHERE user_id = $1 AND device_id = $2 RETURNING id",
       [userId, normalizedDeviceId]
     );
+    return result.rowCount === 1;
   }
 
   static async revokeAllSessions(userId: number) {
