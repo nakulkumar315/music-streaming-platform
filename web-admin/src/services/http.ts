@@ -23,11 +23,13 @@ export const http = axios.create({
 });
 
 http.interceptors.request.use((config) => {
-  config.headers = config.headers ?? {};
-  (config.headers as any)["X-Device-Id"] = getOrCreateDeviceId();
+  if (config.url?.includes("/api/v1/admin/login") && config.data && typeof config.data === "object") {
+    config.data = { ...config.data, deviceId: getOrCreateDeviceId() };
+  }
 
   const token = localStorage.getItem("adminToken");
   if (token) {
+    config.headers = config.headers ?? {};
     (config.headers as any).Authorization = `Bearer ${token}`;
   }
   return config;
