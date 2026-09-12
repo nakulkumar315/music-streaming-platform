@@ -2,6 +2,7 @@ import { NextFunction, Response } from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../db";
 import { SessionService } from "./session.service";
+export { requireRoles } from "./requireRoles";
 
 export type AuthenticatedUser = {
   id: number;
@@ -137,22 +138,6 @@ export const optionalAuth = async (req: any, _res: Response, next: NextFunction)
     req.user = undefined;
   }
   return next();
-};
-
-export const requireRoles = (...allowedRoles: string[]) => {
-  const allowed = new Set(allowedRoles.map((role) => role.toUpperCase()));
-
-  return (req: any, res: Response, next: NextFunction) => {
-    const role = String(req.user?.role || "").toUpperCase();
-    if (!role || !allowed.has(role)) {
-      return res.status(403).json({
-        success: false,
-        code: "FORBIDDEN",
-        message: "You do not have permission to perform this action",
-      });
-    }
-    return next();
-  };
 };
 
 export const requireVerifiedArtist = (req: any, res: Response, next: NextFunction) => {
