@@ -1,24 +1,19 @@
-import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   AlertTriangle,
   BadgeCheck,
   Check,
-  Crown,
+  Clock3,
   Lock,
-  Share2,
   ShieldCheck,
-  Sparkles,
   Star,
   X,
-  Zap,
 } from "lucide-react-native";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Animated,
-  Dimensions,
   Platform,
   Pressable,
   ScrollView,
@@ -32,923 +27,498 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import { apiV1 } from "../services/api";
-import { PlatformConfig, userService } from "../services/userService";
+import { userService } from "../services/userService";
 import ErrorBoundary from "../ui/ErrorBoundary";
 import logger from "../utils/logger";
-// import * as Sharing from 'expo-sharing'; // Moved to dynamic require to prevent crash on boot
 
-const { width: SW, height: SH } = Dimensions.get("window");
-
-type PaymentStep = "PLAN_SELECT" | "PROCESSING" | "SUCCESS";
-type PlanType = "ARTIST" | "PLATFORM";
-type BillingCycle = "monthly" | "yearly";
+type PaymentStep = "OFFER" | "PROCESSING" | "PENDING" | "SUCCESS" | "FAILED";
 
 type RouteParams = {
-  artistId?: string;
+  artistId?: string | number;
   artistName?: string;
-  contentId?: string;
+  contentId?: string | number;
   artwork?: string;
-  defaultPlan?: PlanType;
 };
 
-function showPaymentError(message: string) {
-  const msg = (message || "Failed to start payment").toString();
-  Alert.alert("Payment Error", msg);
+type PurchaseResponse = {
+  success: boolean;
+  subscription: {
+    id: number;
+    artistId: number;
+    artistName: string;
+    status: "PENDING";
+  };
+  order: {
+    id: string;
+    amount: number;
+    currency: string;
+    key_id: string;
+  };
+};
+
+type PurchaseStatusResponse = {
+  success: boolean;
+  subscription: {
+    id: number;
+    artistId: number;
+    artistName: string;
+    status: string;
+    expiresAt?: string | null;
+  };
+  payment?: {
+    status: string;
+    failureReason?: string | null;
+  } | null;
+};
+
+const POLL_INTERVAL_MS = 2_000;
+const INITIAL_CONFIRMATION_WINDOW_MS = 45_000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ─── Benefit lists ─────────────────────────────────────────────────────────────
-const PLATFORM_BENEFITS = [
-  { text: "HD streaming (720p / 1080p)", icon: "🎬" },
-  { text: "Crystal clear audio quality", icon: "🎵" },
-  { text: "Works across all content", icon: "🌐" },
-  { text: "Ad-free experience", icon: "✨" },
-];
+function formatPriceFromPaise(amountPaise: number, currency = "INR") {
+  const amount = amountPaise / 100;
+  if (currency.toUpperCase() === "INR") {
+    return `₹${Number.isInteger(amount) ? amount.toFixed(0) : amount.toFixed(2)}`;
+  }
+  return `${currency.toUpperCase()} ${amount.toFixed(2)}`;
+}
 
-const ARTIST_BENEFITS = [
-  { text: "Exclusive artist content", icon: "🎤" },
-  { text: "Early access to new releases", icon: "⚡" },
-  { text: "Direct artist support", icon: "❤️" },
-  { text: "Behind-the-scenes access", icon: "🎭" },
-];
-
-// ─── Main Component ─────────────────────────────────────────────────────────────
 export default function SubscriptionFlowScreen({ navigation, route }: any) {
   const insets = useSafeAreaInsets();
   const params: RouteParams = route?.params ?? {};
-  const artistId = params.artistId ?? "";
-  const artistName = params.artistName ?? "Artist";
+  const artistId = useMemo(() => Number(params.artistId), [params.artistId]);
   const contentId = params.contentId;
-  const hasArtist = Boolean(artistId);
 
-  const [selectedPlan, setSelectedPlan] = useState<PlanType>(
-    params.defaultPlan ?? (hasArtist ? "ARTIST" : "PLATFORM")
+  const [artistName, setArtistName] = useState(
+    String(params.artistName || "Artist")
   );
-  const [paymentStep, setPaymentStep] = useState<PaymentStep>("PLAN_SELECT");
-  const [isCreatingOrder, setIsCreatingOrder] = useState(false);
-  const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
-  const [processingMessage, setProcessingMessage] = useState(
-    "Processing payment…"
-  );
-  const [platformConfig, setPlatformConfig] = useState<PlatformConfig | null>(
-    null
-  );
-  const [isPlatformConfigLoading, setIsPlatformConfigLoading] = useState(true);
+  const [displayPrice, setDisplayPrice] = useState<number | null>(null);
+  const [step, setStep] = useState<PaymentStep>("OFFER");
+  const [subscriptionId, setSubscriptionId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [upsellStatus, setUpsellStatus] = useState<any>(null);
-  const [artistProfile, setArtistProfile] = useState<any>(null);
-  const [isArtistProfileLoading, setIsArtistProfileLoading] = useState(false);
-  const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
+  const [failureReason, setFailureReason] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isProfileLoading, setIsProfileLoading] = useState(true);
+  const [lastKnownExpiry, setLastKnownExpiry] = useState<string | null>(null);
 
-  // Fade-in on mount
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(30)).current;
+  const fade = useRef(new Animated.Value(0)).current;
+  const pollingGeneration = useRef(0);
 
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 500,
-        useNativeDriver: true,
-      }),
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 500,
-        useNativeDriver: true,
-      }),
-    ]).start();
-
-    // Fetch dynamic config
-    setIsPlatformConfigLoading(true);
-    userService
-      .getPlatformConfig()
-      .then((cfg) => {
-        if (cfg) setPlatformConfig(cfg);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        setIsPlatformConfigLoading(false);
-      });
-
-    // Track upsell if landing from locked content
-    if (contentId) {
-      userService.trackUpsellAttempt().then(() => {
-        userService.getUpsellStatus().then((status) => {
-          if (status) setUpsellStatus(status);
-        });
-      });
-    }
-
-    // Fetch artist profile for pricing
-    if (artistId && !isNaN(Number(artistId))) {
-      setIsArtistProfileLoading(true);
-      userService
-        .getArtistProfile(Number(artistId))
-        .then((profile) => {
-          if (profile) setArtistProfile(profile);
-        })
-        .finally(() => setIsArtistProfileLoading(false));
-    }
-  }, [contentId, fadeAnim, slideAnim, artistId]);
+  const hasValidArtist = Number.isSafeInteger(artistId) && artistId > 0;
 
   useEffect(() => {
-    if (!isVerifyingPayment && !isCreatingOrder) return;
-    setProcessingMessage("Processing payment…");
-    const t = setTimeout(
-      () => setProcessingMessage("Almost there, verifying with server…"),
-      5000
-    );
-    return () => clearTimeout(t);
-  }, [isVerifyingPayment, isCreatingOrder]);
+    Animated.timing(fade, {
+      toValue: 1,
+      duration: 350,
+      useNativeDriver: true,
+    }).start();
+  }, [fade]);
 
-  const isPlatform = selectedPlan === "PLATFORM";
+  useEffect(() => {
+    let cancelled = false;
 
-  // Dynamic pricing logic & Discounts
-  const rawPrice = platformConfig?.price ?? 0;
-  const discountPrice = platformConfig?.discount_price;
-  const discountMonths = platformConfig?.discount_months ?? 1;
-  const platformDuration = platformConfig?.duration ?? "monthly";
-  const platformCurrency = platformConfig?.currency ?? "INR";
-  const platformFeaturesRaw = platformConfig?.features ?? [];
+    const loadArtist = async () => {
+      if (!hasValidArtist) {
+        setErrorMessage("Artist information is missing. Please return and try again.");
+        setIsProfileLoading(false);
+        return;
+      }
 
-  const hasDiscount = Boolean(discountPrice && discountPrice < rawPrice);
-  const finalPrice = hasDiscount ? Number(discountPrice) : rawPrice;
+      setIsProfileLoading(true);
+      try {
+        const profile = await userService.getArtistProfile(artistId);
+        if (cancelled) return;
 
-  // ── Billing cycle derived prices ──────────────────────────────────────────
-  // Platform — use actual yearly_price from config if available
-  const platformMonthlyPrice = finalPrice;
-  const platformYearlyPrice = (() => {
-    if (platformConfig?.yearly_price)
-      return Number(platformConfig.yearly_price);
-    if (hasDiscount && discountPrice) return Number(discountPrice) * 12;
-    return parseFloat((finalPrice * 12 * 0.8).toFixed(2));
-  })();
-  const platformDisplayPrice =
-    billingCycle === "yearly" ? platformYearlyPrice : platformMonthlyPrice;
-  const platformPriceDisplay =
-    isPlatformConfigLoading || finalPrice === 0
-      ? "—"
-      : `₹${
-          billingCycle === "yearly"
-            ? platformYearlyPrice.toFixed(0)
-            : platformMonthlyPrice
-        }`;
+        if (!profile) {
+          setErrorMessage("Unable to load this artist's subscription details.");
+          return;
+        }
 
-  // Artist — yearly uses artistProfile.yearlyPrice if available, else 20% off
-  const artistMonthlyPrice: number = artistProfile?.subscriptionPrice ?? 49;
-  const artistYearlyPrice: number = (() => {
-    if (artistProfile?.yearlyPrice && artistProfile.yearlyPrice > 0)
-      return Number(artistProfile.yearlyPrice);
-    return parseFloat((artistMonthlyPrice * 12 * 0.8).toFixed(2));
-  })();
-  const artistPriceDisplay = `₹${
-    billingCycle === "yearly"
-      ? artistYearlyPrice.toFixed(0)
-      : artistMonthlyPrice
-  }`;
+        setArtistName(profile.name || artistName);
+        const price = Number(profile.subscriptionPrice);
+        setDisplayPrice(Number.isFinite(price) && price > 0 ? price : null);
+        if (!Number.isFinite(price) || price <= 0) {
+          setErrorMessage("This artist is not currently accepting subscriptions.");
+        }
+      } catch {
+        if (!cancelled) {
+          setErrorMessage("Unable to load subscription details. Please try again.");
+        }
+      } finally {
+        if (!cancelled) setIsProfileLoading(false);
+      }
+    };
 
-  const cycleSuffix = billingCycle === "yearly" ? "/yr" : "/mo";
-  const durationLabel = cycleSuffix;
+    void loadArtist();
+    return () => {
+      cancelled = true;
+      pollingGeneration.current += 1;
+    };
+  }, [artistId, artistName, hasValidArtist]);
 
-  // Amount sent to Razorpay (in paise)
-  const amountPaise = isPlatform
-    ? Math.round(platformDisplayPrice * 100)
-    : Math.round(
-        (billingCycle === "yearly" ? artistYearlyPrice : artistMonthlyPrice) *
-          100
+  const fetchStatus = async (id: number): Promise<PurchaseStatusResponse> => {
+    const response = await apiV1.get(`/subscriptions/${id}`);
+    return response.data as PurchaseStatusResponse;
+  };
+
+  const applyTerminalStatus = (status: PurchaseStatusResponse) => {
+    const subscriptionStatus = String(status.subscription?.status || "").toUpperCase();
+    const paymentStatus = String(status.payment?.status || "").toUpperCase();
+
+    if (subscriptionStatus === "ACTIVE") {
+      setLastKnownExpiry(status.subscription?.expiresAt || null);
+      setStep("SUCCESS");
+      setFailureReason(null);
+      return true;
+    }
+
+    if (paymentStatus === "FAILED") {
+      setFailureReason(
+        status.payment?.failureReason || "The payment was not completed."
       );
+      setStep("FAILED");
+      return true;
+    }
 
-  const priceDisplay = isPlatform ? platformPriceDisplay : artistPriceDisplay;
+    return false;
+  };
 
-  const planLabel = isPlatform ? "Platform Plan" : `${artistName} Plan`;
-  const accentColor = isPlatform ? "#6C63FF" : "#FF7A18";
-  const accentAlt = isPlatform ? "#4AA3FF" : "#FF3D00";
+  const pollUntilSettled = async (
+    id: number,
+    windowMs = INITIAL_CONFIRMATION_WINDOW_MS
+  ) => {
+    const generation = ++pollingGeneration.current;
+    const deadline = Date.now() + windowMs;
 
-  const mappedPlatformBenefits =
-    platformFeaturesRaw.length > 0
-      ? platformFeaturesRaw.map((f, i) => ({
-          text: f,
-          icon: PLATFORM_BENEFITS[i % PLATFORM_BENEFITS.length].icon,
-        }))
-      : PLATFORM_BENEFITS;
+    while (Date.now() < deadline && generation === pollingGeneration.current) {
+      try {
+        const status = await fetchStatus(id);
+        if (generation !== pollingGeneration.current) return;
+        if (applyTerminalStatus(status)) return;
+      } catch (error: any) {
+        logger.warn(
+          "[SubscriptionFlow] status poll failed",
+          error?.response?.status || error?.message
+        );
+      }
 
-  const hasCustomFeatures =
-    artistProfile?.subscriptionFeatures?.length &&
-    artistProfile.subscriptionFeatures.length > 0;
-  const mappedArtistBenefits = hasCustomFeatures
-    ? artistProfile!.subscriptionFeatures!.map((f: string, i: number) => ({
-        text: f,
-        icon: ARTIST_BENEFITS[i % ARTIST_BENEFITS.length].icon,
-      }))
-    : ARTIST_BENEFITS;
+      await sleep(POLL_INTERVAL_MS);
+    }
+
+    if (generation === pollingGeneration.current) {
+      setStep("PENDING");
+    }
+  };
 
   const startPayment = async () => {
-    if (isCreatingOrder || isVerifyingPayment) return;
+    if (isStarting || !hasValidArtist) return;
+
+    setErrorMessage(null);
+    setFailureReason(null);
+    setIsStarting(true);
+
     try {
-      setIsCreatingOrder(true);
-      const artistIdValue = artistId.toString().trim();
+      const response = await apiV1.post<PurchaseResponse>("/subscriptions", {
+        artistId,
+      });
+      const purchase = response.data;
+      const id = Number(purchase?.subscription?.id);
+      const orderId = String(purchase?.order?.id || "").trim();
+      const amount = Number(purchase?.order?.amount);
+      const currency = String(purchase?.order?.currency || "INR").toUpperCase();
+      const key = String(
+        purchase?.order?.key_id || process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || ""
+      ).trim();
 
-      // Duplicate check
-      try {
-        const summary = await userService.getSubscriptionPlanSummary();
-        if (
-          selectedPlan === "PLATFORM" &&
-          summary.platformPlan?.status === "ACTIVE"
-        ) {
-          setErrorMessage("You already have an active Platform Plan.");
-          setIsCreatingOrder(false);
-          return;
-        }
-        if (
-          selectedPlan === "ARTIST" &&
-          summary.artistPlan?.artistId == artistIdValue &&
-          summary.artistPlan?.status === "ACTIVE"
-        ) {
-          setErrorMessage(
-            `You already have an active subscription for ${artistName}.`
-          );
-          setIsCreatingOrder(false);
-          return;
-        }
-      } catch (_) {}
-
-      // Create order
-      let res: any;
-      try {
-        res = await apiV1.post("/subscriptions/order", {
-          amount: amountPaise,
-          artistId: selectedPlan === "PLATFORM" ? "0" : artistIdValue || "0",
-          artistName: selectedPlan === "PLATFORM" ? "Platform" : artistName,
-          billingCycle: billingCycle,
-        });
-      } catch (orderErr: any) {
-        const status = orderErr?.response?.status;
-        const serverMsg = orderErr?.response?.data?.message || "";
-        if (status === 409) {
-          setErrorMessage(
-            `You already have an active ${
-              isPlatform ? "Platform" : "Artist"
-            } subscription.`
-          );
-          setIsCreatingOrder(false);
-          return;
-        }
-        throw new Error(
-          serverMsg || orderErr?.message || "Failed to create order"
-        );
+      if (
+        !Number.isSafeInteger(id) ||
+        id <= 0 ||
+        !orderId ||
+        !Number.isSafeInteger(amount) ||
+        amount <= 0 ||
+        !key
+      ) {
+        throw new Error("The server returned an invalid payment order.");
       }
-      // BUG 12 FIX: Free plan (₹0) - direct success
-      if (res.data?.is_free === true) {
-        setPaymentStep("SUCCESS");
-        setIsCreatingOrder(false);
-        setTimeout(() => {
-          if (selectedPlan === "ARTIST" && artistId) {
-            navigation.navigate("Artist", {
-              artistId,
-              unlocked: true,
-              contentId,
-            });
-          } else {
-            navigation.goBack();
-          }
-        }, 2800);
-        return;
-      }
-      const nextOrderId = (res.data?.order?.id ?? "").toString();
-      if (!nextOrderId)
-        throw new Error("Order creation failed — order id missing");
 
-      const keyId =
-        process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID ||
-        (res.data?.order?.key_id ?? "").toString();
-      if (!keyId) throw new Error("Missing Razorpay key_id");
+      setSubscriptionId(id);
+      setArtistName(purchase.subscription.artistName || artistName);
+      setDisplayPrice(amount / 100);
 
       if (Platform.OS === "web") {
-        throw new Error(
-          "Payments not supported in web preview. Please use the mobile app."
-        );
+        throw new Error("This Phase-1 fan payment flow is available in the mobile app.");
       }
 
-      const options: any = {
-        key: keyId,
-        amount: Number(res.data?.order?.amount ?? amountPaise),
-        currency: (res.data?.order?.currency ?? "INR").toString(),
-        name: "Music Platform",
-        description: planLabel,
-        order_id: nextOrderId,
-        notes: { artist_id: artistIdValue || "0", plan_type: selectedPlan },
-        theme: { color: accentColor },
-      };
-
-      let paymentData: any;
+      let gatewayResult: any;
       try {
-        paymentData = await RazorpayCheckout.open(options);
-      } catch (e: any) {
-        // ============================================
-        // BUG 13 FIX: Handle Razorpay cancellation gracefully
-        // ============================================
-        const errorMsg =
-          e?.description || e?.error?.description || e?.message || "";
-        const errorString =
-          typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg);
+        gatewayResult = await RazorpayCheckout.open({
+          key,
+          amount,
+          currency,
+          name: "Music Platform",
+          description: `Monthly subscription · ${purchase.subscription.artistName}`,
+          order_id: orderId,
+          notes: {
+            subscription_id: String(id),
+            artist_id: String(purchase.subscription.artistId),
+          },
+          theme: { color: "#FF7A18" },
+        } as any);
+      } catch (error: any) {
+        const text = String(
+          error?.description || error?.error?.description || error?.message || ""
+        );
 
-        // Check if user cancelled the payment
-        if (
-          /cancel/i.test(errorString) ||
-          errorString.includes("payment_error")
-        ) {
-          // Notify backend that payment was cancelled
-          try {
-            await apiV1.post("/subscriptions/payment-failed", {
-              razorpay_order_id: nextOrderId,
-              reason: "User cancelled",
-            });
-          } catch (err) {
-            logger.warn("[Payment] Failed to record cancellation", err);
-          }
-          // Show user-friendly message
+        // Cancellation is not payment truth. Do not tell the backend to mark a
+        // transaction failed; Razorpay webhook/reconciliation owns that state.
+        if (/cancel/i.test(text) || text.includes("payment_error")) {
+          setStep("OFFER");
           Alert.alert(
-            "Payment Cancelled",
-            "You cancelled the payment. You can try again anytime.",
-            [{ text: "OK", onPress: () => setIsCreatingOrder(false) }]
+            "Payment not completed",
+            "No subscription access was activated. You can try again whenever you're ready."
           );
           return;
         }
-
-        // Other errors
-        setErrorMessage(errorString || "Payment failed. Please try again.");
-        setIsCreatingOrder(false);
+        throw error;
       }
 
-      const razorpay_order_id = (
-        paymentData?.razorpay_order_id ?? nextOrderId
-      ).toString();
-      const razorpay_payment_id = (
-        paymentData?.razorpay_payment_id ?? ""
-      ).toString();
-      const razorpay_signature = (
-        paymentData?.razorpay_signature ?? ""
-      ).toString();
-
-      if (!razorpay_payment_id || !razorpay_signature) {
-        throw new Error("Payment completed but required fields were missing");
-      }
-
-      setPaymentStep("PROCESSING");
-      setIsVerifyingPayment(true);
-
-      await apiV1.post("/subscriptions/confirm", {
-        razorpay_order_id,
-        razorpay_payment_id,
-        razorpay_signature,
-        artist_id: artistIdValue || "0",
+      logger.log("[SubscriptionFlow] gateway returned", {
+        orderId: gatewayResult?.razorpay_order_id || orderId,
+        hasPaymentId: Boolean(gatewayResult?.razorpay_payment_id),
       });
 
-      // Poll for ACTIVE status (max 30 seconds)
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline) {
-        const endpoint =
-          selectedPlan === "PLATFORM"
-            ? "/subscriptions/platform"
-            : `/subscriptions/me?artistId=${encodeURIComponent(artistIdValue)}`;
-        const sRes = await apiV1.get(endpoint);
-        const status = (sRes.data?.subscription?.status ?? "")
-          .toString()
-          .toUpperCase();
-        if (status === "ACTIVE") break;
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-
-      setPaymentStep("SUCCESS");
-
-      // Auto redirect after success
-      setTimeout(() => {
-        if (selectedPlan === "ARTIST" && artistId) {
-          navigation.navigate("Artist", {
-            artistId,
-            unlocked: true,
-            contentId,
-          });
-        } else {
-          navigation.goBack();
-        }
-      }, 2800);
-    } catch (err: any) {
-      setPaymentStep("PLAN_SELECT");
-      setErrorMessage(
-        err?.message || "Failed to start payment. Please check your connection."
-      );
+      // The SDK callback is only a signal that checkout returned. It is NOT
+      // sufficient to unlock content. Verified webhook state remains authoritative.
+      setStep("PROCESSING");
+      await pollUntilSettled(id);
+    } catch (error: any) {
+      const serverMessage = error?.response?.data?.message;
+      const message =
+        serverMessage ||
+        error?.message ||
+        "Unable to start subscription. Please try again.";
+      setErrorMessage(String(message));
+      setStep("OFFER");
     } finally {
-      setIsCreatingOrder(false);
-      setIsVerifyingPayment(false);
+      setIsStarting(false);
     }
   };
 
-  const handleShare = async () => {
+  const checkAgain = async () => {
+    if (!subscriptionId) {
+      setStep("OFFER");
+      return;
+    }
+
+    setStep("PROCESSING");
     try {
-      // Lazy load sharing to prevent crash if native module is not in the current dev client build
-      const Sharing = require("expo-sharing");
-      const isAvailable = await Sharing.isAvailableAsync();
-      if (!isAvailable) {
-        Alert.alert(
-          "Sharing not available",
-          "Please capture a screenshot to share your success!"
-        );
-        return;
-      }
-      // Note: shareAsync requires a file URI.
-      Alert.alert("Success!", "Ready to share your achievement!");
-    } catch (e) {
-      logger.log("Sharing error:", e);
-      Alert.alert(
-        "Sharing error",
-        "Failed to open sharing dialog. Rebuild your dev client to enable this."
+      const status = await fetchStatus(subscriptionId);
+      if (applyTerminalStatus(status)) return;
+      await pollUntilSettled(subscriptionId, 20_000);
+    } catch (error: any) {
+      setErrorMessage(
+        error?.response?.data?.message ||
+          "We couldn't refresh payment status. Please try again."
       );
+      setStep("PENDING");
     }
   };
+
+  const goToArtist = () => {
+    navigation.navigate("Artist", {
+      artistId: String(artistId),
+      unlocked: true,
+      contentId,
+    });
+  };
+
+  const close = () => {
+    pollingGeneration.current += 1;
+    if (navigation.canGoBack()) navigation.goBack();
+    else navigation.navigate("Home");
+  };
+
+  const offerPrice = displayPrice
+    ? `₹${Number.isInteger(displayPrice) ? displayPrice.toFixed(0) : displayPrice.toFixed(2)}`
+    : "—";
 
   return (
-    <ErrorBoundary label="Payments: Subscription Flow">
-      <View style={s.root}>
-        <SafeAreaView style={s.safe}>
-          {/* ══════════════════════════════════════════════════
-              PLAN SELECT SCREEN
-          ══════════════════════════════════════════════════ */}
-          {paymentStep === "PLAN_SELECT" && (
+    <ErrorBoundary label="Payments: Artist Subscription">
+      <View style={styles.root}>
+        <LinearGradient
+          colors={["#080808", "#15100D", "#080808"]}
+          style={StyleSheet.absoluteFillObject}
+        />
+        <SafeAreaView style={styles.safe}>
+          {step === "OFFER" && (
             <ScrollView
-              style={s.scrollWrap}
-              contentContainerStyle={s.scrollContent}
-              showsVerticalScrollIndicator={false}>
-              <Animated.View
-                style={{
-                  opacity: fadeAnim,
-                  transform: [{ translateY: slideAnim }],
-                }}>
-                {/* Header */}
-                <View style={s.headerWrap}>
-                  <View style={s.crownRing}>
-                    <LinearGradient
-                      colors={["#6C63FF", "#4AA3FF"]}
-                      style={s.crownGrad}>
-                      <Crown color="#fff" size={28} />
-                    </LinearGradient>
-                  </View>
-                  <Text style={s.headline}>Upgrade Your Experience</Text>
-                  <Text style={s.subline}>
-                    Join thousands of music lovers. Cancel anytime.
-                  </Text>
+              contentContainerStyle={styles.scrollContent}
+              showsVerticalScrollIndicator={false}
+            >
+              <Animated.View style={{ opacity: fade }}>
+                <View style={styles.heroIcon}>
+                  <Star color="#fff" size={28} fill="#fff" />
                 </View>
+                <Text style={styles.eyebrow}>EARLY ACCESS MEMBERSHIP</Text>
+                <Text style={styles.title}>Support {artistName}</Text>
+                <Text style={styles.subtitle}>
+                  Get 30 days of access to this artist's subscriber-only early releases.
+                </Text>
 
-                {/* Strong Upsell Alert */}
-                {upsellStatus?.showStrongUpsell && (
-                  <View style={s.strongUpsellAlert}>
-                    <LinearGradient
-                      colors={["#FF3D00", "#FF7A18"]}
-                      style={s.strongUpsellGrad}>
-                      <AlertTriangle color="#fff" size={20} />
-                      <View style={{ flex: 1, marginLeft: 12 }}>
-                        <Text style={s.strongUpsellTitle}>
-                          Special Reward Unlocked! 🎁
-                        </Text>
-                        <Text style={s.strongUpsellDesc}>
-                          We noticed you love our content. Subscribe now and get
-                          instant access to everything!
-                        </Text>
-                      </View>
-                    </LinearGradient>
-                  </View>
-                )}
-
-                {/* ── Billing Cycle Toggle ── */}
-                <View style={s.billingToggleWrap}>
-                  <Pressable
-                    style={[
-                      s.billingToggleBtn,
-                      billingCycle === "monthly" && s.billingToggleBtnActive,
-                    ]}
-                    onPress={() => setBillingCycle("monthly")}>
-                    <Text
-                      style={[
-                        s.billingToggleText,
-                        billingCycle === "monthly" && s.billingToggleTextActive,
-                      ]}>
-                      Monthly
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    style={[
-                      s.billingToggleBtn,
-                      billingCycle === "yearly" && s.billingToggleBtnActive,
-                    ]}
-                    onPress={() => setBillingCycle("yearly")}>
-                    <Text
-                      style={[
-                        s.billingToggleText,
-                        billingCycle === "yearly" && s.billingToggleTextActive,
-                      ]}>
-                      Yearly
-                    </Text>
-                    <View style={s.saveBadge}>
-                      <Text style={s.saveBadgeText}>Save 20%</Text>
+                <View style={styles.card}>
+                  <View style={styles.priceRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.cardTitle}>Monthly Artist Access</Text>
+                      <Text style={styles.cardSub}>Fixed 30-day access · manual renewal</Text>
                     </View>
-                  </Pressable>
-                </View>
-
-                {/* ── Plan Cards ── */}
-                <View style={s.plansWrap}>
-                  {/* Platform Plan Card */}
-                  <Pressable
-                    style={[
-                      s.planCard,
-                      selectedPlan === "PLATFORM" && s.planCardActivePlatform,
-                    ]}
-                    onPress={() => setSelectedPlan("PLATFORM")}
-                    android_ripple={{ color: "rgba(108,99,255,0.15)" }}>
-                    {/* Glow effect */}
-                    {selectedPlan === "PLATFORM" && (
-                      <View
-                        style={[
-                          s.cardGlow,
-                          { backgroundColor: "rgba(108,99,255,0.18)" },
-                        ]}
-                      />
-                    )}
-
-                    {/* Popular Badge */}
-                    <LinearGradient
-                      colors={["#6C63FF", "#4AA3FF"]}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 0 }}
-                      style={s.popularBadge}>
-                      <Zap color="#fff" size={10} />
-                      <Text style={s.popularBadgeText}> MOST POPULAR</Text>
-                    </LinearGradient>
-
-                    <View style={s.cardInner}>
-                      {/* Icon + Title + Price row */}
-                      <View style={s.cardTopRow}>
-                        <LinearGradient
-                          colors={["#6C63FF", "#4AA3FF"]}
-                          style={s.planIconCircle}>
-                          <Crown color="#fff" size={22} />
-                        </LinearGradient>
-                        <View style={s.cardTitleWrap}>
-                          <Text style={s.cardTitle}>Platform Plan</Text>
-                          <Text style={s.cardSubtitle}>
-                            Unlock HD streaming across all content
-                          </Text>
-                        </View>
-                        <View style={s.priceBlock}>
-                          {isPlatformConfigLoading ? (
-                            <ActivityIndicator color="#6C63FF" size="small" />
-                          ) : (
-                            <>
-                              {billingCycle === "yearly" && (
-                                <Text style={s.priceOriginal}>
-                                  ₹{(platformMonthlyPrice * 12).toFixed(0)}
-                                </Text>
-                              )}
-                              {billingCycle === "monthly" && hasDiscount && (
-                                <Text style={s.priceOriginal}>₹{rawPrice}</Text>
-                              )}
-                              <Text style={s.priceMain}>
-                                {platformPriceDisplay}
-                              </Text>
-                              <Text style={s.priceSub}>{cycleSuffix}</Text>
-                            </>
-                          )}
-                        </View>
-                      </View>
-
-                      {hasDiscount && (
-                        <View style={s.discountRibbon}>
-                          <Sparkles color="#6C63FF" size={12} />
-                          <Text style={s.discountRibbonText}>
-                            {" "}
-                            Introductory Offer: Correct price for{" "}
-                            {discountMonths} month
-                            {discountMonths > 1 ? "s" : ""}
-                          </Text>
-                        </View>
-                      )}
-
-                      {/* Divider */}
-                      <LinearGradient
-                        colors={[
-                          "transparent",
-                          "rgba(108,99,255,0.4)",
-                          "transparent",
-                        ]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 0 }}
-                        style={s.cardDivider}
-                      />
-
-                      {/* Benefits */}
-                      {mappedPlatformBenefits.map((b, i) => (
-                        <View key={i} style={s.benefitRow}>
-                          <View
-                            style={[
-                              s.checkCircle,
-                              {
-                                backgroundColor: isPlatform
-                                  ? "rgba(108,99,255,0.2)"
-                                  : "rgba(255,122,24,0.2)",
-                              },
-                            ]}>
-                            <Check
-                              color={accentColor}
-                              size={12}
-                              strokeWidth={3}
-                            />
-                          </View>
-                          <Text style={s.benefitText}>
-                            {b.icon} {b.text}
-                          </Text>
-                        </View>
-                      ))}
-                    </View>
-
-                    {/* Selected indicator */}
-                    {selectedPlan === "PLATFORM" && (
-                      <View
-                        style={[s.selectedDot, { backgroundColor: "#6C63FF" }]}>
-                        <Check color="#fff" size={13} strokeWidth={3} />
+                    {isProfileLoading ? (
+                      <ActivityIndicator color="#FF7A18" />
+                    ) : (
+                      <View style={styles.priceBlock}>
+                        <Text style={styles.price}>{offerPrice}</Text>
+                        <Text style={styles.perMonth}>/30 days</Text>
                       </View>
                     )}
-                  </Pressable>
+                  </View>
 
-                  {/* Artist Plan Card (only if artist context) */}
-                  {hasArtist && (
-                    <Pressable
-                      style={[
-                        s.planCard,
-                        selectedPlan === "ARTIST" && s.planCardActiveArtist,
-                      ]}
-                      onPress={() => setSelectedPlan("ARTIST")}
-                      android_ripple={{ color: "rgba(255,122,24,0.15)" }}>
-                      {selectedPlan === "ARTIST" && (
-                        <View
-                          style={[
-                            s.cardGlow,
-                            { backgroundColor: "rgba(255,122,24,0.15)" },
-                          ]}
-                        />
-                      )}
-
-                      <LinearGradient
-                        colors={["#FF7A18", "#FF3D00"]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 0 }}
-                        style={s.popularBadge}>
-                        <Star color="#fff" size={10} />
-                        <Text style={s.popularBadgeText}>
-                          {" "}
-                          ARTIST EXCLUSIVE
-                        </Text>
-                      </LinearGradient>
-
-                      <View style={s.cardInner}>
-                        <View style={s.cardTopRow}>
-                          <LinearGradient
-                            colors={["#FF7A18", "#FF3D00"]}
-                            style={s.planIconCircle}>
-                            <Star color="#fff" size={22} />
-                          </LinearGradient>
-                          <View style={s.cardTitleWrap}>
-                            <Text style={s.cardTitle}>{artistName}</Text>
-                            <Text style={s.cardSubtitle}>
-                              Support this artist & unlock exclusive content
-                            </Text>
-                          </View>
-                          <View style={s.priceBlock}>
-                            {isArtistProfileLoading ? (
-                              <ActivityIndicator color="#FF7A18" size="small" />
-                            ) : (
-                              <>
-                                {billingCycle === "yearly" && (
-                                  <Text style={s.priceOriginal}>
-                                    ₹{(artistMonthlyPrice * 12).toFixed(0)}
-                                  </Text>
-                                )}
-                                <Text style={s.priceMain}>
-                                  {artistPriceDisplay}
-                                </Text>
-                                <Text style={s.priceSub}>{cycleSuffix}</Text>
-                              </>
-                            )}
-                          </View>
-                        </View>
-
-                        <LinearGradient
-                          colors={[
-                            "transparent",
-                            "rgba(255,122,24,0.4)",
-                            "transparent",
-                          ]}
-                          start={{ x: 0, y: 0 }}
-                          end={{ x: 1, y: 0 }}
-                          style={s.cardDivider}
-                        />
-
-                        {mappedArtistBenefits.map((b, i) => (
-                          <View key={i} style={s.benefitRow}>
-                            <View
-                              style={[
-                                s.checkCircle,
-                                { backgroundColor: "rgba(255,122,24,0.2)" },
-                              ]}>
-                              <Check
-                                color="#FF7A18"
-                                size={12}
-                                strokeWidth={3}
-                              />
-                            </View>
-                            <Text style={s.benefitText}>
-                              {b.icon} {b.text}
-                            </Text>
-                          </View>
-                        ))}
+                  <View style={styles.divider} />
+                  {[
+                    "Early access to subscriber releases",
+                    "Exclusive artist content",
+                    "Directly support the artist",
+                    "No automatic renewal in Phase 1",
+                  ].map((item) => (
+                    <View key={item} style={styles.benefitRow}>
+                      <View style={styles.checkCircle}>
+                        <Check color="#FF7A18" size={13} strokeWidth={3} />
                       </View>
-
-                      {selectedPlan === "ARTIST" && (
-                        <View
-                          style={[
-                            s.selectedDot,
-                            { backgroundColor: "#FF7A18" },
-                          ]}>
-                          <Check color="#fff" size={13} strokeWidth={3} />
-                        </View>
-                      )}
-                    </Pressable>
-                  )}
+                      <Text style={styles.benefitText}>{item}</Text>
+                    </View>
+                  ))}
                 </View>
 
-                {/* ── Error Display ── */}
                 {errorMessage && (
-                  <View style={s.errorContainer}>
-                    <AlertTriangle color="#EF4444" size={20} />
-                    <Text style={s.errorText}>{errorMessage}</Text>
-                    <Pressable
-                      style={s.errorRetryBtn}
-                      onPress={() => setErrorMessage(null)}>
-                      <Text style={s.errorRetryText}>Retry</Text>
-                    </Pressable>
+                  <View style={styles.errorBox}>
+                    <AlertTriangle color="#EF4444" size={18} />
+                    <Text style={styles.errorText}>{errorMessage}</Text>
                   </View>
                 )}
 
-                {/* ── CTA Button ── */}
                 <Pressable
-                  style={[
-                    s.ctaWrap,
-                    (isCreatingOrder ||
-                      isVerifyingPayment ||
-                      isPlatformConfigLoading ||
-                      (!isPlatform && isArtistProfileLoading)) && {
-                      opacity: 0.75,
-                    },
-                  ]}
                   onPress={startPayment}
-                  disabled={
-                    isCreatingOrder ||
-                    isVerifyingPayment ||
-                    isPlatformConfigLoading ||
-                    (!isPlatform && isArtistProfileLoading)
-                  }
-                  android_ripple={{ color: "rgba(255,255,255,0.2)" }}>
+                  disabled={isStarting || isProfileLoading || !displayPrice}
+                  style={[
+                    styles.ctaWrap,
+                    (isStarting || isProfileLoading || !displayPrice) && styles.disabled,
+                  ]}
+                >
                   <LinearGradient
-                    colors={
-                      isPlatform
-                        ? ["#6C63FF", "#4AA3FF"]
-                        : ["#FF7A18", "#FF3D00"]
-                    }
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={s.ctaGrad}>
-                    {isCreatingOrder ? (
-                      <View
-                        style={{ flexDirection: "row", alignItems: "center" }}>
-                        <ActivityIndicator
-                          color="#fff"
-                          size="small"
-                          style={{ marginRight: 10 }}
-                        />
-                        <Text style={s.ctaText}>
-                          Initializing Secure Step...
-                        </Text>
-                      </View>
-                    ) : isPlatformConfigLoading ? (
-                      <View
-                        style={{ flexDirection: "row", alignItems: "center" }}>
-                        <ActivityIndicator
-                          color="#fff"
-                          size="small"
-                          style={{ marginRight: 10 }}
-                        />
-                        <Text style={s.ctaText}>Loading plan details...</Text>
-                      </View>
+                    colors={["#FF7A18", "#FF3D00"]}
+                    style={styles.cta}
+                  >
+                    {isStarting ? (
+                      <ActivityIndicator color="#fff" />
                     ) : (
                       <>
-                        <Sparkles
-                          color="#fff"
-                          size={18}
-                          style={{ marginRight: 8 }}
-                        />
-                        <Text style={s.ctaText}>
-                          Subscribe · Pay {priceDisplay}
-                          {durationLabel}
-                        </Text>
+                        <Lock color="#fff" size={18} />
+                        <Text style={styles.ctaText}>Subscribe · {offerPrice}</Text>
                       </>
                     )}
                   </LinearGradient>
                 </Pressable>
 
-                {/* Trust Badges */}
-                <View style={s.trustRow}>
-                  <View style={s.trustItem}>
-                    <ShieldCheck color="rgba(255,255,255,0.4)" size={14} />
-                    <Text style={s.trustItemText}>Razorpay Secure</Text>
-                  </View>
-                  <View style={s.trustItem}>
-                    <Lock color="rgba(255,255,255,0.4)" size={14} />
-                    <Text style={s.trustItemText}>SSL Encrypted</Text>
-                  </View>
+                <View style={styles.trustRow}>
+                  <ShieldCheck color="rgba(255,255,255,0.48)" size={15} />
+                  <Text style={styles.trustText}>
+                    Secure Razorpay checkout · Access unlocks only after server confirmation
+                  </Text>
                 </View>
-
-                <Text style={s.disclaimer}>
-                  Secure payment via Razorpay · Cancel anytime ·
-                  {billingCycle === "yearly"
-                    ? " Auto-renews yearly"
-                    : " Auto-renews monthly"}
-                </Text>
               </Animated.View>
             </ScrollView>
           )}
 
-          {/* ══════════════════════════════════════════════════
-              PROCESSING SCREEN
-          ══════════════════════════════════════════════════ */}
-          {paymentStep === "PROCESSING" && (
-            <View style={s.centeredWrap}>
-              <BlurView intensity={20} tint="dark" style={s.processingCard}>
-                <ActivityIndicator color="#6C63FF" size="large" />
-                <Text style={s.processingTitle}>Activating Subscription</Text>
-                <Text style={s.processingDesc}>{processingMessage}</Text>
-              </BlurView>
+          {step === "PROCESSING" && (
+            <View style={styles.centered}>
+              <ActivityIndicator color="#FF7A18" size="large" />
+              <Text style={styles.stateTitle}>Confirming payment…</Text>
+              <Text style={styles.stateBody}>
+                Payment was returned by the gateway. We're waiting for verified server confirmation before unlocking content.
+              </Text>
             </View>
           )}
 
-          {/* ══════════════════════════════════════════════════
-              SUCCESS SCREEN
-          ══════════════════════════════════════════════════ */}
-          {paymentStep === "SUCCESS" && (
-            <View style={s.centeredWrap}>
-              <Animated.View style={{ opacity: fadeAnim }}>
-                <View style={s.successIconWrap}>
-                  <LinearGradient
-                    colors={["#10B981", "#059669"]}
-                    style={s.successIconGrad}>
-                    <BadgeCheck color="#fff" size={40} />
-                  </LinearGradient>
-                </View>
-                <Text style={s.successTitle}>You're all set! 🎉</Text>
-                <Text style={s.successSub}>
-                  Your {planLabel} is now active.{"\n"}Enjoy your premium
-                  experience!
+          {step === "PENDING" && (
+            <View style={styles.centered}>
+              <View style={styles.pendingIcon}>
+                <Clock3 color="#F59E0B" size={34} />
+              </View>
+              <Text style={styles.stateTitle}>Still confirming</Text>
+              <Text style={styles.stateBody}>
+                We haven't received final payment confirmation yet. Your content remains locked until verification completes.
+              </Text>
+              {errorMessage ? <Text style={styles.inlineError}>{errorMessage}</Text> : null}
+              <Pressable style={styles.secondaryButton} onPress={checkAgain}>
+                <Text style={styles.secondaryButtonText}>Check again</Text>
+              </Pressable>
+              <Pressable style={styles.textButton} onPress={close}>
+                <Text style={styles.textButtonText}>Close and check later</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {step === "FAILED" && (
+            <View style={styles.centered}>
+              <View style={styles.failedIcon}>
+                <AlertTriangle color="#EF4444" size={34} />
+              </View>
+              <Text style={styles.stateTitle}>Payment not completed</Text>
+              <Text style={styles.stateBody}>
+                {failureReason || "The payment failed. No subscription access was activated."}
+              </Text>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => {
+                  setFailureReason(null);
+                  setErrorMessage(null);
+                  setStep("OFFER");
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Try again</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {step === "SUCCESS" && (
+            <View style={styles.centered}>
+              <View style={styles.successIcon}>
+                <BadgeCheck color="#fff" size={42} />
+              </View>
+              <Text style={styles.stateTitle}>Subscription active</Text>
+              <Text style={styles.stateBody}>
+                Your access to {artistName} is confirmed and subscriber content is now unlocked.
+              </Text>
+              {lastKnownExpiry ? (
+                <Text style={styles.expiryText}>
+                  Access until {new Date(lastKnownExpiry).toLocaleDateString()}
                 </Text>
-                <View style={s.successBadge}>
-                  <Sparkles color="#10B981" size={14} />
-                  <Text style={s.successBadgeText}>
-                    {" "}
-                    Premium features unlocked
-                  </Text>
-                </View>
-
-                <Pressable style={s.shareBtn} onPress={handleShare}>
-                  <Share2 color="#fff" size={18} style={{ marginRight: 8 }} />
-                  <Text style={s.shareBtnText}>Share Success</Text>
-                </Pressable>
-
-                <Text style={s.successRedirect}>Redirecting you back…</Text>
-              </Animated.View>
+              ) : null}
+              <Pressable style={styles.successButton} onPress={goToArtist}>
+                <Text style={styles.successButtonText}>Explore unlocked content</Text>
+              </Pressable>
             </View>
           )}
         </SafeAreaView>
 
-        {/* ── Final Top-Level Close Button ── */}
-        {paymentStep !== "SUCCESS" && (
+        {step !== "SUCCESS" && step !== "PROCESSING" && (
           <Pressable
-            style={[s.closeBtn, { top: insets.top + 10 }]}
-            onPress={() => {
-              if (navigation.canGoBack()) {
-                navigation.goBack();
-              } else {
-                navigation.navigate("Home");
-              }
-            }}
-            hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}>
-            <View style={s.closeBtnInner}>
-              <X color="#fff" size={22} />
-            </View>
+            style={[styles.closeButton, { top: insets.top + 8 }]}
+            onPress={close}
+            hitSlop={16}
+          >
+            <X color="#fff" size={22} />
           </Pressable>
         )}
       </View>
@@ -956,519 +526,193 @@ export default function SubscriptionFlowScreen({ navigation, route }: any) {
   );
 }
 
-// ─── Styles ────────────────────────────────────────────────────────────────────
-const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#000000" },
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#080808" },
   safe: { flex: 1 },
-
-  meshOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.03,
-    backgroundColor: "#fff",
-  },
-
-  // Orbs
-  orb: { position: "absolute", borderRadius: 999 },
-  orb1: {
-    width: 320,
-    height: 320,
-    top: -100,
-    left: -80,
-    backgroundColor: "rgba(108,99,255,0.28)",
-  },
-  orb2: {
-    width: 260,
-    height: 260,
-    top: SH * 0.25,
-    right: -100,
-    backgroundColor: "rgba(74,163,255,0.22)",
-  },
-  orb3: {
-    width: 240,
-    height: 240,
-    bottom: 40,
-    left: -40,
-    backgroundColor: "rgba(255,122,24,0.15)",
-  },
-
-  // Close
-  closeBtn: {
+  scrollContent: { paddingHorizontal: 20, paddingTop: 72, paddingBottom: 40 },
+  closeButton: {
     position: "absolute",
     left: 16,
-    zIndex: 999,
-  },
-  closeBtnInner: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "rgba(0,0,0,0.4)",
+    backgroundColor: "rgba(255,255,255,0.09)",
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.2)",
+    zIndex: 10,
   },
-
-  // Scroll
-  scrollWrap: { flex: 1 },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 40,
-  },
-
-  // Header
-  headerWrap: { alignItems: "center", marginBottom: 30 },
-  crownRing: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    padding: 3,
-    borderWidth: 1,
-    borderColor: "rgba(108,99,255,0.5)",
-    marginBottom: 16,
-    shadowColor: "#6C63FF",
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 20,
-    elevation: 8,
-  },
-  crownGrad: {
-    flex: 1,
-    borderRadius: 34,
+  heroIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    backgroundColor: "#FF6A00",
+    alignSelf: "center",
     alignItems: "center",
     justifyContent: "center",
+    marginBottom: 18,
   },
-  headline: {
-    color: "#fff",
-    fontSize: 28,
-    fontWeight: "900",
-    letterSpacing: -0.6,
-    textAlign: "center",
-    marginBottom: 10,
-  },
-  subline: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 15,
-    fontWeight: "600",
-    textAlign: "center",
-    lineHeight: 22,
-  },
-
-  // Plan cards
-  plansWrap: { gap: 16, marginBottom: 24 },
-  planCard: {
-    borderRadius: 28,
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.2)",
-    backgroundColor: "#111111",
-    overflow: "hidden",
-    position: "relative",
-    marginBottom: 8,
-  },
-  planCardActivePlatform: {
-    borderColor: "#6C63FF",
-    backgroundColor: "rgba(108,99,255,0.12)",
-    shadowColor: "#6C63FF",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 24,
-    elevation: 12,
-  },
-  planCardActiveArtist: {
-    borderColor: "#FF7A18",
-    backgroundColor: "rgba(255,122,24,0.1)",
-    shadowColor: "#FF7A18",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 24,
-    elevation: 12,
-  },
-  cardGlow: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 100,
-    borderRadius: 22,
-  },
-
-  popularBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    alignSelf: "flex-start",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderBottomRightRadius: 16,
-    marginLeft: 0,
-  },
-  popularBadgeText: {
-    color: "#fff",
+  eyebrow: {
+    color: "#FF7A18",
     fontSize: 12,
     fontWeight: "900",
-    letterSpacing: 1.2,
-    textTransform: "uppercase",
+    letterSpacing: 1.5,
+    textAlign: "center",
   },
-
-  cardInner: { padding: 18, paddingTop: 12 },
-  cardTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 14,
-  },
-  planIconCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 14,
-  },
-  cardTitleWrap: { flex: 1 },
-  cardTitle: {
-    color: "#FFFFFF",
-    fontSize: 20,
+  title: {
+    color: "#fff",
+    fontSize: 30,
     fontWeight: "900",
-    letterSpacing: -0.3,
+    textAlign: "center",
+    marginTop: 8,
   },
-  cardSubtitle: {
+  subtitle: {
     color: "rgba(255,255,255,0.65)",
-    fontSize: 13,
-    fontWeight: "600",
-    marginTop: 4,
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center",
+    marginTop: 10,
+    marginBottom: 28,
   },
-  priceBlock: { alignItems: "flex-end" },
-  priceMain: {
-    color: "#FFFFFF",
-    fontSize: 28,
-    fontWeight: "900",
-    letterSpacing: -0.8,
+  card: {
+    borderRadius: 24,
+    padding: 20,
+    backgroundColor: "rgba(255,255,255,0.055)",
+    borderWidth: 1,
+    borderColor: "rgba(255,122,24,0.25)",
   },
-  priceSub: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 13,
-    fontWeight: "700",
+  priceRow: { flexDirection: "row", alignItems: "center" },
+  cardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
+  cardSub: {
+    color: "rgba(255,255,255,0.52)",
+    fontSize: 12,
+    marginTop: 5,
   },
-
-  cardDivider: {
+  priceBlock: { alignItems: "flex-end", marginLeft: 12 },
+  price: { color: "#fff", fontSize: 28, fontWeight: "900" },
+  perMonth: { color: "rgba(255,255,255,0.45)", fontSize: 11 },
+  divider: {
     height: 1,
-    marginBottom: 14,
+    backgroundColor: "rgba(255,255,255,0.09)",
+    marginVertical: 18,
   },
-
-  benefitRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 5,
-  },
+  benefitRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
   checkCircle: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,122,24,0.13)",
     alignItems: "center",
     justifyContent: "center",
     marginRight: 10,
   },
-  benefitText: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    fontWeight: "700",
-    flex: 1,
-  },
-
-  selectedDot: {
-    position: "absolute",
-    top: 12,
-    right: 14,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  // CTA
-  ctaWrap: {
-    height: 58,
-    borderRadius: 18,
-    overflow: "hidden",
-    marginBottom: 16,
-    shadowColor: "#6C63FF",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    elevation: 10,
-  },
-  ctaGrad: {
-    flex: 1,
+  benefitText: { color: "rgba(255,255,255,0.78)", fontSize: 14, flex: 1 },
+  errorBox: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-  },
-  ctaText: {
-    color: "#fff",
-    fontSize: 17,
-    fontWeight: "800",
-    letterSpacing: 0.2,
-  },
-  disclaimer: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 12,
-    textAlign: "center",
-    lineHeight: 20,
-    marginTop: 8,
-  },
-
-  // Processing & Success shared
-  centeredWrap: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 32,
-  },
-  processingCard: {
-    width: "100%",
-    borderRadius: 24,
-    overflow: "hidden",
-    padding: 32,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  processingTitle: {
-    color: "#fff",
-    fontSize: 20,
-    fontWeight: "800",
-    marginTop: 20,
-    marginBottom: 8,
-  },
-  processingDesc: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 13,
-    fontWeight: "500",
-    textAlign: "center",
-  },
-
-  // Success
-  successIconWrap: {
-    alignSelf: "center",
-    width: 88,
-    height: 88,
-    borderRadius: 44,
-    padding: 4,
-    borderWidth: 2,
-    borderColor: "rgba(16,185,129,0.5)",
-    marginBottom: 20,
-    shadowColor: "#10B981",
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 24,
-  },
-  successIconGrad: {
-    flex: 1,
-    borderRadius: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  successTitle: {
-    color: "#fff",
-    fontSize: 26,
-    fontWeight: "900",
-    textAlign: "center",
-    marginBottom: 10,
-  },
-  successSub: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 15,
-    fontWeight: "500",
-    textAlign: "center",
-    lineHeight: 22,
-    marginBottom: 20,
-  },
-  successBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(16,185,129,0.12)",
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    alignSelf: "center",
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: "rgba(16,185,129,0.25)",
-  },
-  successBadgeText: {
-    color: "#10B981",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  successRedirect: {
-    marginTop: 20,
-    color: "rgba(255,255,255,0.4)",
-    fontSize: 13,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-  shareBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.1)",
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    marginTop: 24,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
-  },
-  shareBtnText: {
-    color: "#fff",
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  errorContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(239,68,68,0.1)",
-    borderRadius: 12,
     padding: 12,
-    marginBottom: 16,
+    marginTop: 16,
+    borderRadius: 12,
+    backgroundColor: "rgba(239,68,68,0.1)",
     borderWidth: 1,
-    borderColor: "rgba(239,68,68,0.2)",
+    borderColor: "rgba(239,68,68,0.22)",
   },
-  errorText: {
-    color: "#EF4444",
-    fontSize: 13,
-    fontWeight: "700",
-    flex: 1,
-    marginLeft: 8,
+  errorText: { color: "#FCA5A5", fontSize: 13, flex: 1, marginLeft: 9 },
+  ctaWrap: { borderRadius: 16, overflow: "hidden", marginTop: 20 },
+  cta: {
+    height: 56,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
   },
-  errorRetryBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: "#EF4444",
-    borderRadius: 8,
-  },
-  errorRetryText: {
-    color: "#fff",
-    fontSize: 11,
-    fontWeight: "900",
-  },
+  ctaText: { color: "#fff", fontSize: 16, fontWeight: "900" },
+  disabled: { opacity: 0.45 },
   trustRow: {
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "center",
-    gap: 16,
-    marginTop: 8,
-    marginBottom: 16,
+    marginTop: 16,
+    paddingHorizontal: 8,
   },
-  trustItem: {
-    flexDirection: "row",
+  trustText: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 11,
+    marginLeft: 7,
+    textAlign: "center",
+    flexShrink: 1,
+  },
+  centered: {
+    flex: 1,
     alignItems: "center",
-    gap: 6,
+    justifyContent: "center",
+    paddingHorizontal: 30,
   },
-  trustItemText: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  strongUpsellAlert: {
-    marginBottom: 24,
-    borderRadius: 20,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(255,61,0,0.3)",
-    shadowColor: "#FF3D00",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  strongUpsellGrad: {
-    padding: 16,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  strongUpsellTitle: {
+  stateTitle: {
     color: "#fff",
-    fontSize: 16,
+    fontSize: 24,
     fontWeight: "900",
+    textAlign: "center",
+    marginTop: 20,
   },
-  strongUpsellDesc: {
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 13,
-    fontWeight: "600",
-    marginTop: 4,
-    lineHeight: 18,
-  },
-  priceOriginal: {
-    color: "rgba(255,255,255,0.4)",
-    fontSize: 16,
-    fontWeight: "600",
-    textDecorationLine: "line-through",
-    marginBottom: -4,
-  },
-  discountRibbon: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(108,99,255,0.1)",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: "rgba(108,99,255,0.2)",
-  },
-  discountRibbonText: {
-    color: "#6C63FF",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-
-  // ── Billing cycle toggle ──────────────────────────────────────────────────
-  billingToggleWrap: {
-    flexDirection: "row",
-    backgroundColor: "rgba(255,255,255,0.07)",
-    borderRadius: 50,
-    padding: 4,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-    alignSelf: "center",
-  },
-  billingToggleBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingVertical: 9,
-    paddingHorizontal: 22,
-    borderRadius: 50,
-  },
-  billingToggleBtnActive: {
-    backgroundColor: "rgba(108,99,255,0.85)",
-    shadowColor: "#6C63FF",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.45,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  billingToggleText: {
-    color: "rgba(255,255,255,0.55)",
+  stateBody: {
+    color: "rgba(255,255,255,0.62)",
     fontSize: 14,
-    fontWeight: "700",
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 10,
+    maxWidth: 420,
   },
-  billingToggleTextActive: {
-    color: "#fff",
+  pendingIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "rgba(245,158,11,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  saveBadge: {
-    backgroundColor: "rgba(16,185,129,0.25)",
-    borderRadius: 20,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: "rgba(16,185,129,0.4)",
+  failedIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "rgba(239,68,68,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  saveBadgeText: {
-    color: "#10B981",
-    fontSize: 10,
-    fontWeight: "900",
-    letterSpacing: 0.4,
+  successIcon: {
+    width: 82,
+    height: 82,
+    borderRadius: 41,
+    backgroundColor: "#10B981",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  inlineError: {
+    color: "#FCA5A5",
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 10,
+  },
+  secondaryButton: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    marginTop: 24,
+  },
+  secondaryButtonText: { color: "#111", fontSize: 15, fontWeight: "900" },
+  textButton: { padding: 14, marginTop: 5 },
+  textButtonText: { color: "rgba(255,255,255,0.55)", fontWeight: "700" },
+  successButton: {
+    backgroundColor: "#10B981",
+    borderRadius: 14,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    marginTop: 24,
+  },
+  successButtonText: { color: "#fff", fontSize: 15, fontWeight: "900" },
+  expiryText: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 12,
+    marginTop: 12,
   },
 });

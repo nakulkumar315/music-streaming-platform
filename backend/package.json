@@ -14,6 +14,7 @@
     "test:cloudinary-delivery": "ts-node --transpile-only src/scripts/test-cloudinary-delivery-strategy.ts",
     "test:playback-url-guard": "ts-node --transpile-only src/scripts/test-playback-url-guard.ts",
     "test:stream-access-errors": "ts-node --transpile-only src/scripts/test-stream-access-error-mapping.ts",
+    "test:payment-integrity": "ts-node --transpile-only src/scripts/test-payment-integrity.ts",
     "test:storage": "ts-node --transpile-only src/scripts/test-storage-connection.ts",
     "prisma": "prisma",
     "db:pull": "prisma db pull",

@@ -1,538 +1,349 @@
 import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
-import { confirmPayment, createOrder } from "../../controllers/paymentController";
-import { createSubscription, verifySubscription, toggleAutoRenew, cancelSubscription } from "../../controllers/subscriptionController";
-import { getPlatformConfig } from "../../controllers/subscriptionConfigController";
 import { pool } from "../../common/db";
-import { trackUpsellAttempt, getUpsellStatus } from "../../controllers/upsellController";
+import {
+  createSubscriptionPurchase,
+  getSubscriptionPurchaseStatus,
+} from "../../controllers/paymentController";
+import {
+  cancelSubscription,
+  toggleAutoRenew,
+} from "../../controllers/subscriptionController";
+import {
+  getUpsellStatus,
+  trackUpsellAttempt,
+} from "../../controllers/upsellController";
 
 const router = Router();
 
-// ────────────────────────────────────────────────────────
-//  Helper: resolve artistId (numeric or username string)
-// ────────────────────────────────────────────────────────
-async function resolveArtistId(raw: string): Promise<number | null> {
-  const numeric = Number(raw);
-  if (Number.isFinite(numeric) && numeric > 0) return numeric;
-  try {
-    const r = await pool.query(`SELECT id FROM users WHERE username = $1 LIMIT 1`, [raw]);
-    const id = Number(r.rows?.[0]?.id);
-    return Number.isFinite(id) && id > 0 ? id : null;
-  } catch {
-    return null;
-  }
+function positiveInteger(value: unknown): number | null {
+  const number = Number(String(value ?? "").trim());
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/me  — single artist subscription status
-// ────────────────────────────────────────────────────────
-router.get("/me", requireAuth, (req, res) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+async function expireDueArtistSubscriptions(userId: number): Promise<void> {
+  await pool.query(
+    `UPDATE subscriptions
+     SET status = 'EXPIRED', updated_at = now()
+     WHERE user_id = $1
+       AND type = 'ARTIST'
+       AND UPPER(COALESCE(status, '')) = 'ACTIVE'
+       AND next_billing_date IS NOT NULL
+       AND next_billing_date <= now()`,
+    [userId]
+  );
+}
 
-    const artistIdRaw = (req.query?.artistId as string | undefined) ?? "";
-    if (!artistIdRaw)
-      return res.status(400).json({ success: false, message: "artistId required" });
+function mapSubscription(row: any) {
+  const expiry = row.next_billing_date ? new Date(row.next_billing_date) : null;
+  const daysLeft = expiry
+    ? Math.max(
+        0,
+        Math.ceil((expiry.getTime() - Date.now()) / (24 * 60 * 60 * 1000))
+      )
+    : null;
 
-    const artistId = await resolveArtistId(artistIdRaw);
-    if (!artistId)
-      return res.status(400).json({ success: false, message: "artistId invalid" });
+  return {
+    id: Number(row.id),
+    type: "ARTIST",
+    artist_id: Number(row.artist_id),
+    artist_name: String(row.artist_name || "Artist"),
+    artist_avatar: row.artist_avatar || null,
+    status: String(row.status || "PENDING").toUpperCase(),
+    plan_type: "MONTHLY",
+    start_date: row.start_date || null,
+    next_billing_date: row.next_billing_date || null,
+    end_date: row.next_billing_date || null,
+    grace_ends_at: null,
+    daysLeft,
+    isExpiringSoon: daysLeft !== null && daysLeft <= 3,
+    auto_renew: false,
+    price:
+      row.subscription_price !== undefined && row.subscription_price !== null
+        ? Number(row.subscription_price)
+        : undefined,
+    currency: "INR",
+    features: Array.isArray(row.subscription_features)
+      ? row.subscription_features
+      : undefined,
+  };
+}
 
-    try {
-      const row = await pool.query(
-        `SELECT user_id, artist_id, type, status, plan_type, start_date,
-                next_billing_date, auto_renew, end_date
-         FROM subscriptions
-         WHERE user_id = $1 AND artist_id = $2 AND type = 'ARTIST'
-         ORDER BY created_at DESC LIMIT 1`,
-        [userId, artistId]
-      );
+/**
+ * POST /api/v1/fan/subscriptions
+ * Canonical Phase-1 artist subscription purchase command.
+ */
+router.post("/", requireAuth, (req, res) =>
+  createSubscriptionPurchase(req as any, res)
+);
 
-      const s = row.rows?.[0] ?? null;
-      if (!s) return res.json({ success: true, subscription: null });
+/** Current subscription for one artist. */
+router.get("/me", requireAuth, async (req: any, res) => {
+  const userId = positiveInteger(req.user?.id);
+  const artistId = positiveInteger(req.query?.artistId);
 
-      return res.json({
-        success: true,
-        subscription: {
-          user_id: s.user_id,
-          artist_id: s.artist_id,
-          type: s.type,
-          status: s.status,
-          plan_type: s.plan_type,
-          start_date: s.start_date,
-          next_billing_date: s.next_billing_date,
-          end_date: s.end_date ?? s.next_billing_date,
-          auto_renew: s.auto_renew,
-          isExpiringSoon: s.next_billing_date ? (new Date(s.next_billing_date).getTime() - Date.now()) < (48 * 3600 * 1000) : false,
-          daysLeft: s.next_billing_date ? Math.ceil((new Date(s.next_billing_date).getTime() - Date.now()) / (1000 * 86400)) : null,
-        }
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
+  if (!artistId) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_ARTIST_ID",
+      message: "artistId is required",
+    });
+  }
+
+  try {
+    await expireDueArtistSubscriptions(userId);
+
+    const result = await pool.query(
+      `SELECT s.id, s.artist_id, s.status, s.start_date, s.next_billing_date,
+              a.name AS artist_name,
+              a.profile_image_url AS artist_avatar,
+              a.subscription_price,
+              a.subscription_features
+       FROM subscriptions s
+       JOIN users a ON a.id = s.artist_id
+       WHERE s.user_id = $1 AND s.artist_id = $2 AND s.type = 'ARTIST'
+       LIMIT 1`,
+      [userId, artistId]
+    );
+
+    const subscription = result.rows?.[0];
+    return res.json({
+      success: true,
+      subscription: subscription ? mapSubscription(subscription) : null,
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch subscription",
+    });
+  }
+});
+
+/**
+ * Server-authoritative early-access check. The content row decides which artist
+ * owns the content; callers cannot gain access by supplying another artist id.
+ */
+router.get("/access-check", requireAuth, async (req: any, res) => {
+  const userId = positiveInteger(req.user?.id);
+  const contentId = positiveInteger(req.query?.contentId);
+
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
+  if (!contentId) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_CONTENT_ID",
+      message: "contentId is required",
+    });
+  }
+
+  try {
+    const contentResult = await pool.query(
+      `SELECT id, artist_id, subscription_required
+       FROM content_items
+       WHERE id = $1
+       LIMIT 1`,
+      [contentId]
+    );
+    const content = contentResult.rows?.[0];
+
+    if (!content) {
+      return res.status(404).json({
+        success: false,
+        code: "CONTENT_NOT_FOUND",
+        message: "Content not found",
       });
-    } catch {
-      return res.status(500).json({ success: false, message: "Failed to fetch subscription" });
     }
-  })();
-});
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/platform  — platform subscription status
-// ────────────────────────────────────────────────────────
-router.get("/platform", requireAuth, (req, res) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
-
-    try {
-      const row = await pool.query(
-        `SELECT id, user_id, type, status, plan_type, start_date,
-                next_billing_date, auto_renew, end_date
-         FROM subscriptions
-         WHERE user_id = $1 AND type = 'PLATFORM'
-         ORDER BY created_at DESC LIMIT 1`,
-        [userId]
-      );
-      const s = row.rows?.[0] ?? null;
-      return res.json({
-        success: true,
-        subscription: s
-          ? {
-              id: s.id,
-              type: s.type,
-              status: s.status,
-              plan_type: s.plan_type,
-              start_date: s.start_date,
-              next_billing_date: s.next_billing_date,
-              end_date: s.end_date ?? s.next_billing_date,
-              auto_renew: s.auto_renew,
-              isExpiringSoon: s.next_billing_date ? (new Date(s.next_billing_date).getTime() - Date.now()) < (48 * 3600 * 1000) : false,
-              daysLeft: s.next_billing_date ? Math.ceil((new Date(s.next_billing_date).getTime() - Date.now()) / (1000 * 86400)) : null,
-            }
-          : null,
-      });
-    } catch {
-      return res.status(500).json({ success: false, message: "Failed to fetch platform subscription" });
+    if (!content.subscription_required) {
+      return res.json({ success: true, allowed: true, reason: "FREE" });
     }
-  })();
+
+    await expireDueArtistSubscriptions(userId);
+
+    const subscriptionResult = await pool.query(
+      `SELECT id
+       FROM subscriptions
+       WHERE user_id = $1
+         AND artist_id = $2
+         AND type = 'ARTIST'
+         AND UPPER(COALESCE(status, '')) = 'ACTIVE'
+         AND next_billing_date > now()
+       LIMIT 1`,
+      [userId, content.artist_id]
+    );
+
+    return res.json({
+      success: true,
+      allowed: subscriptionResult.rows.length > 0,
+      reason:
+        subscriptionResult.rows.length > 0
+          ? "ACTIVE"
+          : "NO_ACTIVE_SUBSCRIPTION",
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: "Access check failed",
+    });
+  }
 });
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/platform-config  — dynamic pricing
-// ────────────────────────────────────────────────────────
-router.get("/platform-config", getPlatformConfig);
+/** Account/home summary for the current artist-subscription model. */
+router.get("/summary", requireAuth, async (req: any, res) => {
+  const userId = positiveInteger(req.user?.id);
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/access-check  — content access gate
-//  query: contentId, artistId  → { allowed, reason }
-// ────────────────────────────────────────────────────────
-router.get("/access-check", requireAuth, (req, res) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+  try {
+    await expireDueArtistSubscriptions(userId);
 
-    const contentIdRaw = (req.query?.contentId as string | undefined) ?? "";
-    const artistIdRaw = (req.query?.artistId as string | undefined) ?? "";
+    const latest = await pool.query(
+      `SELECT s.id, s.artist_id, s.status, s.start_date, s.next_billing_date,
+              a.name AS artist_name,
+              a.profile_image_url AS artist_avatar,
+              a.subscription_price,
+              a.subscription_features
+       FROM subscriptions s
+       JOIN users a ON a.id = s.artist_id
+       WHERE s.user_id = $1 AND s.type = 'ARTIST'
+       ORDER BY
+         CASE UPPER(COALESCE(s.status, ''))
+           WHEN 'ACTIVE' THEN 1
+           WHEN 'PENDING' THEN 2
+           ELSE 3
+         END,
+         s.updated_at DESC
+       LIMIT 1`,
+      [userId]
+    );
 
-    const contentId = Number(contentIdRaw);
-    const artistIdNum = await resolveArtistId(artistIdRaw);
+    const count = await pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM subscriptions
+       WHERE user_id = $1
+         AND type = 'ARTIST'
+         AND UPPER(COALESCE(status, '')) = 'ACTIVE'
+         AND next_billing_date > now()`,
+      [userId]
+    );
 
-    if (!Number.isFinite(contentId) || contentId <= 0)
-      return res.status(400).json({ success: false, message: "contentId required" });
-    if (!artistIdNum)
-      return res.status(400).json({ success: false, message: "artistId required" });
+    const artistPlan = latest.rows?.[0]
+      ? mapSubscription(latest.rows[0])
+      : null;
 
-    try {
-      // fetch content info
-      const cRow = await pool.query(
-        `SELECT subscription_required, artist_id FROM content_items WHERE id = $1 LIMIT 1`,
-        [contentId]
-      );
-      const content = cRow.rows?.[0];
-      if (!content) return res.status(404).json({ success: false, message: "Content not found" });
-
-      if (!content.subscription_required) {
-        return res.json({ success: true, allowed: true, reason: "FREE" });
-      }
-
-      // check artist subscription
-      const subRow = await pool.query(
-        `SELECT status, next_billing_date FROM subscriptions
-         WHERE user_id = $1 AND artist_id = $2 AND type = 'ARTIST'
-         ORDER BY created_at DESC LIMIT 1`,
-        [userId, artistIdNum]
-      );
-      const sub = subRow.rows?.[0];
-
-      if (!sub) {
-        return res.json({ success: true, allowed: false, reason: "NO_SUBSCRIPTION" });
-      }
-
-      const status = (sub.status ?? "").toUpperCase();
-      const now = new Date();
-
-      if (status === "ACTIVE") {
-        return res.json({ success: true, allowed: true, reason: "ACTIVE" });
-      }
-
-      // Grace period
-      if (status === "GRACE" || status === "PAST_DUE") {
-        const graceEnd = sub.next_billing_date ? new Date(sub.next_billing_date) : null;
-        if (graceEnd && graceEnd > now) {
-          return res.json({ success: true, allowed: true, reason: "GRACE_PERIOD", graceEndsAt: graceEnd });
-        }
-      }
-
-      return res.json({ success: true, allowed: false, reason: "EXPIRED" });
-    } catch {
-      return res.status(500).json({ success: false, message: "Access check failed" });
-    }
-  })();
+    return res.json({
+      success: true,
+      plan: artistPlan,
+      artistPlan,
+      artistSubCount: Number(count.rows?.[0]?.count ?? 0),
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch subscription summary",
+    });
+  }
 });
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/quality  — what quality can user stream?
-//  Returns: { quality: "HD" | "SD" }
-// ────────────────────────────────────────────────────────
-router.get("/quality", requireAuth, (req, res) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+/** Full account subscription/transaction view. */
+router.get("/details", requireAuth, async (req: any, res) => {
+  const userId = positiveInteger(req.user?.id);
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
 
-    try {
-      const row = await pool.query(
-        `SELECT status, next_billing_date FROM subscriptions
-         WHERE user_id = $1 AND type = 'PLATFORM'
-         ORDER BY created_at DESC LIMIT 1`,
-        [userId]
-      );
-      const sub = row.rows?.[0];
+  try {
+    await expireDueArtistSubscriptions(userId);
 
-      if (!sub) return res.json({ success: true, quality: "SD", maxResolution: "240p" });
+    const subscriptions = await pool.query(
+      `SELECT s.id, s.artist_id, s.status, s.start_date, s.next_billing_date,
+              a.name AS artist_name,
+              a.profile_image_url AS artist_avatar,
+              a.subscription_price,
+              a.subscription_features
+       FROM subscriptions s
+       JOIN users a ON a.id = s.artist_id
+       WHERE s.user_id = $1 AND s.type = 'ARTIST'
+       ORDER BY s.updated_at DESC`,
+      [userId]
+    );
 
-      const status = (sub.status ?? "").toUpperCase();
-      const now = new Date();
+    const transactions = await pool.query(
+      `SELECT id, amount, currency, artist_name, artist_id, status,
+              billing_cycle, razorpay_order_id, razorpay_payment_id,
+              created_at AS date, payment_confirmed_at
+       FROM transactions
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [userId]
+    );
 
-      if (status === "ACTIVE") {
-        return res.json({ success: true, quality: "HD", maxResolution: "1080p" });
-      }
-      if (status === "GRACE" || status === "PAST_DUE") {
-        const graceEnd = sub.next_billing_date ? new Date(sub.next_billing_date) : null;
-        if (graceEnd && graceEnd > now) {
-          return res.json({ success: true, quality: "HD", maxResolution: "720p", isGrace: true });
-        }
-      }
-      return res.json({ success: true, quality: "SD", maxResolution: "240p" });
-    } catch {
-      return res.status(500).json({ success: false, message: "Quality check failed" });
-    }
-  })();
+    return res.json({
+      success: true,
+      artists: subscriptions.rows.map(mapSubscription),
+      transactions: transactions.rows,
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch subscription details",
+    });
+  }
 });
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/summary  — dashboard summary (all active subs)
-// ────────────────────────────────────────────────────────
-router.get("/summary", requireAuth, (req: any, res: any) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+router.get("/status", requireAuth, async (req: any, res) => {
+  const userId = positiveInteger(req.user?.id);
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
 
-    try {
-      // Latest artist subscription
-      const artistRow = await pool.query(
-        `SELECT s.user_id, s.artist_id, s.type, s.status, s.plan_type,
-                s.start_date, s.next_billing_date, s.end_date,
-                u.full_name as artist_name, u.name as artist_display_name
-         FROM subscriptions s
-         LEFT JOIN users u ON s.artist_id = u.id
-         WHERE s.user_id = $1 AND s.type = 'ARTIST'
-           AND UPPER(COALESCE(s.status,'')) IN ('ACTIVE','GRACE','PAST_DUE')
-         ORDER BY s.next_billing_date DESC NULLS LAST, s.updated_at DESC
-         LIMIT 1`,
-        [userId]
-      );
+  try {
+    await expireDueArtistSubscriptions(userId);
 
-      // Platform subscription
-      const platformRow = await pool.query(
-        `SELECT id, type, status, plan_type, start_date, next_billing_date, end_date
-         FROM subscriptions
-         WHERE user_id = $1 AND type = 'PLATFORM'
-           AND UPPER(COALESCE(status,'')) IN ('ACTIVE','GRACE','PAST_DUE')
-         ORDER BY created_at DESC LIMIT 1`,
-        [userId]
-      );
+    const result = await pool.query(
+      `SELECT s.id, s.artist_id, s.status, s.start_date, s.next_billing_date,
+              a.name AS artist_name,
+              a.profile_image_url AS artist_avatar,
+              a.subscription_price,
+              a.subscription_features
+       FROM subscriptions s
+       JOIN users a ON a.id = s.artist_id
+       WHERE s.user_id = $1 AND s.type = 'ARTIST'
+       ORDER BY s.updated_at DESC`,
+      [userId]
+    );
 
-      // All active artist subscriptions count
-      const countRow = await pool.query(
-        `SELECT COUNT(*)::int as c FROM subscriptions
-         WHERE user_id = $1 AND type = 'ARTIST'
-           AND UPPER(COALESCE(status,'')) IN ('ACTIVE','GRACE')`,
-        [userId]
-      );
-
-      const artist = artistRow.rows?.[0] ?? null;
-      const platform = platformRow.rows?.[0] ?? null;
-      const artistSubCount = Number(countRow.rows?.[0]?.c ?? 0);
-
-      const mapSub = (s: any, isArtist: boolean) => {
-        if (!s) return null;
-        const endDate = s.end_date ?? s.next_billing_date;
-        const graceEndsAt = s.next_billing_date ?? null;
-
-        // Compute days until expiry
-        const now = new Date();
-        const end = endDate ? new Date(endDate) : null;
-        const daysLeft = end ? Math.ceil((end.getTime() - now.getTime()) / (1000 * 86400)) : null;
-        const isExpiringSoon = daysLeft !== null && daysLeft <= 3 && daysLeft >= 0;
-
-        return {
-          type: s.type,
-          status: s.status,
-          plan_type: s.plan_type,
-          start_date: s.start_date,
-          end_date: endDate,
-          grace_ends_at: graceEndsAt,
-          next_billing_date: s.next_billing_date,
-          auto_renew: s.auto_renew,
-          daysLeft,
-          isExpiringSoon,
-          ...(isArtist
-            ? {
-                artist_id: s.artist_id,
-                artist_name: s.artist_name || s.artist_display_name || "Artist",
-              }
-            : {}),
-        };
-      };
-
-      return res.json({
-        success: true,
-        plan: mapSub(artist, true),           // legacy field for compatibility
-        artistPlan: mapSub(artist, true),
-        platformPlan: mapSub(platform, false),
-        artistSubCount,
-      });
-    } catch {
-      return res.status(500).json({ success: false, message: "Failed to fetch summary" });
-    }
-  })();
+    const artists = result.rows.map(mapSubscription);
+    return res.json({
+      success: true,
+      artists,
+      count: artists.filter((item: any) => item.status === "ACTIVE").length,
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch subscription status",
+    });
+  }
 });
 
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/details — comprehensive view for Account page
-// ────────────────────────────────────────────────────────
-router.get("/details", requireAuth, (req: any, res: any) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
-
-    try {
-      // 1. Platform Subscription
-      const platformRow = await pool.query(
-        `SELECT s.id, s.type, s.status, s.plan_type, s.start_date, s.next_billing_date,
-                s.end_date, s.auto_renew,
-                (SELECT cfg.price FROM platform_subscription_configs cfg WHERE cfg.is_active = true ORDER BY cfg.updated_at DESC LIMIT 1) as price,
-                (SELECT cfg.yearly_price FROM platform_subscription_configs cfg WHERE cfg.is_active = true ORDER BY cfg.updated_at DESC LIMIT 1) as yearly_price,
-                (SELECT cfg.currency FROM platform_subscription_configs cfg WHERE cfg.is_active = true ORDER BY cfg.updated_at DESC LIMIT 1) as currency,
-                (SELECT cfg.features FROM platform_subscription_configs cfg WHERE cfg.is_active = true ORDER BY cfg.updated_at DESC LIMIT 1) as features
-         FROM subscriptions s
-         WHERE s.user_id = $1 AND s.type = 'PLATFORM'
-         ORDER BY s.created_at DESC LIMIT 1`,
-        [userId]
-      );
-      const platform = platformRow.rows[0] || null;
-
-      // 2. Artist Subscriptions
-      const artistRows = await pool.query(
-        `SELECT s.id, s.type, s.artist_id, s.status, s.plan_type,
-                s.start_date, s.next_billing_date, s.end_date, s.auto_renew,
-                u.full_name as artist_name, u.name as artist_display_name, u.profile_image_url as artist_avatar,
-                u.subscription_price, u.subscription_features as features
-         FROM subscriptions s
-         LEFT JOIN users u ON s.artist_id = u.id
-         WHERE s.user_id = $1 AND s.type = 'ARTIST'
-         ORDER BY (CASE WHEN s.status = 'ACTIVE' THEN 1 ELSE 2 END), s.created_at DESC`,
-        [userId]
-      );
-
-      // 3. Complete Transaction History
-      const txRows = await pool.query(
-        `SELECT id, amount, currency, artist_name, status, date, razorpay_payment_id
-         FROM transactions
-         WHERE user_id = $1
-         ORDER BY date DESC LIMIT 100`,
-        [userId]
-      );
-
-      // Process artist subscriptions to add computed fields
-      const processedArtistSubs = artistRows.rows.map(s => {
-        const endDate = s.end_date ?? s.next_billing_date;
-        const now = new Date();
-        const daysLeft = s.next_billing_date 
-          ? Math.ceil((new Date(s.next_billing_date).getTime() - Date.now()) / (1000 * 86400))
-          : null;
-        
-        return {
-          ...s,
-          daysLeft,
-          isExpiringSoon: s.next_billing_date 
-            ? (new Date(s.next_billing_date).getTime() - Date.now()) < (48 * 3600 * 1000)
-            : false
-        };
-      });
-
-      // Determine correct price based on plan_type
-      const platformPrice = platform
-        ? (platform.plan_type === 'YEARLY'
-            ? (platform.yearly_price || platform.price)
-            : platform.price)
-        : null;
-
-      return res.json({
-        success: true,
-        platform: platform ? {
-          ...platform,
-          price: platformPrice,
-          features: platform.features || ["HD streaming", "Ad-free experience", "Unlimited skips"]
-        } : null,
-        artists: processedArtistSubs,
-        transactions: txRows.rows
-      });
-    } catch (err) {
-      console.error("[DETAILS] Failed to fetch sub details", err);
-      return res.status(500).json({ success: false, message: "Failed to fetch subscription details" });
-    }
-  })();
-});
-
-// ────────────────────────────────────────────────────────
-//  POST /subscriptions/  — legacy stub (kept for compat)
-// ────────────────────────────────────────────────────────
-router.post("/", requireAuth, (_req, res) => {
-  res.json({ success: true, message: "Use /create endpoint", status: "PENDING" });
-});
-
-// ────────────────────────────────────────────────────────
-//  GET /subscriptions/status  — consolidated view (platform + all artist subs)
-// ────────────────────────────────────────────────────────
-router.get("/status", requireAuth, (req: any, res: any) => {
-  (async () => {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
-
-    try {
-      const rows = await pool.query(
-        `SELECT s.id, s.type, s.artist_id, s.status, s.plan_type,
-                s.start_date, s.next_billing_date, s.end_date, s.auto_renew,
-                u.full_name as artist_name, u.name as artist_display_name
-         FROM subscriptions s
-         LEFT JOIN users u ON s.artist_id = u.id AND s.type = 'ARTIST'
-         WHERE s.user_id = $1
-         AND UPPER(COALESCE(s.status,'')) NOT IN ('EXPIRED', 'CANCELLED', 'REFUNDED')
-         ORDER BY s.type DESC, s.created_at DESC`,
-        [userId]
-      );
-
-      const subscriptions = rows.rows.map(s => {
-         const endDate = s.end_date ?? s.next_billing_date;
-         const now = new Date();
-         const isGrace = (s.status === 'GRACE' || s.status === 'PAST_DUE') && 
-                         s.next_billing_date && new Date(s.next_billing_date) > now;
-
-         return {
-            id: s.id,
-            type: s.type,
-            artist_id: s.artist_id,
-            artist_name: s.artist_name || s.artist_display_name || (s.type === 'PLATFORM' ? 'Platform' : 'Artist'),
-            status: s.status,
-            plan_type: s.plan_type,
-            expires_at: endDate,
-            grace_ends_at: s.next_billing_date,
-            is_grace: !!isGrace,
-            isExpiringSoon: s.next_billing_date ? (new Date(s.next_billing_date).getTime() - Date.now()) < (48 * 3600 * 1000) : false,
-            daysLeft: s.next_billing_date ? Math.ceil((new Date(s.next_billing_date).getTime() - Date.now()) / (1000 * 86400)) : null,
-            auto_renew: s.auto_renew
-         };
-      });
-
-      const platformSub = subscriptions.find(s => s.type === 'PLATFORM') || null;
-      const artistSubs = subscriptions.filter(s => s.type === 'ARTIST');
-
-      return res.json({
-        success: true,
-        platform: platformSub,
-        artists: artistSubs,
-        count: artistSubs.length
-      });
-    } catch (err) {
-      console.error("[STATUS] Failed to fetch subscription status", err);
-      return res.status(500).json({ success: false, message: "Failed to fetch subscription status" });
-    }
-  })();
-});
-
-// ────────────────────────────────────────────────────────
-//  Payment endpoints
-// ────────────────────────────────────────────────────────
-router.post("/order", requireAuth, (req, res) => createOrder(req as any, res));
-router.post("/confirm", requireAuth, (req, res) => confirmPayment(req as any, res));
-
-// Handle payment failure/cancellation - updates transaction status
-router.post("/payment-failed", requireAuth, (req, res) => {
-  (async () => {
-    try {
-      const userId = req.user?.id;
-      const { razorpay_order_id, reason } = req.body;
-      
-      console.log(`[PAYMENT-FAILED] Received: userId=${userId}, orderId=${razorpay_order_id}, reason=${reason || 'User cancelled'}`);
-      
-      if (!userId || !razorpay_order_id) {
-        console.log(`[PAYMENT-FAILED] Missing fields: userId=${userId}, orderId=${razorpay_order_id}`);
-        return res.status(400).json({ success: false, message: "Missing required fields" });
-      }
-      
-      // Update transaction status to FAILED
-      const result = await pool.query(
-        `UPDATE transactions 
-         SET status = 'FAILED', failure_reason = $1, updated_at = now()
-         WHERE razorpay_order_id = $2 AND user_id = $3
-         RETURNING id, status`,
-        [reason || 'User cancelled', razorpay_order_id, userId]
-      );
-      
-      console.log(`[PAYMENT-FAILED] Updated ${result.rowCount} transaction(s)`);
-      
-      // Log the failure
-      await pool.query(
-        `INSERT INTO subscription_audit_logs (user_id, event_type, metadata, created_at)
-         VALUES ($1, 'PAYMENT_FAILED', $2, now())`,
-        [userId, JSON.stringify({ order_id: razorpay_order_id, reason: reason || 'User cancelled' })]
-      );
-      
-      console.log(`[PAYMENT-FAILED] Audit log created`);
-      
-      return res.json({ success: true, message: "Payment failure recorded" });
-    } catch (err: any) {
-      console.error(`[PAYMENT-FAILED] Error: ${err.message}`);
-      return res.status(500).json({ success: false, message: err?.message || "Failed to record payment failure" });
-    }
-  })();
-});
-
-// DEPRECATED: This endpoint is not used by mobile app - mobile uses /confirm
-// Kept for backward compatibility with any web clients
-router.post("/verify", requireAuth, (req, res) => verifySubscription(req as any, res));
-
-// ────────────────────────────────────────────────────────
-//  Upsell & Conversion Tracking
-// ────────────────────────────────────────────────────────
 router.post("/upsell/track", requireAuth, trackUpsellAttempt);
 router.get("/upsell/status", requireAuth, getUpsellStatus);
 
-// ── NEW: Governance & Retention (Phase 1) ──────────────────────────
+// Explicit fixed-term semantics. No recurring Razorpay mandate exists in Phase 1.
 router.patch("/:id/toggle-auto-renew", requireAuth, toggleAutoRenew);
 router.post("/:id/cancel", requireAuth, cancelSubscription);
 
-// Mock endpoints (dev only)
-router.post("/mock-order", requireAuth, (req, res) => createOrder(req as any, res));
-router.post("/mock-verify", requireAuth, (req, res) => confirmPayment(req as any, res));
+// Keep parameter route after all named routes.
+router.get("/:id", requireAuth, (req, res) =>
+  getSubscriptionPurchaseStatus(req as any, res)
+);
 
 export default router;
