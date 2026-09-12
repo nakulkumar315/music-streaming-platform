@@ -324,12 +324,16 @@ model playback_history {
 }
 
 model playback_sessions {
-  id           Int      @id @default(autoincrement())
-  user_id      Int
-  content_id   Int
-  heartbeat_at DateTime @default(now()) @db.Timestamptz(6)
-  started_at   DateTime @default(now()) @db.Timestamptz(6)
+  id               Int       @id @default(autoincrement())
+  user_id          Int
+  content_id       Int
+  heartbeat_at     DateTime  @default(now()) @db.Timestamptz(6)
+  started_at       DateTime  @default(now()) @db.Timestamptz(6)
+  current_position Int       @default(0)
+  duration         Int       @default(0)
+  ended_at         DateTime? @db.Timestamptz(6)
 
   @@index([user_id], map: "idx_playback_sessions_user")
   @@index([heartbeat_at], map: "idx_playback_sessions_heartbeat")
+  @@index([user_id, heartbeat_at(sort: Desc)], map: "idx_playback_sessions_active_user")
 }

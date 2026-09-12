@@ -1,337 +1,243 @@
-/**
- * POST /api/v1/fan/stream/access - request playback URL via MediaAccessService.
- */
-
 import { Router } from "express";
-import { pool } from "../../common/db";
-import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
-import { requestPlaybackAccess } from "../../modules/media/media-access.service";
-import { getMediaConfig } from "../../config/media.config";
-import { resolveMediaIdentity } from "../../shared/media/media-asset-locator";
-import { mapStreamAccessError } from "./stream-access-error";
-import { logger } from "../../common/logger";
 import { requireAuth } from "../../common/auth/requireAuth";
+import { pool } from "../../common/db";
+import { logger } from "../../common/logger";
+import { getMediaConfig } from "../../config/media.config";
+import { requestPlaybackAccess } from "../media/media-access.service";
+import { isContentEligibleForPlayback } from "../media/media-policy.service";
+import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
+import { resolveMediaIdentity } from "../../shared/media/media-asset-locator";
+import {
+  heartbeatPlaybackSession,
+  terminatePlaybackSession,
+} from "../../shared/security/playback-session.service";
+import { mapStreamAccessError } from "./stream-access-error";
 
 const router = Router();
 
-router.post("/access", async (req: any, res: any) => {
-  const correlationId = req?.correlationId || "-";
-  const contentId = Number(req.body?.contentId);
-  const kindRaw = (req.body?.kind ?? "").toString().toLowerCase();
-  const kind = kindRaw === "video" ? "video" : kindRaw === "audio" ? "audio" : undefined;
-  
-  const qualityRaw = (req.body?.quality ?? "").toString();
-  const validQualities = ['144p', '240p', '360p', '480p', '720p', '1080p', 'Auto', 'SD', 'HD'];
-  const quality = validQualities.includes(qualityRaw) ? qualityRaw : undefined;
+function positiveInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
-  if (!Number.isFinite(contentId) || contentId <= 0) {
+router.post("/access", requireAuth, async (req: any, res: any) => {
+  const correlationId = req?.correlationId || "-";
+  const contentId = positiveInteger(req.body?.contentId);
+  const userId = positiveInteger(req.user?.id);
+  const kindRaw = String(req.body?.kind || "").trim().toLowerCase();
+  const kind = kindRaw === "video" ? "video" : kindRaw === "audio" ? "audio" : undefined;
+  const quality = String(req.body?.quality || "Auto").trim();
+
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
+  }
+  if (!contentId) {
     return res.status(400).json({
       success: false,
-      message: "contentId required",
-      correlationId
+      code: "INVALID_CONTENT_ID",
+      message: "contentId is required",
+      correlationId,
     });
   }
 
   try {
     const result = await requestPlaybackAccess({
       contentId,
-      userId: req.user?.id ?? null,
+      userId,
       kind,
       quality,
-      allowPreview: Boolean(req.body?.allowPreview)
+      correlationId,
     });
 
     const mediaCfg = getMediaConfig();
-    const configuredBase = (mediaCfg.appBaseUrl || "").replace(/\/+$/, "");
+    const configuredBase = String(mediaCfg.appBaseUrl || "").replace(/\/+$/, "");
     const requestBase = `${req.protocol}://${req.get("host")}`;
-    const streamRoute = (mediaCfg.localPrivateStreamRoute || "/media/stream").replace(/\/+$/, "");
+    const streamRoute = String(mediaCfg.localPrivateStreamRoute || "/media/stream").replace(/\/+$/, "");
 
-    const rawUrl = (result.playbackUrl ?? "").toString();
-    let playbackUrl = rawUrl;
-
-    // 1) If the strategy used APP_BASE_URL, rewrite it to current request host/port.
-    if (configuredBase && rawUrl.startsWith(configuredBase)) {
-      playbackUrl = `${requestBase}${rawUrl.slice(configuredBase.length)}`;
+    let playbackUrl = String(result.playbackUrl || "");
+    if (configuredBase && playbackUrl.startsWith(configuredBase)) {
+      playbackUrl = `${requestBase}${playbackUrl.slice(configuredBase.length)}`;
     }
 
-    // 2) If it's a local private stream URL, always return it rooted at request host/port.
-    // This avoids cases where APP_BASE_URL defaults to localhost:3000 which is not reachable by devices.
     try {
-      const u = new URL(playbackUrl);
-      if (u.pathname.startsWith(streamRoute)) {
-        playbackUrl = `${requestBase}${u.pathname}${u.search}`;
+      const parsed = new URL(playbackUrl);
+      if (parsed.pathname.startsWith(streamRoute)) {
+        playbackUrl = `${requestBase}${parsed.pathname}${parsed.search}`;
       }
     } catch {
-      // ignore invalid URL
+      throw new Error("Protected playback URL is invalid");
     }
 
     return res.json({
       success: true,
       mediaId: result.mediaId,
+      sessionId: result.sessionId,
       playbackUrl,
       expiresIn: result.expiresIn,
       contentType: result.contentType,
       contentLength: result.contentLength,
-      correlationId
+      correlationId,
     });
-  } catch (err: any) {
-    const mapped = mapStreamAccessError(err);
-    if (mapped.status >= 500) {
-      console.error("[stream/access] error", {
-        correlationId,
-        code: mapped.code,
-        message: mapped.message,
-        name: err?.name
-      });
-    } else {
-      console.warn("[stream/access] rejected", {
-        correlationId,
-        code: mapped.code,
-        message: mapped.message
-      });
-    }
+  } catch (error: any) {
+    const mapped = mapStreamAccessError(error);
+    const logPayload = {
+      correlationId,
+      userId,
+      contentId,
+      code: mapped.code,
+      error: error?.message,
+    };
+    if (mapped.status >= 500) logger.error(logPayload, "[stream/access] failed");
+    else logger.warn(logPayload, "[stream/access] rejected");
+
     return res.status(mapped.status).json({
       success: false,
       code: mapped.code,
       message: mapped.message,
-      correlationId
+      correlationId,
     });
   }
 });
 
-/**
- * POST /api/v1/fan/stream/heartbeat
- * Keeps a playback session alive. Client should call this every 30-60s.
- */
+/** Client should refresh the exact issued session every 30-60 seconds. */
 router.post("/heartbeat", requireAuth, async (req: any, res: any) => {
-  const userId = req.user?.id;
-  const contentId = Number(req.body?.contentId);
-  const currentPosition = Number(req.body?.currentPosition ?? 0);
-  const duration = Number(req.body?.duration ?? 0);
   const correlationId = req?.correlationId || "-";
+  const userId = positiveInteger(req.user?.id);
+  const sessionId = positiveInteger(req.body?.sessionId);
+  const contentId = positiveInteger(req.body?.contentId);
 
-  if (!userId) {
-    return res.status(401).json({ success: false, message: "Unauthorized" });
-  }
-
-  if (!Number.isFinite(contentId) || contentId <= 0) {
-    return res.status(400).json({ success: false, message: "contentId required" });
+  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+  if (!sessionId || !contentId) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_PLAYBACK_SESSION",
+      message: "sessionId and contentId are required",
+      correlationId,
+    });
   }
 
   try {
-    // Try to update existing session first - ONLY if it's not stale (last heartbeat within 5 mins)
-    const result = await pool.query(
-      `UPDATE playback_sessions 
-       SET heartbeat_at = now(), current_position = $3, duration = $4
-       WHERE user_id = $1 AND content_id = $2 
-       AND heartbeat_at > now() - INTERVAL '5 minutes'
-       RETURNING id, heartbeat_at`,
-      [userId, contentId, currentPosition, duration]
-    );
+    const lastSeen = await heartbeatPlaybackSession({
+      sessionId,
+      userId,
+      contentId,
+      currentPosition: req.body?.currentPosition,
+      duration: req.body?.duration,
+    });
 
-    let lastSeen = new Date();
-    // If no active session exists (or it was stale), create one
-    if (result.rows.length === 0) {
-      const insertResult = await pool.query(
-        `INSERT INTO playback_sessions (user_id, content_id, started_at, heartbeat_at, current_position, duration)
-         VALUES ($1, $2, now(), now(), $3, $4)
-         RETURNING heartbeat_at`,
-        [userId, contentId, currentPosition, duration]
-      );
-      
-      if (insertResult.rows[0]?.heartbeat_at) {
-        lastSeen = insertResult.rows[0].heartbeat_at;
-      }
-
-      // Record a play for analytics (each new session = 1 play)
-      await pool.query(
-        `INSERT INTO content_plays (content_id, user_id, created_at)
-         VALUES ($1, $2, now())`,
-        [contentId, userId]
-      ).then(() => {
-        logger.info({ userId, contentId }, "[ANALYTICS] Play recorded successfully");
-      }).catch(err => {
-        logger.error({ userId, contentId, error: err.message }, "[ANALYTICS] Failed to record content play");
-        // Don't fail the heartbeat if play recording fails (non-critical)
+    if (!lastSeen) {
+      return res.status(409).json({
+        success: false,
+        code: "PLAYBACK_SESSION_EXPIRED",
+        message: "Playback session is no longer active. Request playback access again.",
+        correlationId,
       });
-    } else {
-      if (result.rows[0]?.heartbeat_at) {
-        lastSeen = result.rows[0].heartbeat_at;
-      }
-    }
-
-    // Increment monthly listening stats (30 seconds per heartbeat)
-    const d = new Date();
-    const year = d.getFullYear();
-    const month = d.getMonth() + 1;
-
-    try {
-      await pool.query(
-        `INSERT INTO user_listening_stats (user_id, year, month, total_seconds)
-         VALUES ($1, $2, $3, 30)
-         ON CONFLICT (user_id, year, month)
-         DO UPDATE SET total_seconds = user_listening_stats.total_seconds + 30`,
-        [userId, year, month]
-      );
-    } catch (err: any) {
-      logger.error({ userId, contentId, error: err.message }, "[HEARTBEAT] Failed to update stats");
-      // Don't fail the entire heartbeat if stats fails (non-critical)
     }
 
     return res.json({
       success: true,
-      currentPosition,
-      duration,
+      sessionId,
       lastSeen: lastSeen.toISOString(),
-      correlationId
+      correlationId,
     });
-  } catch (err: any) {
-    logger.error({ userId, contentId, error: err.message, correlationId }, "[HEARTBEAT] Failed");
-    return res.status(500).json({ success: false, message: "Internal server error" });
+  } catch (error: any) {
+    logger.error({ error, userId, sessionId, contentId, correlationId }, "[stream/heartbeat] failed");
+    return res.status(500).json({ success: false, message: "Heartbeat failed", correlationId });
   }
 });
 
+/** Explicitly revokes the exact playback session. */
+router.post("/terminate", requireAuth, async (req: any, res: any) => {
+  const correlationId = req?.correlationId || "-";
+  const userId = positiveInteger(req.user?.id);
+  const sessionId = positiveInteger(req.body?.sessionId);
+  const contentId = positiveInteger(req.body?.contentId);
+
+  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+  if (!sessionId || !contentId) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_PLAYBACK_SESSION",
+      message: "sessionId and contentId are required",
+      correlationId,
+    });
+  }
+
+  try {
+    const terminated = await terminatePlaybackSession({ sessionId, userId, contentId });
+    return res.json({ success: true, terminated, correlationId });
+  } catch (error: any) {
+    logger.error({ error, userId, sessionId, contentId, correlationId }, "[stream/terminate] failed");
+    return res.status(500).json({ success: false, message: "Failed to terminate playback", correlationId });
+  }
+});
+
+/**
+ * Fan artwork delivery. Thumbnails may be delivered without a playback session,
+ * but only for approved/playable content and only through explicit provider
+ * identity; raw legacy media URL fallbacks are intentionally not used.
+ */
 router.get("/thumbnail/:contentId", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
-  const contentId = Number(req.params?.contentId);
-
-  if (!Number.isFinite(contentId) || contentId <= 0) {
+  const contentId = positiveInteger(req.params?.contentId);
+  if (!contentId) {
     return res.status(400).json({ success: false, message: "Invalid content id", correlationId });
   }
 
   try {
     const result = await pool.query(
-      `SELECT thumbnail_storage_key, thumbnail_url, storage_provider, thumbnail_provider_asset_id
-       FROM content_items
-       WHERE id = $1
-       LIMIT 1`,
+      `SELECT id, status, lifecycle_state, is_approved, storage_provider,
+              thumbnail_storage_key, thumbnail_provider_asset_id
+         FROM content_items
+        WHERE id = $1
+        LIMIT 1`,
       [contentId]
-    ).catch(async (err: any) => {
-      if (err?.code === "42703") {
-        return pool.query(
-          `SELECT thumbnail_storage_key, thumbnail_url, storage_provider
-           FROM content_items
-           WHERE id = $1
-           LIMIT 1`,
-          [contentId]
-        );
-      }
-      throw err;
-    });
-    const row = result.rows?.[0];
-    const storageProvider = (row?.storage_provider as string | null) ?? "local";
+    );
+    const row = result.rows[0];
+    if (!row) return res.status(404).json({ success: false, message: "Thumbnail not found", correlationId });
+
+    const status = String(row.status || row.lifecycle_state || "DRAFT").toUpperCase();
+    if (!isContentEligibleForPlayback(status, Boolean(row.is_approved))) {
+      return res.status(404).json({ success: false, message: "Thumbnail not available", correlationId });
+    }
+
+    const storageProvider = String(row.storage_provider || "").trim().toLowerCase();
+    if (!storageProvider) {
+      return res.status(409).json({ success: false, message: "Thumbnail storage is not configured", correlationId });
+    }
+
     const identity = resolveMediaIdentity(row, "thumbnail");
     const storageKey = identity.internalStorageKey;
     const providerAssetId = identity.providerAssetId;
+    const storage = getStorageProviderByName(storageProvider as any);
 
-    console.log(
-      `[stream/thumbnail] contentId=${contentId}, storageProvider=${storageProvider}, storageKey=${storageKey?.substring(0, 50)}..., providerAssetId=${providerAssetId?.substring(0, 50)}...`
-    );
-
-    if (!storageKey && !providerAssetId && !row?.thumbnail_url) {
-      return res.status(404).json({ success: false, message: "Thumbnail not found", correlationId });
-    }
-
-    // For local/firebase/s3 storage (or old content), stream the content
-    // This ensures backward compatibility with old local files
-    // Use the per-row provider, not the global one
-    console.log(`[stream/thumbnail] Using provider ${storageProvider} for streaming`);
-    
-    try {
-      const storage = getStorageProviderByName(storageProvider as any);
-      
-      // For Cloudinary, always use signed URLs - never stream
-      if (storageProvider === "cloudinary" && providerAssetId && storage.getPublicObjectUrl) {
-        const thumbnailUrl = await storage.getPublicObjectUrl({
-          providerAssetId,
-          mediaType: "thumbnail"
-        });
-        if (thumbnailUrl) {
-          console.log(`[stream/thumbnail] Generated Cloudinary signed URL: ${thumbnailUrl.substring(0, 80)}...`);
-          return res.redirect(302, thumbnailUrl);
-        }
-      }
-
-      // For other providers, try public URL
-      if (providerAssetId && storage.getPublicObjectUrl) {
-        const thumbnailUrl = await storage.getPublicObjectUrl({
-          providerAssetId,
-          mediaType: "thumbnail"
-        });
-        if (thumbnailUrl) {
-          console.log(`[stream/thumbnail] Generated provider thumbnail URL: ${thumbnailUrl.substring(0, 80)}...`);
-          return res.redirect(302, thumbnailUrl);
-        }
-      }
-
-      // If DB already stores direct URL, redirect as legacy fallback.
-      const directUrl = (row?.thumbnail_url as string | null) ?? null;
-      const isFullUrl = Boolean(directUrl && (directUrl.startsWith("http://") || directUrl.startsWith("https://")));
-      console.log(`[stream/thumbnail] isFullUrl=${isFullUrl}, storageProvider=${storageProvider}`);
-      if (isFullUrl) {
-        console.log(`[stream/thumbnail] Redirecting to full URL: ${directUrl!.substring(0, 80)}...`);
-        return res.redirect(302, directUrl!);
-      }
-
-      // Cloudinary should never reach here - if it does, return error
-      if (storageProvider === "cloudinary") {
-        return res.status(404).json({
-          success: false,
-          message: "Cloudinary thumbnail not available. Missing provider asset ID.",
-          correlationId
-        });
-      }
-
-      if (!storageKey) {
-        return res.status(409).json({
-          success: false,
-          message: `Thumbnail mapping incomplete for provider ${storageProvider}. Repair this content row.`,
-          correlationId
-        });
-      }
-
-      const meta = await storage.getObjectMetadata(storageKey);
-      const read = await storage.openReadStream({ storageKey });
-
-      if (meta?.contentType) {
-        res.setHeader("Content-Type", meta.contentType);
-      } else if (read?.contentType) {
-        res.setHeader("Content-Type", read.contentType);
-      }
-      if (meta?.contentLength !== undefined) {
-        res.setHeader("Content-Length", String(meta.contentLength));
-      } else if (read?.contentLength !== undefined) {
-        res.setHeader("Content-Length", String(read.contentLength));
-      }
-
-      res.setHeader("Cache-Control", "public, max-age=300");
-      read.stream.on("error", () => {
-        try {
-          res.end();
-        } catch {
-          // ignore
-        }
+    if (providerAssetId && storage.getPublicObjectUrl) {
+      const url = await storage.getPublicObjectUrl({
+        providerAssetId,
+        mediaType: "thumbnail",
       });
-      return read.stream.pipe(res);
-    } catch (streamErr: any) {
-      console.error(`[stream/thumbnail] Streaming failed for ${storageProvider}:`, streamErr.message);
-      // Return 404 for non-Cloudinary providers that fail (e.g., Firebase PEM errors)
-      return res.status(404).json({ 
-        success: false, 
-        message: `Thumbnail not available from ${storageProvider} storage`, 
-        correlationId 
-      });
+      if (url) return res.redirect(302, url);
     }
-  } catch (err: any) {
-    const isNotFound =
-      err?.message?.includes("No such object") ||
-      err?.message?.includes("Not Found") ||
-      err?.code === 404;
-    if (isNotFound) {
-      return res.status(404).json({ success: false, message: "Thumbnail not found in storage", correlationId });
+
+    if (!storageKey) {
+      return res.status(404).json({ success: false, message: "Thumbnail mapping incomplete", correlationId });
     }
-    console.error("[stream/thumbnail] error", { contentId, correlationId }, err);
-    return res.status(500).json({ success: false, message: "Failed to load thumbnail", correlationId });
+
+    const metadata = await storage.getObjectMetadata(storageKey);
+    const read = await storage.openReadStream({ storageKey });
+    const contentType = metadata?.contentType || read?.contentType;
+    const contentLength = metadata?.contentLength ?? read?.contentLength;
+    if (contentType) res.setHeader("Content-Type", contentType);
+    if (contentLength !== undefined) res.setHeader("Content-Length", String(contentLength));
+    res.setHeader("Cache-Control", "public, max-age=300");
+    read.stream.on("error", () => {
+      if (!res.headersSent) res.status(502).end();
+      else res.end();
+    });
+    return read.stream.pipe(res);
+  } catch (error: any) {
+    logger.error({ error, contentId, correlationId }, "[stream/thumbnail] failed");
+    return res.status(502).json({ success: false, message: "Failed to load thumbnail", correlationId });
   }
 });
 

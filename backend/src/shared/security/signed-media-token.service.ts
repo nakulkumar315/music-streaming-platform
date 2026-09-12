@@ -1,6 +1,5 @@
 /**
- * Short-lived signed media tokens. Section 20.
- * JWT with mediaId, userId, exp, purpose. Tamper-proof, secret from env.
+ * Short-lived, session-bound media tokens.
  */
 
 import jwt from "jsonwebtoken";
@@ -12,18 +11,37 @@ const PURPOSE_PLAYBACK = "playback";
 export interface SignedMediaTokenPayload {
   mediaId: number;
   userId: number;
+  sessionId: number;
   purpose: string;
   exp: number;
   iat: number;
 }
 
-export function createPlaybackToken(mediaId: number, userId: number, expiresInSeconds: number): string {
+function positiveInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function createPlaybackToken(
+  mediaId: number,
+  userId: number,
+  sessionId: number,
+  expiresInSeconds: number
+): string {
+  const validMediaId = positiveInteger(mediaId);
+  const validUserId = positiveInteger(userId);
+  const validSessionId = positiveInteger(sessionId);
+  if (!validMediaId || !validUserId || !validSessionId) {
+    throw new MediaInvalidTokenException("Invalid playback token subject");
+  }
+
   const config = getMediaConfig();
   return jwt.sign(
     {
-      mediaId,
-      userId,
-      purpose: PURPOSE_PLAYBACK
+      mediaId: validMediaId,
+      userId: validUserId,
+      sessionId: validSessionId,
+      purpose: PURPOSE_PLAYBACK,
     },
     config.mediaSignedTokenSecret,
     { expiresIn: expiresInSeconds }
@@ -34,30 +52,34 @@ export function verifyPlaybackToken(token: string): SignedMediaTokenPayload {
   const config = getMediaConfig();
   try {
     const decoded = jwt.verify(token, config.mediaSignedTokenSecret) as any;
-    const mediaId = Number(decoded?.mediaId);
-    const userId = Number(decoded?.userId);
-    const hasUserId = decoded != null && Object.prototype.hasOwnProperty.call(decoded, "userId");
+    const mediaId = positiveInteger(decoded?.mediaId);
+    const userId = positiveInteger(decoded?.userId);
+    const sessionId = positiveInteger(decoded?.sessionId);
+
     if (
       decoded?.purpose !== PURPOSE_PLAYBACK ||
-      !Number.isFinite(mediaId) ||
-      mediaId <= 0 ||
-      !hasUserId ||
-      !Number.isFinite(userId) ||
-      userId < 0
+      !mediaId ||
+      !userId ||
+      !sessionId ||
+      !Number.isFinite(Number(decoded?.exp)) ||
+      !Number.isFinite(Number(decoded?.iat))
     ) {
       throw new MediaInvalidTokenException("Invalid token payload");
     }
+
     return {
       mediaId,
       userId,
-      purpose: decoded.purpose,
-      exp: decoded.exp,
-      iat: decoded.iat
+      sessionId,
+      purpose: PURPOSE_PLAYBACK,
+      exp: Number(decoded.exp),
+      iat: Number(decoded.iat),
     };
-  } catch (err: any) {
-    if (err?.name === "TokenExpiredError") {
+  } catch (error: any) {
+    if (error instanceof MediaInvalidTokenException) throw error;
+    if (error?.name === "TokenExpiredError") {
       throw new MediaInvalidTokenException("Playback token expired");
     }
-    throw new MediaInvalidTokenException(err?.message || "Invalid token");
+    throw new MediaInvalidTokenException("Invalid playback token");
   }
 }

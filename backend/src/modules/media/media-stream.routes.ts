@@ -1,19 +1,21 @@
-/**
- * GET /media/stream/:mediaId?token=...
- * Validates signed token, streams file with Range support (Accept-Ranges, Content-Range).
- * Section 21: seekable playback for local/private stream.
- */
-
 import { Router, Request, Response } from "express";
-import { verifyPlaybackToken } from "../../shared/security/signed-media-token.service";
-import { getContentForAccess, validateQualityAccess } from "../../shared/security/media-authz.service";
-import { getStorageService } from "../../shared/storage/services/storage.service";
-import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
-import { getStorageConfig } from "../../config/storage.config";
+import { getMediaConfig } from "../../config/media.config";
 import { generatePlaybackAccess } from "../../shared/delivery/services/media-delivery.service";
 import { resolveMediaIdentity } from "../../shared/media/media-asset-locator";
+import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
+import {
+  checkMediaEntitlement,
+  getContentForAccess,
+  validateQualityAccess,
+  type VisibilityType,
+} from "../../shared/security/media-authz.service";
+import { isPlaybackSessionActive } from "../../shared/security/playback-session.service";
+import { verifyPlaybackToken } from "../../shared/security/signed-media-token.service";
 import { MediaInvalidTokenException } from "../../shared/exceptions/media.exception";
-import { MediaNotFoundException } from "../../shared/exceptions/media.exception";
+import {
+  isContentEligibleForPlayback,
+  normalizeVisibilityForPlayback,
+} from "./media-policy.service";
 
 const router = Router();
 
@@ -29,164 +31,190 @@ function inferContentTypeFromKey(storageKey: string | null | undefined): string 
 
 router.get("/:mediaId", async (req: Request, res: Response) => {
   const mediaId = Number(req.params.mediaId);
-  const token = (req.query.token as string)?.trim();
-  const kind = ((req.query.kind as string) || "audio").toString().toLowerCase();
+  const token = String(req.query.token || "").trim();
+  const kindRaw = String(req.query.kind || "audio").trim().toLowerCase();
+  const kind: "audio" | "video" = kindRaw === "video" ? "video" : "audio";
 
-  if (!token) {
-    console.warn("[media/stream] missing token", { mediaId, kind });
-    return res.status(401).json({ success: false, message: "Token required" });
-  }
-  if (!Number.isFinite(mediaId) || mediaId <= 0) {
+  if (!Number.isSafeInteger(mediaId) || mediaId <= 0) {
     return res.status(400).json({ success: false, message: "Invalid media id" });
   }
+  if (!token) {
+    return res.status(401).json({ success: false, message: "Playback token required" });
+  }
 
-  let payload: { mediaId: number; userId: number };
+  let payload;
   try {
     payload = verifyPlaybackToken(token);
-  } catch (err: any) {
-    if (err instanceof MediaInvalidTokenException) {
-      console.warn("[media/stream] invalid token", { mediaId, kind, error: err?.message });
-      return res.status(401).json({ success: false, message: err.message });
-    }
-    console.warn("[media/stream] token verification failed", { mediaId, kind, error: err?.message });
-    return res.status(401).json({ success: false, message: "Invalid token" });
+  } catch (error: any) {
+    const message =
+      error instanceof MediaInvalidTokenException ? error.message : "Invalid playback token";
+    return res.status(401).json({ success: false, message });
   }
 
   if (payload.mediaId !== mediaId) {
-    console.warn("[media/stream] token media mismatch", {
-      mediaId,
-      payloadMediaId: payload.mediaId,
-      kind
-    });
-    return res.status(403).json({ success: false, message: "Token does not match media" });
+    return res.status(403).json({ success: false, message: "Playback token media mismatch" });
   }
 
-  const content = await getContentForAccess(mediaId);
-  if (!content) {
-    return res.status(404).json({ success: false, message: "Media not found" });
-  }
+  try {
+    const sessionActive = await isPlaybackSessionActive(
+      payload.sessionId,
+      payload.userId,
+      mediaId
+    );
+    if (!sessionActive) {
+      return res.status(401).json({
+        success: false,
+        code: "PLAYBACK_SESSION_EXPIRED",
+        message: "Playback session is no longer active",
+      });
+    }
 
-  const resolvedKind: "audio" | "video" = kind === "video" ? "video" : "audio";
-  const identity = resolveMediaIdentity(content as any, resolvedKind);
-  const storageKey = identity.internalStorageKey;
-  const providerAssetId = identity.providerAssetId;
-  const storageProvider = (content.storage_provider || "local").toString().toLowerCase();
+    const content = await getContentForAccess(mediaId);
+    if (!content) {
+      return res.status(404).json({ success: false, message: "Media not found" });
+    }
 
-  if (!storageKey && storageProvider !== "cloudinary") {
-    return res.status(404).json({ success: false, message: "Media not available for stream" });
-  }
-  if (storageProvider === "cloudinary" && !providerAssetId) {
-    return res.status(409).json({
-      success: false,
-      message: "Cloudinary provider asset identity missing for media. Repair this content mapping."
-    });
-  }
+    const status = String(content.status || content.lifecycle_state || "DRAFT").toUpperCase();
+    if (!isContentEligibleForPlayback(status, Boolean(content.is_approved))) {
+      return res.status(409).json({ success: false, message: "Media is not approved for playback" });
+    }
 
-  // For Cloudinary, generate a signed URL and redirect
-  // Only use Cloudinary if the row explicitly has storage_provider='cloudinary'
-  // Old content with storage_provider='local' or NULL will use streaming below
-  if (storageProvider === "cloudinary") {
-    try {
-      const requestedQuality = (req.query.quality as string) || undefined;
-      const qCheck = await validateQualityAccess(payload.userId, requestedQuality);
+    const visibility = normalizeVisibilityForPlayback(content.visibility || "PROTECTED");
+    if (!visibility) {
+      return res.status(403).json({ success: false, message: "Media visibility is invalid" });
+    }
 
-      if (requestedQuality === "HD" && !qCheck.authorized) {
-        console.warn("[media/stream] unauthorized HD redirect rejected", { mediaId, userId: payload.userId });
-        return res.status(403).json({ success: false, message: "Upgrade to Premium to watch in high quality." });
+    const entitlement = await checkMediaEntitlement(
+      payload.userId,
+      Number(content.artist_id),
+      visibility as VisibilityType,
+      Boolean(content.subscription_required)
+    );
+    if (!entitlement.allowed) {
+      return res.status(403).json({
+        success: false,
+        code: "ENTITLEMENT_REVOKED",
+        message: entitlement.reason || "Playback access revoked",
+      });
+    }
+
+    const storageProvider = String(content.storage_provider || "").trim().toLowerCase();
+    const identity = resolveMediaIdentity(content, kind);
+    const storageKey = identity.internalStorageKey;
+    const providerAssetId = identity.providerAssetId;
+    const quality = await validateQualityAccess(
+      payload.userId,
+      String(req.query.quality || "Auto")
+    );
+
+    const tokenRemainingSeconds = Math.max(
+      1,
+      payload.exp - Math.floor(Date.now() / 1000)
+    );
+    const providerTtlSeconds = Math.min(120, tokenRemainingSeconds);
+
+    if (["cloudinary", "s3", "firebase"].includes(storageProvider)) {
+      if (storageProvider === "cloudinary" && !providerAssetId) {
+        return res.status(409).json({ success: false, message: "Provider asset mapping is incomplete" });
+      }
+      if (storageProvider !== "cloudinary" && !storageKey) {
+        return res.status(409).json({ success: false, message: "Storage mapping is incomplete" });
       }
 
-      const accessResult = await generatePlaybackAccess({
+      const access = await generatePlaybackAccess({
         mediaId,
-        storageProvider: "cloudinary",
-        storageKey: "",
+        storageProvider,
+        storageKey: storageKey || "",
         providerAssetId: providerAssetId || undefined,
-        kind: resolvedKind,
+        kind,
         contentType: content.mime_type || undefined,
         contentLength: content.file_size_bytes || undefined,
-        visibility: (content.visibility || "PROTECTED") as any,
+        visibility,
         userId: payload.userId,
-        expiresInSeconds: 300,
+        expiresInSeconds: providerTtlSeconds,
         token,
-        quality: qCheck.quality
+        quality: quality.quality,
       });
-      
-      if (accessResult?.playbackUrl) {
-        return res.redirect(302, accessResult.playbackUrl);
+
+      if (!access.playbackUrl) {
+        return res.status(502).json({ success: false, message: "Provider playback URL unavailable" });
       }
-    } catch (err: any) {
-      console.error("[media/stream] Cloudinary playback error", { mediaId, error: err?.message });
-      return res.status(502).json({
-        success: false,
-        message: "Cloudinary playback URL generation failed"
-      });
+      res.setHeader("Cache-Control", "private, no-store");
+      return res.redirect(302, access.playbackUrl);
     }
-  }
 
-  // For local storage (old content), stream directly
-  // This ensures backward compatibility with old local files
-  if (storageProvider !== "local" && storageProvider !== "cloudinary") {
-    return res.status(400).json({
-      success: false,
-      message: "This endpoint is for local stream only; use the playback URL from /stream/access"
-    });
-  }
-
-  // Use the per-row provider for local storage, not the global one
-  const storage = storageProvider === "local"
-    ? getStorageProviderByName("local")
-    : getStorageService();
-  let totalLength: number;
-  let contentType: string;
-
-  try {
-    const meta = await storage.getObjectMetadata(storageKey);
-    if (!meta) {
-      return res.status(404).json({ success: false, message: "File not found" });
+    if (storageProvider !== "local") {
+      return res.status(409).json({ success: false, message: "Unsupported media storage provider" });
     }
-    totalLength = meta.contentLength ?? 0;
-    const inferred = inferContentTypeFromKey(storageKey);
-    const fromMeta = meta.contentType || "";
-    contentType = fromMeta && fromMeta !== "application/octet-stream" ? fromMeta : inferred || "application/octet-stream";
-  } catch (err) {
-    return res.status(500).json({ success: false, message: "Failed to get media" });
-  }
+    if (!storageKey) {
+      return res.status(409).json({ success: false, message: "Local media storage key missing" });
+    }
 
-  const rangeHeader = req.headers.range;
-  let start = 0;
-  let end = totalLength - 1;
-  let statusCode = 200;
+    const storage = getStorageProviderByName("local");
+    const metadata = await storage.getObjectMetadata(storageKey);
+    if (!metadata) {
+      return res.status(404).json({ success: false, message: "Media file not found" });
+    }
 
-  if (rangeHeader) {
-    const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
-    if (match) {
-      start = match[1] ? parseInt(match[1], 10) : 0;
-      end = match[2] ? parseInt(match[2], 10) : totalLength - 1;
-      if (end >= totalLength) end = totalLength - 1;
+    const totalLength = Number(metadata.contentLength || 0);
+    if (!Number.isSafeInteger(totalLength) || totalLength <= 0) {
+      return res.status(502).json({ success: false, message: "Invalid media metadata" });
+    }
+
+    const inferredType = inferContentTypeFromKey(storageKey);
+    const contentType =
+      metadata.contentType && metadata.contentType !== "application/octet-stream"
+        ? metadata.contentType
+        : inferredType || content.mime_type || "application/octet-stream";
+
+    let start = 0;
+    let end = totalLength - 1;
+    let statusCode = 200;
+    const rangeHeader = req.headers.range;
+
+    if (rangeHeader) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+      if (!match) {
+        res.setHeader("Content-Range", `bytes */${totalLength}`);
+        return res.status(416).end();
+      }
+      start = match[1] ? Number(match[1]) : 0;
+      end = match[2] ? Number(match[2]) : totalLength - 1;
+      if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start < 0 ||
+        end < start ||
+        start >= totalLength
+      ) {
+        res.setHeader("Content-Range", `bytes */${totalLength}`);
+        return res.status(416).end();
+      }
+      end = Math.min(end, totalLength - 1);
       statusCode = 206;
     }
-  }
 
-  res.setHeader("Content-Type", contentType);
-  res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "private, no-cache");
-  res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Content-Disposition", "inline");
 
-  if (statusCode === 206) {
-    const contentLength = end - start + 1;
-    res.setHeader("Content-Length", contentLength);
-    res.setHeader("Content-Range", `bytes ${start}-${end}/${totalLength}`);
-    res.status(206);
-  } else {
-    res.setHeader("Content-Length", totalLength);
-  }
-
-  try {
-    const { stream } = await storage.openReadStream({ storageKey, start, end });
-    stream.pipe(res);
-  } catch (err) {
-    if (!res.headersSent) {
-      res.status(500).json({ success: false, message: "Stream failed" });
+    if (statusCode === 206) {
+      res.status(206);
+      res.setHeader("Content-Length", String(end - start + 1));
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${totalLength}`);
+    } else {
+      res.setHeader("Content-Length", String(totalLength));
     }
+
+    const read = await storage.openReadStream({ storageKey, start, end });
+    read.stream.on("error", () => {
+      if (!res.headersSent) res.status(502).end();
+      else res.end();
+    });
+    return read.stream.pipe(res);
+  } catch (error) {
+    return res.status(502).json({ success: false, message: "Protected media delivery failed" });
   }
 });
 

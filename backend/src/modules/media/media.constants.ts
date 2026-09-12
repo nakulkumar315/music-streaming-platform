@@ -1,5 +1,5 @@
 /**
- * Media lifecycle and visibility constants. Section 11 & 12.
+ * Media lifecycle and visibility constants.
  */
 
 export const MEDIA_STATUS = {
@@ -11,21 +11,23 @@ export const MEDIA_STATUS = {
   REJECTED: "REJECTED",
   TAKEDOWN: "TAKEDOWN",
   DELETED: "DELETED",
-  BLOCKED: "BLOCKED"
+  BLOCKED: "BLOCKED",
 } as const;
 
+/**
+ * Transitional production-playable states while content lifecycle naming is
+ * consolidated. PROCESSING is intentionally excluded.
+ */
 export const PLAYABLE_STATUSES = new Set([
   MEDIA_STATUS.READY,
   "PUBLISHED",
-  "PROCESSING", // Allow playback during processing (for development without Redis)
-  // Legacy lifecycle used by existing rows in this project.
-  "APPROVED"
+  "APPROVED",
 ]);
 
 export const VISIBILITY = {
   PUBLIC: "PUBLIC",
   PROTECTED: "PROTECTED",
-  PRIVATE_INTERNAL: "PRIVATE_INTERNAL"
+  PRIVATE_INTERNAL: "PRIVATE_INTERNAL",
 } as const;
 
 export type MediaStatus = (typeof MEDIA_STATUS)[keyof typeof MEDIA_STATUS];
