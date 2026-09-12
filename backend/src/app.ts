@@ -11,6 +11,7 @@ import { redis } from "./common/redis";
 import { logger, httpLogger } from "./common/logger";
 import { initSentry, captureError } from "./common/sentry";
 import { globalLimiter } from "./common/security/rateLimit";
+import { requireAuth, requireVerifiedArtist } from "./common/auth/requireAuth";
 import { validateEnv } from "./config/env.validation";
 import fanRoutes from "./routes/fan";
 import artistRoutes from "./routes/artist";
@@ -158,6 +159,23 @@ app.use("/api/v1/fan", fanRoutes);
 // artist router so legacy handlers cannot bypass the canonical session model.
 app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
 app.use("/api/v1/artist/update-password", artistSecurityRoutes);
+
+// Pending/rejected artists may still access onboarding, appeal, account-state
+// and password-recovery surfaces. Business dashboard surfaces require the
+// current DB account to be an approved/verified ARTIST; the web UI is not a
+// security boundary.
+app.use(
+  [
+    "/api/v1/artist/dashboard",
+    "/api/v1/artist/pricing",
+    "/api/v1/artist/analytics",
+    "/api/v1/artist/channel-preview",
+    "/api/v1/artist/uploads",
+  ],
+  requireAuth,
+  requireVerifiedArtist
+);
+
 app.use("/api/v1/artist", artistRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/auth", authRoutes);
