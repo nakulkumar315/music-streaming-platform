@@ -122,8 +122,16 @@ export class AuthService {
     return { success: true };
   }
 
-  async removeSession(userId: number, deviceId: string) {
-    await SessionService.revokeDeviceSession(userId, deviceId);
+  async listSessions(userId: number, currentSessionId: number) {
+    return SessionService.listSessions(userId, currentSessionId);
+  }
+
+  async revokeSession(userId: number, sessionId: number) {
+    return SessionService.revokeSession(userId, sessionId);
+  }
+
+  async logoutAll(userId: number) {
+    await SessionService.revokeAllSessions(userId);
     return { success: true };
   }
 }
