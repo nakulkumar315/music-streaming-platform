@@ -1,6 +1,7 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { Response } from "express";
+import { normalizeDeviceId, SessionService } from "../../common/auth/session.service";
 import { pool } from "../../common/db";
 import { AuditService } from "../../shared/audit/audit.service";
 
@@ -8,14 +9,13 @@ function requestDeviceId(req: any) {
   const bodyValue = req.body?.deviceId;
   const headerValue = req.headers?.["x-device-id"];
   const candidate = bodyValue ?? (Array.isArray(headerValue) ? headerValue[0] : headerValue);
-  return String(candidate || "").trim();
+  return normalizeDeviceId(String(candidate || ""));
 }
 
 export async function updatePasswordAndRotateSession(req: any, res: Response) {
   const userId = Number(req.user?.id);
   const correlationId = req?.correlationId || "-";
   const { oldPassword, newPassword } = req.body ?? {};
-  const deviceId = requestDeviceId(req);
   const secret = process.env.JWT_SECRET;
 
   if (!userId) {
@@ -50,10 +50,13 @@ export async function updatePasswordAndRotateSession(req: any, res: Response) {
     });
   }
 
-  if (!deviceId || deviceId.length > 255) {
+  let deviceId: string;
+  try {
+    deviceId = requestDeviceId(req);
+  } catch (error: any) {
     return res.status(400).json({
       success: false,
-      code: "DEVICE_ID_REQUIRED",
+      code: error?.code || "DEVICE_ID_REQUIRED",
       message: "Unable to identify this device",
     });
   }
@@ -71,6 +74,9 @@ export async function updatePasswordAndRotateSession(req: any, res: Response) {
   try {
     await client.query("BEGIN");
 
+    // Login uses the same user-row -> session-advisory lock order. This prevents
+    // an old-password login already in flight from creating a surviving session
+    // after password rotation commits.
     const userResult = await client.query(
       `SELECT id, email, password, role, status, is_deleted
          FROM users
@@ -109,25 +115,25 @@ export async function updatePasswordAndRotateSession(req: any, res: Response) {
       [passwordHash, userId]
     );
 
-    // Password change revokes every pre-change token. A new session is created
-    // for the verified current device and the client receives a replacement JWT.
+    // Revoke every pre-change session, then create exactly one replacement
+    // session using the same canonical device validation and advisory lock as
+    // normal login.
     await client.query("DELETE FROM user_sessions WHERE user_id = $1", [userId]);
-    const sessionResult = await client.query(
-      `INSERT INTO user_sessions (user_id, device_id, device_name, last_active_at)
-       VALUES ($1, $2, $3, now())
-       RETURNING id`,
-      [userId, deviceId, String(req.headers?.["user-agent"] || "Current device")]
-    );
-    const sessionId = Number(sessionResult.rows?.[0]?.id);
-
-    await client.query("COMMIT");
+    const session = await SessionService.createSessionInTransaction(client, {
+      userId,
+      deviceId,
+      deviceName: String(req.headers?.["user-agent"] || "Current device"),
+      maxActiveSessions: 2,
+    });
 
     const role = String(user.role || "FAN").toUpperCase();
     const token = jwt.sign(
-      { id: userId, email: user.email, role, sid: sessionId },
+      { id: userId, email: user.email, role, sid: session.id },
       secret,
       { expiresIn: "1d" }
     );
+
+    await client.query("COMMIT");
 
     AuditService.log({
       action: "user.password_changed",
