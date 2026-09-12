@@ -239,6 +239,7 @@ async function moveToGatewayRequested(requestId: string) {
 
     if (
       current.status === "COMPLETED" ||
+      current.status === "FAILED" ||
       current.status === "GATEWAY_REQUESTED" ||
       current.status === "PROVIDER_PENDING" ||
       current.status === "RECONCILIATION_REQUIRED"
@@ -272,6 +273,76 @@ function definiteGatewayFailure(error: any) {
   return status >= 400 && status < 500;
 }
 
+async function persistFailure(
+  requestId: string,
+  input: {
+    status: "FAILED" | "RECONCILIATION_REQUIRED";
+    code: string;
+    message: string;
+    refund?: GatewayRefund;
+  }
+) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const row = await lockRequest(client, requestId);
+    if (String(row.status) === "COMPLETED") {
+      await client.query("COMMIT");
+      return mapRequest(row);
+    }
+
+    const updated = await client.query(
+      `UPDATE refund_requests
+          SET status = $2,
+              provider_refund_id = COALESCE($3, provider_refund_id),
+              provider_status = COALESCE($4, provider_status),
+              provider_snapshot = COALESCE($5, provider_snapshot),
+              failure_code = $6,
+              failure_message = $7,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [
+        requestId,
+        input.status,
+        input.refund?.id ?? null,
+        input.refund?.status ?? null,
+        input.refund ? safeProviderSnapshot(input.refund) : null,
+        input.code,
+        input.message.slice(0, 1000),
+      ]
+    );
+
+    if (input.status === "FAILED") {
+      await client.query(
+        `UPDATE transactions
+            SET refund_status = 'FAILED', updated_at = now()
+          WHERE razorpay_payment_id = $1`,
+        [row.razorpay_payment_id]
+      );
+    }
+
+    await writeSubscriptionAudit(
+      client,
+      Number(row.user_id),
+      Number(row.subscription_id),
+      input.status === "FAILED" ? "REFUND_FAILED" : "REFUND_RECONCILIATION_REQUIRED",
+      {
+        refund_request_id: requestId,
+        refund_id: input.refund?.id ?? null,
+        failure_code: input.code,
+      }
+    );
+    await client.query("COMMIT");
+    return mapRequest(updated.rows[0]);
+  } catch (dbError) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw dbError;
+  } finally {
+    client.release();
+  }
+}
+
 async function persistGatewayFailure(requestId: string, error: any) {
   const definite = definiteGatewayFailure(error);
   const code = String(
@@ -283,43 +354,12 @@ async function persistGatewayFailure(requestId: string, error: any) {
     error?.error?.description ||
       error?.message ||
       (definite ? "Payment gateway rejected refund" : "Refund outcome requires reconciliation")
-  ).slice(0, 1000);
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const row = await lockRequest(client, requestId);
-    if (String(row.status) === "COMPLETED") {
-      await client.query("COMMIT");
-      return mapRequest(row);
-    }
-
-    const status = definite ? "FAILED" : "RECONCILIATION_REQUIRED";
-    const updated = await client.query(
-      `UPDATE refund_requests
-          SET status = $2,
-              failure_code = $3,
-              failure_message = $4,
-              updated_at = now()
-        WHERE id = $1
-        RETURNING *`,
-      [requestId, status, code, message]
-    );
-    await writeSubscriptionAudit(
-      client,
-      Number(row.user_id),
-      Number(row.subscription_id),
-      definite ? "REFUND_FAILED" : "REFUND_RECONCILIATION_REQUIRED",
-      { refund_request_id: requestId, failure_code: code }
-    );
-    await client.query("COMMIT");
-    return mapRequest(updated.rows[0]);
-  } catch (dbError) {
-    await client.query("ROLLBACK").catch(() => undefined);
-    throw dbError;
-  } finally {
-    client.release();
-  }
+  );
+  return persistFailure(requestId, {
+    status: definite ? "FAILED" : "RECONCILIATION_REQUIRED",
+    code,
+    message,
+  });
 }
 
 async function completeFullRefund(
@@ -419,6 +459,44 @@ async function completeFullRefund(
   };
 }
 
+async function failProviderRefund(
+  client: PoolClient,
+  payment: any,
+  requestRow: any,
+  refund: GatewayRefund
+) {
+  await client.query(
+    `UPDATE refund_requests
+        SET status = 'FAILED',
+            provider_refund_id = $2,
+            provider_status = $3,
+            provider_snapshot = $4,
+            failure_code = 'PROVIDER_REFUND_FAILED',
+            failure_message = 'Payment gateway reported refund failure',
+            updated_at = now()
+      WHERE id = $1`,
+    [requestRow.id, refund.id, refund.status, safeProviderSnapshot(refund)]
+  );
+  await client.query(
+    `UPDATE transactions
+        SET refund_status = 'FAILED', updated_at = now()
+      WHERE razorpay_payment_id = $1`,
+    [payment.razorpay_payment_id]
+  );
+  await writeSubscriptionAudit(
+    client,
+    Number(payment.user_id),
+    Number(payment.subscription_id),
+    "REFUND_FAILED",
+    {
+      refund_request_id: requestRow.id,
+      payment_id: payment.razorpay_payment_id,
+      refund_id: refund.id,
+      failure_code: "PROVIDER_REFUND_FAILED",
+    }
+  );
+}
+
 async function persistProviderOutcome(requestId: string, refund: GatewayRefund) {
   const client = await pool.connect();
   try {
@@ -452,6 +530,8 @@ async function persistProviderOutcome(requestId: string, refund: GatewayRefund) 
 
     if (refund.status === "processed") {
       await completeFullRefund(client, payment, requestRow, refund);
+    } else if (refund.status === "failed") {
+      await failProviderRefund(client, payment, requestRow, refund);
     } else {
       await client.query(
         `UPDATE refund_requests
@@ -476,30 +556,38 @@ async function persistProviderOutcome(requestId: string, refund: GatewayRefund) 
   }
 }
 
+async function markLocalFinalizationAmbiguous(requestId: string, refund: GatewayRefund, error: any) {
+  return persistFailure(requestId, {
+    status: "RECONCILIATION_REQUIRED",
+    code: "LOCAL_REFUND_FINALIZATION_FAILED",
+    message: String(error?.message || "Provider refund succeeded but local finalization failed"),
+    refund,
+  });
+}
+
 export async function initiateFullRefund(
   localPaymentId: string,
   actor: RefundActor,
   gateway: RefundGateway = razorpayRefundGateway
 ): Promise<{ request: RefundRequest; idempotent: boolean }> {
   const intent = await createOrLoadFullRefundIntent(localPaymentId, actor);
-  if (intent.status === "COMPLETED") return { request: intent, idempotent: true };
+  if (intent.status === "COMPLETED" || intent.status === "FAILED") {
+    return { request: intent, idempotent: true };
+  }
 
   const transition = await moveToGatewayRequested(intent.id);
   if (!transition.shouldCallGateway) {
     return { request: transition.request, idempotent: true };
   }
 
+  let refund: GatewayRefund;
   try {
-    const refund = await gateway.createFullRefund({
+    refund = await gateway.createFullRefund({
       paymentId: transition.request.razorpayPaymentId,
       amountPaise: transition.request.amountPaise,
       refundRequestId: transition.request.id,
       idempotencyKey: transition.request.idempotencyKey,
     });
-    return {
-      request: await persistProviderOutcome(transition.request.id, refund),
-      idempotent: false,
-    };
   } catch (error: any) {
     const failed = await persistGatewayFailure(transition.request.id, error);
     if (failed.status === "FAILED") {
@@ -510,6 +598,24 @@ export async function initiateFullRefund(
       );
     }
     return { request: failed, idempotent: false };
+  }
+
+  try {
+    return {
+      request: await persistProviderOutcome(transition.request.id, refund),
+      idempotent: false,
+    };
+  } catch (error: any) {
+    // The remote operation may already exist. Never re-call the gateway. If the
+    // marker itself cannot be persisted because the DB is unavailable, the
+    // durable pre-call GATEWAY_REQUESTED row still prevents a blind retry.
+    const ambiguous = await markLocalFinalizationAmbiguous(
+      transition.request.id,
+      refund,
+      error
+    ).catch(() => null);
+    if (ambiguous) return { request: ambiguous, idempotent: false };
+    throw error;
   }
 }
 
@@ -537,7 +643,7 @@ export async function finalizeRefund(
     );
   }
 
-  let requestResult = await client.query(
+  const requestResult = await client.query(
     `SELECT * FROM refund_requests WHERE payment_id = $1 FOR UPDATE`,
     [payment.id]
   );
@@ -562,7 +668,12 @@ export async function finalizeRefund(
     );
   }
 
-  if (refund.status !== "processed") {
+  if (refund.status === "processed") {
+    return completeFullRefund(client, payment, requestRow, refund);
+  }
+  if (refund.status === "failed") {
+    await failProviderRefund(client, payment, requestRow, refund);
+  } else {
     await client.query(
       `UPDATE refund_requests
           SET status = 'PROVIDER_PENDING',
@@ -573,17 +684,16 @@ export async function finalizeRefund(
         WHERE id = $1`,
       [requestRow.id, refund.id, refund.status, safeProviderSnapshot(refund)]
     );
-    return {
-      subscriptionId: Number(payment.subscription_id),
-      userId: Number(payment.user_id),
-      artistId: Number(payment.artist_id),
-      fullRefund: false,
-      paymentAmountPaise: amount,
-      refundAmountPaise: amount,
-    };
   }
 
-  return completeFullRefund(client, payment, requestRow, refund);
+  return {
+    subscriptionId: Number(payment.subscription_id),
+    userId: Number(payment.user_id),
+    artistId: Number(payment.artist_id),
+    fullRefund: false,
+    paymentAmountPaise: amount,
+    refundAmountPaise: amount,
+  };
 }
 
 export async function getRefundRequest(requestId: string): Promise<RefundRequest> {
@@ -614,7 +724,7 @@ export async function reconcileRefundRequest(
   gateway: RefundGateway = razorpayRefundGateway
 ): Promise<RefundRequest> {
   const request = await getRefundRequest(requestId);
-  if (request.status === "COMPLETED") return request;
+  if (request.status === "COMPLETED" || request.status === "FAILED") return request;
 
   const refunds = await gateway.listRefunds(request.razorpayPaymentId);
   const matching = refunds.find((refund) => matchesRequest(request, refund));
