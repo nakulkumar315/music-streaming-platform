@@ -1,25 +1,16 @@
 import { Router } from "express";
-import { requireAuth } from "../../common/auth/requireAuth";
 import { pool } from "../../common/db";
 import { createPlaybackToken } from "../../shared/security/signed-media-token.service";
 import { getMediaConfig } from "../../config/media.config";
-import { invalidateCachePattern, invalidateContentCache } from "../../common/cache";
+import { invalidateContentCache } from "../../common/cache";
 import { AuditService } from "../../shared/audit/audit.service";
+import { requireRoles } from "../../common/auth/requireRoles";
 
 const router = Router();
+const requireAdmin = requireRoles("ADMIN");
+const requireContentModerator = requireRoles("ADMIN", "MODERATOR");
 
-const requireAdmin = (req: any, res: any, next: any) => {
-  const role = (req.user?.role || "").toUpperCase();
-  if (role !== "ADMIN") {
-    return res.status(403).json({
-      success: false,
-      message: "Forbidden"
-    });
-  }
-  return next();
-};
-
-router.get("/pending", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.get("/pending", requireContentModerator, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   return res.status(404).json({
     success: false,
@@ -28,11 +19,10 @@ router.get("/pending", requireAuth, requireAdmin, async (req: any, res: any) => 
   });
 });
 
-router.get("/flagged", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.get("/flagged", requireContentModerator, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
 
   try {
-
     const mediaCfg = getMediaConfig();
     const baseUrlFull = `${req.protocol}://${req.get("host")}`;
 
@@ -77,7 +67,7 @@ router.get("/flagged", requireAuth, requireAdmin, async (req: any, res: any) => 
          c.report_count,
          c.created_at,
          c.artist_id,
-         COALESCE(NULLIF(u.name, ''), NULLIF(u.full_name, ''), NULLIF(u.username, ''), NULLIF(split_part(u.email, '@', 1), ''), u.email) as artist_name,
+         COALESCE(NULLIF(u.name, ''), NULLIF(split_part(u.email, '@', 1), ''), u.email) as artist_name,
          COALESCE(
            json_agg(json_build_object('reason', rc.reason, 'count', rc.count))
              FILTER (WHERE rc.reason IS NOT NULL),
@@ -108,16 +98,10 @@ router.get("/flagged", requireAuth, requireAdmin, async (req: any, res: any) => 
       const finalAudioUrl = hasAudio ? (streamAudioUrl || toAbsoluteUrl(r.audio_url || r.media_url)) : null;
       const finalVideoUrl = hasVideo ? (streamVideoUrl || toAbsoluteUrl(r.video_url || r.media_url)) : null;
 
-      // Build thumbnail URL - use the stream thumbnail API like mobile app does
-      // This ensures proper thumbnail resolution for all storage providers (Cloudinary, local, etc.)
       let thumbnailUrl = null;
-      
       if (r.thumbnail_url && (r.thumbnail_url.startsWith("http://") || r.thumbnail_url.startsWith("https://"))) {
-        // Use existing full URL if available
         thumbnailUrl = r.thumbnail_url;
       } else if (r.id) {
-        // Use the stream thumbnail API endpoint (same as mobile app)
-        // This properly resolves thumbnails for Cloudinary and other providers
         thumbnailUrl = `${baseUrlFull}/api/v1/fan/stream/thumbnail/${r.id}`;
       }
 
@@ -153,7 +137,7 @@ router.get("/flagged", requireAuth, requireAdmin, async (req: any, res: any) => 
   }
 });
 
-router.post("/:id/restore", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.post("/:id/restore", requireContentModerator, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -161,7 +145,6 @@ router.post("/:id/restore", requireAuth, requireAdmin, async (req: any, res: any
   }
 
   try {
-
     await pool.query("BEGIN");
     const updated = await pool.query(
       `UPDATE content_items
@@ -188,7 +171,7 @@ router.post("/:id/restore", requireAuth, requireAdmin, async (req: any, res: any
       entity: 'content',
       entityId: String(id),
       performedBy: req.user?.id,
-      role: 'admin',
+      role: String(req.user?.role || "moderator").toLowerCase() as any,
       status: 'success',
       correlationId,
       metadata: { action: 'restore' }
@@ -202,7 +185,7 @@ router.post("/:id/restore", requireAuth, requireAdmin, async (req: any, res: any
   }
 });
 
-router.post("/:id/delete-strike", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.post("/:id/delete-strike", requireContentModerator, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -210,7 +193,6 @@ router.post("/:id/delete-strike", requireAuth, requireAdmin, async (req: any, re
   }
 
   try {
-
     await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS strike_count INT NOT NULL DEFAULT 0").catch(() => undefined);
     await pool.query("ALTER TABLE users ALTER COLUMN strike_count SET DEFAULT 0").catch(() => undefined);
 
@@ -249,7 +231,7 @@ router.post("/:id/delete-strike", requireAuth, requireAdmin, async (req: any, re
       entity: 'content',
       entityId: String(id),
       performedBy: req.user?.id,
-      role: 'admin',
+      role: String(req.user?.role || "moderator").toLowerCase() as any,
       status: 'success',
       correlationId,
       metadata: { reason: 'strike applied' }
@@ -263,7 +245,7 @@ router.post("/:id/delete-strike", requireAuth, requireAdmin, async (req: any, re
   }
 });
 
-router.post("/artists/:artistId/ban", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.post("/artists/:artistId/ban", requireAdmin, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const artistId = Number(req.params.artistId);
   if (!Number.isFinite(artistId)) {
@@ -299,7 +281,7 @@ router.post("/artists/:artistId/ban", requireAuth, requireAdmin, async (req: any
   }
 });
 
-router.patch("/:id/approve", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.patch("/:id/approve", requireContentModerator, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   return res.status(404).json({
     success: false,
@@ -308,7 +290,7 @@ router.patch("/:id/approve", requireAuth, requireAdmin, async (req: any, res: an
   });
 });
 
-router.patch("/:id/reject", requireAuth, requireAdmin, async (req: any, res: any) => {
+router.patch("/:id/reject", requireContentModerator, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   return res.status(404).json({
     success: false,

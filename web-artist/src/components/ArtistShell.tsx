@@ -150,21 +150,6 @@ const MenuIcon = () => (
   </svg>
 );
 
-const CloseIcon = () => (
-  <svg
-    width="24"
-    height="24"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18" />
-    <line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-
 function NavItem({
   to,
   icon,
@@ -192,21 +177,6 @@ function NavItem({
         <span className="ml-auto w-1 h-6 rounded-full bg-primary" />
       )}
     </Link>
-  );
-}
-
-function BrandLogo() {
-  return (
-    <div className="flex items-center gap-3">
-      <img
-        src="/logo.png"
-        alt="Brand Logo"
-        className="h-[40px] w-[40px] rounded-full object-cover"
-      />
-      <span className="text-lg font-bold tracking-tight text-white hidden sm:block">
-        Artist Studio
-      </span>
-    </div>
   );
 }
 
@@ -308,9 +278,18 @@ export default function ArtistShell() {
     };
   }, [navigate, location.pathname]);
 
-  const handleLogout = () => {
-    localStorage.removeItem("artistToken");
-    navigate("/artist/login", { replace: true });
+  const handleLogout = async () => {
+    try {
+      if (localStorage.getItem("artistToken")) {
+        await http.post("/api/v1/auth/logout");
+      }
+    } catch {
+      // Local sign-out must still complete when the server session is already
+      // revoked or the network is unavailable.
+    } finally {
+      localStorage.removeItem("artistToken");
+      navigate("/artist/login", { replace: true });
+    }
   };
 
   const activePath = location.pathname;
@@ -371,7 +350,6 @@ export default function ArtistShell() {
 
   return (
     <div className="min-h-screen bg-background text-white font-sans antialiased">
-      {/* Mobile Overlay */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
@@ -379,7 +357,6 @@ export default function ArtistShell() {
         />
       )}
 
-      {/* Sidebar */}
       <aside
         className={`
         fixed top-0 left-0 h-full w-[280px] bg-background border-r border-white/5 z-50
@@ -387,7 +364,6 @@ export default function ArtistShell() {
         ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}
         lg:translate-x-0
       `}>
-        {/* Logo */}
         <div className="flex items-center gap-3 px-6 h-20 border-b border-white/5">
           <img
             src="/logo.png"
@@ -399,7 +375,6 @@ export default function ArtistShell() {
           </span>
         </div>
 
-        {/* Navigation */}
         <nav className="p-4 space-y-1">
           {navItems.map((item) => (
             <NavItem
@@ -412,7 +387,6 @@ export default function ArtistShell() {
           ))}
         </nav>
 
-        {/* Bottom */}
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-white/5">
           <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5">
             <div className="h-9 w-9 rounded-full overflow-hidden border border-white/10 bg-background">
@@ -443,9 +417,7 @@ export default function ArtistShell() {
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="lg:ml-[280px] min-h-screen">
-        {/* Top Bar */}
         <header className="sticky top-0 z-30 bg-background/80 backdrop-blur-xl border-b border-white/5 px-6 h-20 flex items-center justify-between">
           <button
             onClick={() => setSidebarOpen(true)}
@@ -456,7 +428,6 @@ export default function ArtistShell() {
           <div className="flex-1 lg:flex-none" />
 
           <div className="flex items-center gap-4">
-            {/* Fan App Button */}
             <a
               href="exp://localhost:8081"
               target="_blank"
@@ -480,7 +451,6 @@ export default function ArtistShell() {
               <span className="text-xs text-[#B8A6A1]">Active</span>
             </div>
 
-            {/* Notifications */}
             <button 
               type="button" 
               className="p-2.5 rounded-xl border border-white/5 bg-white/5 text-[#B8A6A1] hover:text-white hover:bg-white/10 hover:border-white/10 transition-all duration-300 flex items-center justify-center"
@@ -489,7 +459,6 @@ export default function ArtistShell() {
               <Bell size={20} />
             </button>
 
-            {/* Settings */}
             <button 
               type="button"
               onClick={() => navigate("/artist/account")}
@@ -499,7 +468,6 @@ export default function ArtistShell() {
               <SettingsIcon size={20} />
             </button>
 
-            {/* Theme selector */}
             <ThemeSwitcher />
 
             <button
@@ -511,7 +479,6 @@ export default function ArtistShell() {
           </div>
         </header>
 
-        {/* Page Content */}
         <div className="p-6 lg:p-8">
           <div className="max-w-7xl mx-auto">
             <Outlet />

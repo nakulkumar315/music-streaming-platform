@@ -11,6 +11,7 @@ import { redis } from "./common/redis";
 import { logger, httpLogger } from "./common/logger";
 import { initSentry, captureError } from "./common/sentry";
 import { globalLimiter } from "./common/security/rateLimit";
+import { requireAuth, requireVerifiedArtist } from "./common/auth/requireAuth";
 import { validateEnv } from "./config/env.validation";
 import fanRoutes from "./routes/fan";
 import artistRoutes from "./routes/artist";
@@ -21,6 +22,8 @@ import searchRoutes from "./routes/search";
 import mediaRoutes from "./routes/media";
 import { razorpayWebhook } from "./controllers/paymentController";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
+import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
+import artistSecurityRoutes from "./modules/artist/artist-security.routes";
 import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
 import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
 import { MediaProviderFactory } from "./services/providers/MediaProviderFactory";
@@ -152,6 +155,27 @@ app.use((req: any, res, next) => {
 });
 
 app.use("/api/v1/fan", fanRoutes);
+// Security-critical artist entry points are mounted before the historical
+// artist router so legacy handlers cannot bypass the canonical session model.
+app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
+app.use("/api/v1/artist/update-password", artistSecurityRoutes);
+
+// Pending/rejected artists may still access onboarding, appeal, account-state
+// and password-recovery surfaces. Business dashboard surfaces require the
+// current DB account to be an approved/verified ARTIST; the web UI is not a
+// security boundary.
+app.use(
+  [
+    "/api/v1/artist/dashboard",
+    "/api/v1/artist/pricing",
+    "/api/v1/artist/analytics",
+    "/api/v1/artist/channel-preview",
+    "/api/v1/artist/uploads",
+  ],
+  requireAuth,
+  requireVerifiedArtist
+);
+
 app.use("/api/v1/artist", artistRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/auth", authRoutes);
@@ -319,33 +343,29 @@ async function bootstrap(): Promise<void> {
     const forceExit = setTimeout(() => {
       logger.error("[Shutdown] Graceful shutdown timed out");
       process.exit(1);
-    }, 15_000);
+    }, 10_000);
     forceExit.unref();
 
-    server.close(async (serverError) => {
-      try {
-        if (serverError) {
-          logger.error({ error: serverError }, "[Shutdown] HTTP close error");
-        }
-        const redisClose = redis?.quit ? redis.quit() : Promise.resolve("disabled");
-        await Promise.allSettled([pool.end(), poolRead.end(), redisClose]);
-        clearTimeout(forceExit);
-        process.exit(serverError ? 1 : 0);
-      } catch (error) {
-        logger.error({ error }, "[Shutdown] Resource cleanup failed");
-        process.exit(1);
-      }
-    });
+    try {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.allSettled([pool.end(), poolRead.end(), redis.quit()]);
+      logger.info("[Shutdown] Resources closed");
+      process.exit(0);
+    } catch (error) {
+      logger.error({ error }, "[Shutdown] Failed to close resources");
+      process.exit(1);
+    }
   };
 
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
 }
 
-bootstrap().catch((error) => {
-  logger.fatal(
-    { error: error instanceof Error ? error.message : error },
-    "[Startup] Fatal startup failure; HTTP listener was not opened"
-  );
-  process.exit(1);
-});
+if (require.main === module) {
+  bootstrap().catch((error) => {
+    logger.fatal({ error }, "[Startup] Bootstrap failed");
+    process.exit(1);
+  });
+}
+
+export { app, bootstrap };

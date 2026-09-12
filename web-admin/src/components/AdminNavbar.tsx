@@ -17,6 +17,7 @@ import {
   FileSignature
 } from "lucide-react";
 import { useSidebar } from "./AdminLayout";
+import { http } from "../services/http";
 
 type NavItem = {
   label: string;
@@ -100,9 +101,18 @@ export default function AdminNavbar() {
     []
   );
 
-  const onLogout = () => {
-    localStorage.removeItem("adminToken");
-    navigate("/admin/login", { replace: true });
+  const onLogout = async () => {
+    try {
+      if (localStorage.getItem("adminToken")) {
+        await http.post("/api/v1/admin/logout");
+      }
+    } catch {
+      // Local sign-out must still complete if the session was already revoked
+      // or the network is unavailable.
+    } finally {
+      localStorage.removeItem("adminToken");
+      navigate("/admin/login", { replace: true });
+    }
   };
 
   return (

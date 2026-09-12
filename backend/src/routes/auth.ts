@@ -1,21 +1,29 @@
 import { Router } from "express";
+import { requireAuth } from "../common/auth/requireAuth";
 import { authLimiter } from "../common/security/rateLimit";
-import { registerFan } from "../controllers/auth";
 import { AuthController } from "../modules/auth/auth.controller";
 
 const router = Router();
 const authController = new AuthController();
 
-router.post("/register", authLimiter, (req, res) => registerFan(req, res));
+router.post("/register", authLimiter, (req, res) =>
+  authController.register(req, res)
+);
 
-router.post("/login", authLimiter, (req, res) => authController.login(req, res));
+router.post("/login", authLimiter, (req, res) =>
+  authController.login(req, res)
+);
+
+router.post("/logout", requireAuth, (req, res) =>
+  authController.logout(req, res)
+);
 
 router.post("/artist/register", authLimiter, (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
 
   return res.status(410).json({
     success: false,
-    message: "Artist self-registration is no longer available. Please contact an administrator.",
+    message: "Artist self-registration is available only through the artist onboarding flow.",
     correlationId
   });
 });

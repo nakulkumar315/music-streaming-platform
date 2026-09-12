@@ -60,6 +60,12 @@ export function resetEnvCache() {
 export function validateEnv(): EnvValidationResult {
   if (cached) return cached;
 
+  // Authentication and sensitive signing/encryption must never fall back to
+  // repository constants. This is a greenfield system, so invalid environments
+  // fail before the HTTP server starts accepting traffic.
+  envStr("JWT_SECRET");
+  envStr("SIGNATURE_ENCRYPTION_KEY");
+
   const rawProvider = (process.env.STORAGE_PROVIDER || "local").trim().toLowerCase();
   if (!STORAGE_PROVIDERS.includes(rawProvider as StorageProviderType)) {
     throw new Error(
@@ -85,10 +91,10 @@ export function validateEnv(): EnvValidationResult {
     firebasePrivateKey = firebasePrivateKey.replace(/\\n/g, "\n");
   }
 
-  let awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID?.trim() ?? "";
-  let awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY?.trim() ?? "";
-  let awsRegion = process.env.AWS_REGION?.trim() ?? "";
-  let awsS3Bucket = process.env.AWS_S3_BUCKET?.trim() ?? "";
+  const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID?.trim() ?? "";
+  const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY?.trim() ?? "";
+  const awsRegion = process.env.AWS_REGION?.trim() ?? "";
+  const awsS3Bucket = process.env.AWS_S3_BUCKET?.trim() ?? "";
   const awsS3SignedUrlExpiresIn = envInt("AWS_S3_SIGNED_URL_EXPIRES_IN", 300);
 
   if (storageProvider === "s3") {
@@ -98,7 +104,7 @@ export function validateEnv(): EnvValidationResult {
     if (!awsS3Bucket) throw new Error("[env] AWS_S3_BUCKET is required when STORAGE_PROVIDER=s3");
   }
 
-  const mediaSignedTokenSecret = envStr("MEDIA_SIGNED_TOKEN_SECRET", process.env.JWT_SECRET || "media-secret-change-me");
+  const mediaSignedTokenSecret = envStr("MEDIA_SIGNED_TOKEN_SECRET");
   const mediaUrlTtlSeconds = envInt("MEDIA_URL_TTL_SECONDS", 300);
   const maxUploadAudioMb = envInt("MAX_UPLOAD_AUDIO_MB", 50);
   const maxUploadVideoMb = envInt("MAX_UPLOAD_VIDEO_MB", 500);
