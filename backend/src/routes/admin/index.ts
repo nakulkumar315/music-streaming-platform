@@ -9,21 +9,43 @@ import adminImageUploadRoutes from "./image-upload";
 import adminSubscriptionRoutes from "./subscriptions";
 import adminAuditRoutes from "./audit";
 import { requireAuth } from "../../common/auth/requireAuth";
+import { requireRoles } from "../../common/auth/requireRoles";
 
 const router = Router();
 
 // Authentication endpoints are the only public routes under /admin.
 router.use("/", adminAuthRoutes);
 
-// Everything mounted after this point requires a valid server-backed session.
-router.use(requireAuth);
-router.use("/", adminArtistApprovalsRoutes);
-router.use("/analytics", adminAnalyticsRoutes);
-router.use("/artists", adminArtistsRoutes);
-router.use("/content", adminContentRoutes);
-router.use("/featured-artists", adminFeaturedArtistsRoutes);
-router.use("/upload-image", adminImageUploadRoutes);
-router.use("/subscriptions", adminSubscriptionRoutes);
-router.use("/audit", adminAuditRoutes);
+// Every privileged route requires both a valid server-backed session and an
+// explicit role boundary. Child routers may keep narrower guards for endpoint-
+// specific permissions, but they must never broaden these mount-level rules.
+router.use("/", requireAuth, requireRoles("ADMIN"), adminArtistApprovalsRoutes);
+router.use("/analytics", requireAuth, requireRoles("ADMIN"), adminAnalyticsRoutes);
+router.use("/artists", requireAuth, requireRoles("ADMIN"), adminArtistsRoutes);
+router.use(
+  "/content",
+  requireAuth,
+  requireRoles("ADMIN", "MODERATOR"),
+  adminContentRoutes
+);
+router.use(
+  "/featured-artists",
+  requireAuth,
+  requireRoles("ADMIN"),
+  adminFeaturedArtistsRoutes
+);
+router.use(
+  "/upload-image",
+  requireAuth,
+  requireRoles("ADMIN"),
+  adminImageUploadRoutes
+);
+router.use(
+  "/subscriptions",
+  requireAuth,
+  requireRoles("ADMIN"),
+  adminSubscriptionRoutes
+);
+router.use("/audit", requireAuth, requireRoles("ADMIN"), adminAuditRoutes);
 
 export default router;
