@@ -6,8 +6,7 @@ import { AuditService } from "../../shared/audit/audit.service";
 import { invalidateArtistCache, invalidateCachePattern } from "../../common/cache";
 
 const router = Router();
-
-router.use(requireAuth, requireRoles("ADMIN"));
+const requireAdmin = requireRoles("ADMIN");
 
 function artistId(value: unknown) {
   const id = Number(value);
@@ -63,8 +62,9 @@ function auditStateChange(req: any, state: any, reason?: string) {
 }
 
 // These routes are mounted before the historical admin artist/content routers.
-// They are the canonical Phase-03 account-security mutations.
-router.patch("/artists/:id/soft-delete", async (req: any, res) => {
+// Guards are attached per intercepted path so unrelated MODERATOR routes fall
+// through to their canonical content router instead of being blocked here.
+router.patch("/artists/:id/soft-delete", requireAuth, requireAdmin, async (req: any, res) => {
   const id = artistId(req.params.id);
   const correlationId = responseCorrelationId(req);
   if (!id) {
@@ -93,7 +93,7 @@ router.patch("/artists/:id/soft-delete", async (req: any, res) => {
   }
 });
 
-router.patch("/artists/:id/reactivate", async (req: any, res) => {
+router.patch("/artists/:id/reactivate", requireAuth, requireAdmin, async (req: any, res) => {
   const id = artistId(req.params.id);
   const correlationId = responseCorrelationId(req);
   if (!id) {
@@ -122,7 +122,7 @@ router.patch("/artists/:id/reactivate", async (req: any, res) => {
   }
 });
 
-router.patch("/artists/:id/status", async (req: any, res) => {
+router.patch("/artists/:id/status", requireAuth, requireAdmin, async (req: any, res) => {
   const id = artistId(req.params.id);
   const correlationId = responseCorrelationId(req);
   if (!id) {
@@ -146,7 +146,7 @@ router.patch("/artists/:id/status", async (req: any, res) => {
   }
 });
 
-router.post("/content/artists/:artistId/ban", async (req: any, res) => {
+router.post("/content/artists/:artistId/ban", requireAuth, requireAdmin, async (req: any, res) => {
   const id = artistId(req.params.artistId);
   const correlationId = responseCorrelationId(req);
   if (!id) {
