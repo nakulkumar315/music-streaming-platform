@@ -14,8 +14,9 @@ export class AuthService {
   async register(email: string, password: string, name?: string) {
     try {
       const normalizedEmail = String(email || "").trim().toLowerCase();
-      if (!normalizedEmail || !password) {
-        return { success: false, message: "Email and password required" };
+      const rawPassword = String(password || "");
+      if (!normalizedEmail || rawPassword.length < 6 || rawPassword.length > 128) {
+        return { success: false, message: "Valid email and password are required" };
       }
 
       const existingUser = await pool.query(
@@ -27,7 +28,7 @@ export class AuthService {
         return { success: false, message: "Email already exists" };
       }
 
-      const hashedPassword = await bcrypt.hash(password, 10);
+      const hashedPassword = await bcrypt.hash(rawPassword, 10);
       const normalizedName = name ? String(name).trim() : null;
 
       await pool.query(
@@ -75,7 +76,14 @@ export class AuthService {
     const isVerified = user.is_verified === true;
     const isDeleted = user.is_deleted === true;
 
-    if (!role || isDeleted || status !== "ACTIVE") {
+    // The shared /auth surface is intentionally limited to FAN/ARTIST. ADMIN,
+    // MODERATOR and FINANCE identities must use the privileged admin login so
+    // portal-specific controls cannot be bypassed through a consumer endpoint.
+    if (role !== "FAN" && role !== "ARTIST") {
+      throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
+    }
+
+    if (isDeleted || status !== "ACTIVE") {
       throw authError("Account is not available", 403, "ACCOUNT_INACTIVE");
     }
 
