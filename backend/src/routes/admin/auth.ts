@@ -2,8 +2,10 @@ import { Router } from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../../common/db";
+import { requireAuth } from "../../common/auth/requireAuth";
 import { authLimiter } from "../../common/security/rateLimit";
 import { SessionService } from "../../common/auth/session.service";
+import { AuditService } from "../../shared/audit/audit.service";
 
 const router = Router();
 const PRIVILEGED_ROLES = new Set(["ADMIN", "MODERATOR", "FINANCE"]);
@@ -83,6 +85,16 @@ router.post("/login", authLimiter, async (req, res) => {
       { expiresIn: "1d" }
     );
 
+    AuditService.log({
+      action: "admin.login",
+      entity: "user_session",
+      entityId: String(session.id),
+      performedBy: Number(user.id),
+      role: role.toLowerCase() as any,
+      status: "success",
+      correlationId: (req as any)?.correlationId || "-",
+    });
+
     return res.json({
       success: true,
       token,
@@ -103,6 +115,33 @@ router.post("/login", authLimiter, async (req, res) => {
       message: "Server error",
     });
   }
+});
+
+router.post("/logout", requireAuth, async (req: any, res) => {
+  const userId = Number(req.user?.id);
+  const sessionId = Number(req.user?.sessionId);
+  const role = String(req.user?.role || "").toUpperCase();
+
+  if (!userId || !sessionId || !PRIVILEGED_ROLES.has(role)) {
+    return res.status(403).json({
+      success: false,
+      code: "FORBIDDEN",
+      message: "This account cannot access the administration portal",
+    });
+  }
+
+  await SessionService.revokeSession(userId, sessionId);
+  AuditService.log({
+    action: "admin.logout",
+    entity: "user_session",
+    entityId: String(sessionId),
+    performedBy: userId,
+    role: role.toLowerCase() as any,
+    status: "success",
+    correlationId: req?.correlationId || "-",
+  });
+
+  return res.json({ success: true });
 });
 
 export default router;
