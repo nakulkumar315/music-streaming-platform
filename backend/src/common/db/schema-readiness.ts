@@ -1,6 +1,6 @@
 import { pool } from "./index";
 
-export const LATEST_SCHEMA_VERSION = "20260912_0004_financial_index_alignment";
+export const LATEST_SCHEMA_VERSION = "20260913_0006_refund_intent_integrity";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -31,6 +31,7 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "plan_type",
     "next_billing_date",
     "auto_renew",
+    "canceled_at",
   ],
   transactions: [
     "id",
@@ -41,6 +42,8 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "status",
     "razorpay_order_id",
     "razorpay_payment_id",
+    "refund_amount",
+    "refund_status",
   ],
   payments: [
     "id",
@@ -49,6 +52,28 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "amount",
     "status",
     "razorpay_payment_id",
+  ],
+  refund_requests: [
+    "id",
+    "payment_id",
+    "subscription_id",
+    "user_id",
+    "razorpay_payment_id",
+    "idempotency_key",
+    "amount",
+    "currency",
+    "status",
+    "provider_refund_id",
+    "provider_status",
+    "requested_by",
+    "requested_by_role",
+    "failure_code",
+    "failure_message",
+    "provider_snapshot",
+    "last_reconciled_at",
+    "completed_at",
+    "created_at",
+    "updated_at",
   ],
   processed_webhook_events: ["event_id", "provider", "created_at"],
   subscription_audit_logs: [
@@ -60,7 +85,16 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
   ],
   audit_logs: ["id", "action", "entity", "status", "created_at"],
   playback_history: ["id", "user_id", "content_id", "played_at"],
-  playback_sessions: ["id", "user_id", "content_id", "heartbeat_at", "started_at"],
+  playback_sessions: [
+    "id",
+    "user_id",
+    "content_id",
+    "heartbeat_at",
+    "started_at",
+    "current_position",
+    "duration",
+    "ended_at",
+  ],
   revenue_share_configs: ["id", "version", "artist_share", "platform_share"],
   terms_versions: ["id", "version", "content", "effective_from"],
 };
@@ -78,6 +112,12 @@ const REQUIRED_CONSTRAINTS = [
   "fk_playback_history_content",
   "fk_playback_sessions_user",
   "fk_playback_sessions_content",
+  "refund_requests_payment_unique",
+  "refund_requests_gateway_payment_unique",
+  "refund_requests_idempotency_unique",
+  "refund_requests_provider_refund_unique",
+  "refund_requests_amount_positive",
+  "refund_requests_status_valid",
 ];
 
 export type SchemaReadinessResult = {
@@ -87,11 +127,9 @@ export type SchemaReadinessResult = {
 };
 
 /**
- * Verifies, but never mutates, the production database schema.
- *
- * Application startup calls this before opening the HTTP listener. Any missing
- * migration/table/column/constraint is therefore a deployment failure, not a
- * runtime 500 or silent authorization/payment inconsistency.
+ * Verifies, but never mutates, the database schema before the HTTP listener is
+ * opened. Missing financial/refund schema is therefore a deployment failure,
+ * not a runtime refund inconsistency.
  */
 export async function assertDatabaseSchemaReady(): Promise<SchemaReadinessResult> {
   const client = await pool.connect();
