@@ -60,9 +60,12 @@ function testAuthSourceContracts() {
   const streamRoutes = source("modules/streaming/stream.routes.ts");
   const analyticsRoutes = source("modules/analytics/analytics.routes.ts");
   const envValidation = source("config/env.validation.ts");
+  const packageJson = source("../package.json");
   const fanApi = source("../../mobile/apps/fan/src/services/api.ts");
   const artistHttp = source("../../web-artist/src/services/http.ts");
   const adminHttp = source("../../web-admin/src/services/http.ts");
+  const artistShell = source("../../web-artist/src/components/ArtistShell.tsx");
+  const adminNavbar = source("../../web-admin/src/components/AdminNavbar.tsx");
 
   assert.equal(requireAuth.includes("Secret Prefix"), false, "JWT secret material must never be logged");
   assert.equal(requireAuth.includes("trust the token"), false, "No role may bypass authoritative DB state");
@@ -70,6 +73,7 @@ function testAuthSourceContracts() {
   assert.equal(requireAuth.includes("COALESCE(status, 'ACTIVE')"), false, "Account state must not fail open to ACTIVE");
   assert.equal(requireAuth.includes('export { requireRoles } from "./requireRoles"'), true, "RBAC must have one canonical implementation");
   assert.equal(requireAuth.includes("requireVerifiedArtist"), true, "Approved artist surfaces need a server-side verification guard");
+  assert.equal(requireAuth.includes('artistStatus !== "APPROVED"'), true, "Verified artist gate must also require APPROVED artist state");
 
   assert.equal(authService.includes("42703"), false, "Auth must not retry against weaker schemas");
   assert.equal(authService.includes("Email not found"), false, "Login must not enumerate account existence");
@@ -78,6 +82,7 @@ function testAuthSourceContracts() {
   assert.equal(authService.includes('role !== "FAN" && role !== "ARTIST"'), true, "Shared login must reject privileged portal roles");
 
   assert.equal(adminAuth.includes("This account cannot access the administration portal"), false, "Admin login must not reveal valid consumer credentials");
+  assert.equal(adminAuth.includes('router.post("/logout", requireAuth'), true, "Privileged logout must revoke the backend session");
   assert.equal(authController.includes("Unknown-ID"), false, "Unknown-ID must not be used as durable device identity");
   assert.equal(authRoutes.includes('router.get("/sessions"'), true, "Owned device sessions must be listable");
   assert.equal(authRoutes.includes('router.delete("/sessions/:sessionId"'), true, "Owned device sessions must be explicitly revocable");
@@ -118,6 +123,7 @@ function testAuthSourceContracts() {
   assert.equal(onboarding.includes("SIGNATURE_ENCRYPTION_KEY ||"), true, "Onboarding signature encryption must be explicitly configured");
 
   assert.equal(rootAuth.includes("registerFan"), false, "Root auth must not retain the duplicate legacy registration controller");
+  assert.equal(rootAuth.includes('router.post("/logout", requireAuth'), true, "Artist/shared logout must revoke the backend session");
   assert.equal(fs.existsSync(path.join(srcRoot, "controllers/auth.ts")), false, "Credential-logging legacy registration controller must be removed");
 
   assert.equal(envValidation.includes('envStr("JWT_SECRET")'), true, "JWT secret must fail fast at startup");
@@ -125,12 +131,16 @@ function testAuthSourceContracts() {
   assert.equal(envValidation.includes('envStr("MEDIA_SIGNED_TOKEN_SECRET")'), true, "Media signing secret must not use a static fallback");
   assert.equal(envValidation.includes("media-secret-change-me"), false, "Static media signing fallback is forbidden");
 
+  assert.equal(packageJson.includes('"test:auth-db"'), true, "Disposable-DB auth integration suite must have a repeatable npm command");
+
   assert.equal(fanApi.includes("X-Device-Id"), true, "Native fan client must send stable device identity");
   assert.equal(fanApi.includes("Platform.OS === 'web'"), true, "Fan web must use the browser-safe device contract");
   assert.equal(fanApi.includes("sessionRotated"), true, "Fan client must persist rotated JWTs");
   assert.equal(artistHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Artist web auth must send stable device identity in request bodies");
   assert.equal(artistHttp.includes("sessionRotated"), true, "Artist web must persist rotated password-change sessions");
   assert.equal(adminHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Admin web login must send stable device identity in the request body");
+  assert.equal(artistShell.includes('/api/v1/auth/logout'), true, "Artist portal logout must revoke the server session before local cleanup");
+  assert.equal(adminNavbar.includes('/api/v1/admin/logout'), true, "Admin portal logout must revoke the server session before local cleanup");
 }
 
 function main() {
