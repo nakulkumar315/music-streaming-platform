@@ -10,6 +10,7 @@ export type AuthenticatedUser = {
   role: string;
   status: string;
   isVerified: boolean;
+  artistStatus?: string | null;
   sessionId: number;
   name?: string | null;
 };
@@ -54,7 +55,7 @@ async function resolveAuthenticatedUser(token: string): Promise<AuthenticatedUse
   }
 
   const result = await pool.query(
-    `SELECT id, email, name, role, status, is_verified, is_deleted
+    `SELECT id, email, name, role, status, is_verified, artist_status, is_deleted
        FROM public.users
       WHERE id = $1`,
     [userId]
@@ -86,6 +87,7 @@ async function resolveAuthenticatedUser(token: string): Promise<AuthenticatedUse
     role,
     status,
     isVerified: user.is_verified === true,
+    artistStatus: user.artist_status ? String(user.artist_status).toUpperCase() : null,
     sessionId,
   };
 }
@@ -141,7 +143,10 @@ export const optionalAuth = async (req: any, _res: Response, next: NextFunction)
 };
 
 export const requireVerifiedArtist = (req: any, res: Response, next: NextFunction) => {
-  if (String(req.user?.role || "").toUpperCase() !== "ARTIST" || req.user?.isVerified !== true) {
+  const role = String(req.user?.role || "").toUpperCase();
+  const artistStatus = String(req.user?.artistStatus || "").toUpperCase();
+
+  if (role !== "ARTIST" || req.user?.isVerified !== true || artistStatus !== "APPROVED") {
     return res.status(403).json({
       success: false,
       code: "ARTIST_NOT_APPROVED",
