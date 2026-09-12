@@ -21,7 +21,9 @@
     "test:storage": "ts-node --transpile-only src/scripts/test-storage-connection.ts",
     "prisma": "prisma",
     "db:pull": "prisma db pull",
-    "db:migrate": "prisma migrate dev",
+    "db:migrate": "ts-node --transpile-only src/scripts/migrate.ts",
+    "db:migrate:status": "ts-node --transpile-only src/scripts/migration-status.ts",
+    "db:schema:check": "ts-node --transpile-only src/scripts/check-schema.ts",
     "db:generate": "prisma generate"
   },
   "keywords": [],

@@ -107,18 +107,18 @@ model content_items {
   audio_url                String?
   video_url                String?
   genre                    String?   @db.VarChar(80)
-  lifecycle_state          String    @default("PUBLISHED") @db.VarChar(20)
-  is_approved              Boolean   @default(true)
+  lifecycle_state          String    @default("DRAFT") @db.VarChar(20)
+  is_approved              Boolean   @default(false)
   rejection_reason         String?
   reportCount              Int       @default(0) @map("report_count")
   created_at               DateTime  @default(now()) @db.Timestamptz(6)
   published_at             DateTime? @db.Timestamptz(6)
   subscription_required    Boolean   @default(false)
-  storage_provider         String?   @default("local") @map("storage_provider") @db.VarChar(20)
+  storage_provider         String?   @map("storage_provider") @db.VarChar(20)
   storage_key              String?   @map("storage_key")
   thumbnail_storage_key    String?   @map("thumbnail_storage_key")
   visibility               String?   @default("PROTECTED") @db.VarChar(30)
-  status                   String?   @default("APPROVED") @db.VarChar(20)
+  status                   String?   @default("PENDING_REVIEW") @db.VarChar(20)
   mime_type                String?   @map("mime_type") @db.VarChar(100)
   file_size_bytes          Int?      @map("file_size_bytes")
   original_file_name       String?   @map("original_file_name") @db.VarChar(255)
@@ -151,18 +151,50 @@ model subscriptions {
   user_id           Int
   artist_id         Int
   status            String    @default("INACTIVE") @db.VarChar(20)
-  plan_type         String?   @db.VarChar(50)
+  plan_type         String?   @default("MONTHLY") @db.VarChar(50)
   start_date        DateTime  @default(now()) @db.Timestamptz(6)
   next_billing_date DateTime? @db.Timestamptz(6)
-  auto_renew        Boolean   @default(true)
+  auto_renew        Boolean   @default(false)
   created_at        DateTime  @default(now()) @db.Timestamptz(6)
   updated_at        DateTime  @default(now()) @db.Timestamptz(6)
   type              String    @default("ARTIST") @db.VarChar(20)
   canceled_at       DateTime? @db.Timestamptz(6)
 
   @@unique([user_id, artist_id], map: "idx_subscriptions_user_artist")
-  @@index([status, type, next_billing_date], map: "idx_subscriptions_composite_health")
-  @@index([start_date, status], map: "idx_subscriptions_growth_trend")
+  @@index([status, next_billing_date], map: "idx_subscriptions_status_expiry")
+}
+
+model transactions {
+  id                   BigInt    @id @default(autoincrement())
+  user_id              Int
+  artist_id            Int
+  amount               BigInt
+  currency             String    @default("INR") @db.VarChar(10)
+  status               String    @default("PENDING") @db.VarChar(30)
+  razorpay_order_id    String?   @db.VarChar(255)
+  razorpay_payment_id  String?   @db.VarChar(255)
+  artist_name          String?   @db.VarChar(255)
+  billing_cycle        String?   @db.VarChar(50)
+  payment_confirmed_at DateTime? @db.Timestamptz(6)
+  failure_reason       String?
+  refund_amount        BigInt    @default(0)
+  refund_status        String?   @db.VarChar(30)
+  created_at           DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@unique([razorpay_order_id], map: "idx_transactions_razorpay_order")
+  @@unique([razorpay_payment_id], map: "idx_transactions_razorpay_payment")
+  @@index([status, artist_id, created_at], map: "idx_transactions_analytics")
+}
+
+model payments {
+  id                  String   @id @db.Uuid
+  user_id             Int
+  subscription_id     Int
+  amount              BigInt
+  status              String   @db.VarChar(30)
+  razorpay_payment_id String   @unique(map: "idx_payments_razorpay_payment") @db.VarChar(255)
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
 }
 
 model content_plays {
@@ -200,18 +232,20 @@ model platform_subscription_configs {
 }
 
 model processed_webhook_events {
-  event_id   String   @id @db.VarChar(100)
+  event_id   String   @id @db.VarChar(255)
   provider   String   @default("razorpay") @db.VarChar(50)
   created_at DateTime @default(now()) @db.Timestamptz(6)
 }
 
 model subscription_audit_logs {
-  id              Int      @id @default(autoincrement())
+  id              BigInt   @id @default(autoincrement())
   user_id         Int
   subscription_id Int?
-  event_type      String   @db.VarChar(50)
+  event_type      String   @db.VarChar(80)
   metadata        Json?
   created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([subscription_id, created_at(sort: Desc)], map: "idx_subscription_audit_subscription")
 }
 
 model upsell_metrics {
@@ -270,8 +304,8 @@ model featured_artists {
   name          String?   @db.VarChar(255)
   avatar        String?
   is_active     Boolean?  @default(true)
-  created_at    DateTime? @default(now()) @db.Timestamp(6)
-  updated_at    DateTime? @default(now()) @db.Timestamp(6)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
   users         users?    @relation(fields: [artist_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([is_active], map: "idx_featured_artists_active")

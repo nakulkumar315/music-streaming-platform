@@ -1,824 +1,351 @@
-import dotenv from "dotenv";
-
-dotenv.config();
-
-import { pool } from "./common/db"; // Trigger restart for .env
-
-
-
+import "dotenv/config";
+import compression from "compression";
 import express from "express";
-
-import morgan from "morgan";
-
-import jwt from "jsonwebtoken";
-
+import path from "path";
+import { Server } from "http";
 import { v4 as uuidv4 } from "uuid";
 
-import path from "path";
-
-import compression from "compression";
-
-import { globalLimiter } from "./common/security/rateLimit";
-
-import { validateEnv } from "./config/env.validation";
-
-import {
-
-  ensureUsersSchema,
-
-  ensureContentSchema,
-
-  ensurePlaysSchema,
-
-  ensureReactionsSchema,
-
-  ensureSessionsSchema,
-
-  ensureSubscriptionsSchema,
-
-  ensureArtistStatsSchema,
-
-  ensureUpsellSchema,
-
-  ensureUserStatsSchema,
-
-  ensurePlatformConfigSchema,
-
-  ensureAuditLogsSchema,
-
-  ensureFeaturedArtistsSchema
-
-} from "./config/ensure-schema";
-
-import fanRoutes from "./routes/fan";
-
-import artistRoutes from "./routes/artist";
-
-import adminRoutes from "./routes/admin";
-
-import authRoutes from "./routes/auth";
-
-import contentRoutes from "./routes/content";
-
-import searchRoutes from "./routes/search";
-
-import mediaRoutes from "./routes/media";
-
-import { razorpayWebhook } from "./controllers/paymentController";
-
-import mediaStreamRoutes from "./modules/media/media-stream.routes";
-
-import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
-
-import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
-
-import { MediaProviderFactory } from "./services/providers/MediaProviderFactory";
-
-import { redis, connectRedisWithRetry } from "./common/redis";
-
-import { initSentry, captureError } from "./common/sentry";
-
+import { pool, poolRead } from "./common/db";
+import { assertDatabaseSchemaReady } from "./common/db/schema-readiness";
+import { redis } from "./common/redis";
 import { logger, httpLogger } from "./common/logger";
-
-import "./workers/upload.worker";
-
+import { initSentry, captureError } from "./common/sentry";
+import { globalLimiter } from "./common/security/rateLimit";
+import { validateEnv } from "./config/env.validation";
+import fanRoutes from "./routes/fan";
+import artistRoutes from "./routes/artist";
+import adminRoutes from "./routes/admin";
+import authRoutes from "./routes/auth";
+import contentRoutes from "./routes/content";
+import searchRoutes from "./routes/search";
+import mediaRoutes from "./routes/media";
+import { razorpayWebhook } from "./controllers/paymentController";
+import mediaStreamRoutes from "./modules/media/media-stream.routes";
+import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
+import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
+import { MediaProviderFactory } from "./services/providers/MediaProviderFactory";
 import { NotificationService } from "./shared/notifications/notification.service";
-
 import { WinBackService } from "./shared/subscriptions/win-back.service";
-
-
-
-// Initialise Sentry as early as possible (no-op if SENTRY_DSN is unset)
 
 initSentry();
 
-
-
-
-
-
-
 const app = express();
+const PORT = Number(process.env.PORT || 8000);
+
+if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) {
+  throw new Error("PORT must be a valid TCP port");
+}
 
 app.set("trust proxy", 1);
 
-
-
-process.on("uncaughtException", (err) => {
-
-  console.error("Uncaught Exception:", err);
-
+process.on("uncaughtException", (error) => {
+  logger.fatal({ error }, "[Process] Uncaught exception");
   process.exit(1);
-
 });
 
-
-
-process.on("unhandledRejection", (err) => {
-
-  console.error("Unhandled Rejection:", err);
-
+process.on("unhandledRejection", (error) => {
+  logger.fatal({ error }, "[Process] Unhandled promise rejection");
+  process.exit(1);
 });
 
-
-
-app.get("/health", async (req, res) => {
-
-  const startMs = Date.now();
-
-  const checks: Record<string, any> = { db: "unknown", redis: "unknown" };
-
-
-
-  // DB check
+app.get("/health", async (_req, res) => {
+  const startedAt = Date.now();
+  const checks: Record<string, unknown> = { db: "unknown", redis: "unknown" };
 
   try {
-
     await pool.query("SELECT 1");
-
     checks.db = "ok";
-
-  } catch (err: any) {
-
-    checks.db = { status: "error", message: err?.message };
-
+  } catch {
+    checks.db = "error";
   }
 
+  const redisConfigured = Boolean(
+    process.env.REDIS_URL &&
+      process.env.REDIS_URL !== "" &&
+      process.env.REDIS_URL !== "disabled"
+  );
 
-
-  // Redis check
-
-  try {
-
-    const pong = await redis.ping();
-
-    checks.redis = pong === "PONG" ? "ok" : "degraded";
-
-  } catch (err: any) {
-
-    checks.redis = { status: "error", message: err?.message };
-
+  if (!redisConfigured) {
+    checks.redis = "disabled";
+  } else {
+    try {
+      checks.redis = (await redis.ping()) === "PONG" ? "ok" : "degraded";
+    } catch {
+      checks.redis = "error";
+    }
   }
 
-
-
-  const allOk = checks.db === "ok" && checks.redis === "ok";
-
-  const httpStatus = allOk ? 200 : 503;
-
-
-
-  return res.status(httpStatus).json({
-
-    status: allOk ? "ok" : "degraded",
-
-    pid: process.pid,
-
+  const healthy = checks.db === "ok" && ["ok", "disabled"].includes(String(checks.redis));
+  return res.status(healthy ? 200 : 503).json({
+    status: healthy ? "ok" : "degraded",
     uptime: Math.floor(process.uptime()),
-
-    responseTimeMs: Date.now() - startMs,
-
+    responseTimeMs: Date.now() - startedAt,
     checks,
-
   });
-
 });
 
-
-
-app.get("/health/db", async (req, res) => {
-
+app.get("/health/db", async (_req, res) => {
   try {
-
-    const result = await pool.query("SELECT current_database(), current_schema() FROM (SELECT 1) AS dummy");
-
-    const countAll = await pool.query("SELECT COUNT(*) FROM public.users");
-
-    res.json({ 
-
-      status: "ok",
-
-      database: result.rows[0]?.current_database,
-
-      schema: result.rows[0]?.current_schema,
-
-      totalUsers: Number(countAll.rows[0].count)
-
-    });
-
-  } catch (err: any) {
-
-    res.status(503).json({ status: "error", message: err?.message });
-
+    await pool.query("SELECT 1");
+    return res.json({ status: "ok" });
+  } catch {
+    return res.status(503).json({ status: "error" });
   }
-
 });
 
-
-
-app.get("/health/redis", async (req, res) => {
+app.get("/health/redis", async (_req, res) => {
+  const redisConfigured = Boolean(
+    process.env.REDIS_URL &&
+      process.env.REDIS_URL !== "" &&
+      process.env.REDIS_URL !== "disabled"
+  );
+  if (!redisConfigured) return res.json({ status: "disabled" });
 
   try {
-
     const pong = await redis.ping();
-
-    if (pong !== "PONG") throw new Error(`Unexpected PING response: ${pong}`);
-
-    const dbSize = await redis.dbsize();
-
-    res.json({ status: "ok", pong, keyCount: dbSize });
-
-  } catch (err: any) {
-
-    res.status(503).json({ status: "error", message: err?.message });
-
+    if (pong !== "PONG") throw new Error("Unexpected Redis PING response");
+    return res.json({ status: "ok" });
+  } catch {
+    return res.status(503).json({ status: "error" });
   }
-
 });
 
-if (process.env.NODE_ENV !== "production") {
-
-  app.set("etag", false);
-
-}
-
-
+if (process.env.NODE_ENV !== "production") app.set("etag", false);
 
 app.use((req, res, next) => {
-
   res.header("Access-Control-Allow-Origin", "*");
-
   res.header(
-
     "Access-Control-Allow-Headers",
-
     "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Auth-Token, Cache-Control, Pragma, Expires"
-
   );
-
-  res.header(
-
-    "Access-Control-Allow-Methods",
-
-    "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-
-  );
-
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(204);
-
   next();
-
 });
 
-
-
+// Razorpay signature verification requires the exact raw request bytes. This
+// route must remain before express.json().
 app.post(
-
   "/api/v1/payments/webhook",
-
   express.raw({ type: "application/json" }),
-
   (req, res) => razorpayWebhook(req as any, res)
-
 );
 
-
-
 app.use(compression());
-
 app.use(express.json());
-
-
-
 app.use(globalLimiter);
-
-
-
-app.use("/uploads", express.static(path.join(process.cwd(), "public", "uploads")));
-
-
-
-app.use("/media/stream", mediaStreamRoutes);
-
-
-
 app.use(httpLogger);
 
-
-
-const formatTimestamp = () => {
-
-  const d = new Date();
-
-  const pad = (n: number) => String(n).padStart(2, "0");
-
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-
-    d.getHours()
-
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-
-};
-
-
-
-const sanitizeBody = (body: any) => {
-
-  const SENSITIVE_KEYS = new Set([
-
-    "password",
-
-    "pass",
-
-    "token",
-
-    "accessToken",
-
-    "refreshToken"
-
-  ]);
-
-
-
-  const walk = (value: any): any => {
-
-    if (value === null || value === undefined) return value;
-
-    if (Array.isArray(value)) return value.map(walk);
-
-    if (typeof value !== "object") return value;
-
-
-
-    const out: any = {};
-
-    for (const [k, v] of Object.entries(value)) {
-
-      if (SENSITIVE_KEYS.has(k)) {
-
-        out[k] = "[REDACTED]";
-
-      } else {
-
-        out[k] = walk(v);
-
-      }
-
-    }
-
-    return out;
-
-  };
-
-
-
-  return walk(body);
-
-};
-
-
-
-// Custom correlation ID middleware
+// Legacy public uploads remain routable until the secure-media phase removes
+// direct delivery paths. Do not use this route for new protected media.
+app.use("/uploads", express.static(path.join(process.cwd(), "public", "uploads")));
+app.use("/media/stream", mediaStreamRoutes);
 
 app.use((req: any, res, next) => {
-
   const incomingCorrelationId =
-
     (req.headers["x-correlation-id"] as string | undefined) ||
-
     (req.headers["x-request-id"] as string | undefined);
-
-
-
   const correlationId = incomingCorrelationId || uuidv4();
-
   req.correlationId = correlationId;
-
   res.setHeader("X-Correlation-Id", correlationId);
-
   next();
-
 });
-
-
-
-// Stub removed — comprehensive /health is registered above before middleware
-
-
 
 app.use("/api/v1/fan", fanRoutes);
-
 app.use("/api/v1/artist", artistRoutes);
-
 app.use("/api/v1/admin", adminRoutes);
-
 app.use("/api/v1/auth", authRoutes);
-
 app.use("/api/v1/content", contentRoutes);
-
 app.use("/api/v1/search", searchRoutes);
-
 app.use("/api/v1/media", mediaRoutes);
 
-
-
-app.use((req: any, res: any, next: any) => {
-
-  const err: any = new Error(`Route not found: ${req.method} ${req.originalUrl || req.url}`);
-
-  err.status = 404;
-
-  next(err);
-
+app.use((req: any, _res: any, next: any) => {
+  const error: any = new Error(`Route not found: ${req.method} ${req.originalUrl || req.url}`);
+  error.status = 404;
+  next(error);
 });
 
-
-
-app.use((err: any, req: any, res: any, next: any) => {
-
+app.use((error: any, req: any, res: any, next: any) => {
   const correlationId = req?.correlationId || "-";
+  const status = Number(error?.status || error?.statusCode || 500);
 
-  const timestamp = formatTimestamp();
+  logger.error(
+    {
+      correlationId,
+      method: req?.method,
+      url: req?.originalUrl || req?.url,
+      statusCode: status,
+      message: error?.message || String(error),
+      stack: process.env.NODE_ENV !== "production" ? error?.stack : undefined,
+    },
+    `[ERROR] ${error?.message || String(error)}`
+  );
 
-  const message = err?.message || String(err);
-
-  const stack = err?.stack || err;
-
-  const status = Number(err?.status || err?.statusCode || 500);
-
-
-
-  // Structured JSON error log for log aggregators
-
-  logger.error({
-
+  captureError(error, {
     correlationId,
-
     method: req?.method,
-
     url: req?.originalUrl || req?.url,
-
     statusCode: status,
-
-    message,
-
-    stack: process.env.NODE_ENV !== "production" ? stack : undefined,
-
-  }, `[ERROR] ${message}`);
-
-
-
-  // Forward to Sentry (no-op when SENTRY_DSN is not set)
-
-  captureError(err, {
-
-    correlationId,
-
-    method: req?.method,
-
-    url: req?.originalUrl || req?.url,
-
-    statusCode: status,
-
   });
 
-
-
-  if (res.headersSent) return next(err);
-
-
-
+  if (res.headersSent) return next(error);
   return res.status(status).json({
-
     success: false,
-
-    message: err?.message || "Internal Server Error",
-
-    correlationId
-
+    message:
+      status >= 500 && process.env.NODE_ENV === "production"
+        ? "Internal Server Error"
+        : error?.message || "Internal Server Error",
+    correlationId,
   });
-
 });
 
+function startSubscriptionSchedulers(): NodeJS.Timeout[] {
+  const timers: NodeJS.Timeout[] = [];
 
+  const sweepExpiredSubscriptions = async () => {
+    try {
+      const result = await pool.query(`
+        UPDATE subscriptions
+        SET status = 'EXPIRED', updated_at = now()
+        WHERE status IN ('ACTIVE', 'GRACE', 'PAST_DUE')
+          AND next_billing_date IS NOT NULL
+          AND next_billing_date < now()
+        RETURNING id, user_id, type, artist_id
+      `);
 
-const PORT = process.env.PORT || 8000;
+      for (const row of result.rows) {
+        WinBackService.processChurnedUser(
+          row.id,
+          row.user_id,
+          row.type,
+          row.artist_id
+        ).catch((error) =>
+          logger.error({ error, subscriptionId: row.id }, "[WinBack] Failed")
+        );
+      }
+    } catch (error) {
+      logger.error({ error }, "[Sweeper] Subscription expiry sweep failed");
+    }
+  };
 
+  const notifyExpiringSubscriptions = async () => {
+    try {
+      const result = await pool.query(`
+        SELECT s.user_id, s.artist_id, u.name AS artist_name
+        FROM subscriptions s
+        LEFT JOIN users u ON u.id = s.artist_id
+        WHERE s.type = 'ARTIST'
+          AND s.status = 'ACTIVE'
+          AND s.next_billing_date > now() + interval '47 hours'
+          AND s.next_billing_date <= now() + interval '48 hours'
+      `);
 
+      for (const row of result.rows) {
+        NotificationService.sendToUser({
+          userId: String(row.user_id),
+          title: "Subscription Expiring Soon! ⏳",
+          body: `Your subscription to ${row.artist_name || "your artist"} will expire in 2 days.`,
+          data: { type: "expiry_warning", artistId: row.artist_id },
+        }).catch((error) =>
+          logger.error({ error, userId: row.user_id }, "[Notifier] Expiry warning failed")
+        );
+      }
+    } catch (error) {
+      logger.error({ error }, "[Notifier] Expiry notification scan failed");
+    }
+  };
 
-(async () => {
+  const sweepStaleSessions = async () => {
+    try {
+      await pool.query(`
+        DELETE FROM user_sessions
+        WHERE last_active_at < now() - interval '30 days'
+      `);
+    } catch (error) {
+      logger.error({ error }, "[Sweeper] Stale session cleanup failed");
+    }
+  };
 
-  console.log(`[Startup] ── Booting worker (pid=${process.pid} port=${PORT}) ──`);
+  void sweepExpiredSubscriptions();
+  void notifyExpiringSubscriptions();
+  void sweepStaleSessions();
 
+  timers.push(setInterval(() => void sweepExpiredSubscriptions(), 6 * 60 * 60 * 1000));
+  timers.push(setInterval(() => void notifyExpiringSubscriptions(), 60 * 60 * 1000));
+  timers.push(setInterval(() => void sweepStaleSessions(), 24 * 60 * 60 * 1000));
+  return timers;
+}
 
+function listen(): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(PORT, () => resolve(server));
+    server.once("error", reject);
+  });
+}
 
-  validateEnv();
-
-  createStorageProvider();
+async function bootstrap(): Promise<void> {
+  logger.info({ pid: process.pid, port: PORT }, "[Startup] Booting backend");
 
   const storageConfig = validateEnv();
-
+  createStorageProvider();
   getDeliveryStrategyForProvider(storageConfig.storageProvider);
-
-
-
-  // Initialize and fail-fast for the new configurable media provider
-
   MediaProviderFactory.initialize();
 
+  // No route, worker or scheduler may start until the explicitly migrated
+  // schema matches the application contract.
+  const schema = await assertDatabaseSchemaReady();
+  logger.info(
+    { schemaVersion: schema.version, database: schema.database, schema: schema.schema },
+    "[Startup] Database schema verified"
+  );
 
+  // Worker construction is an import side effect, so defer it until DB ready.
+  await import("./workers/upload.worker");
+  const timers = startSubscriptionSchedulers();
+  const server = await listen();
 
-  // ── Wait for Redis before opening traffic ──────────────────────────────
+  logger.info(
+    { port: PORT, storageProvider: storageConfig.storageProvider },
+    "[Startup] Server accepting traffic"
+  );
 
-  // Retries up to 10 times with backoff. Never crashes — falls back to DB.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, "[Shutdown] Graceful shutdown started");
+    timers.forEach((timer) => clearInterval(timer));
 
-  // await connectRedisWithRetry(10); // Disabled Redis - not running on this system
+    const forceExit = setTimeout(() => {
+      logger.error("[Shutdown] Graceful shutdown timed out");
+      process.exit(1);
+    }, 15_000);
+    forceExit.unref();
 
-
-
-  // ── Start HTTP server ──────────────────────────────────────────────────
-
-  app.listen(PORT, () => {
-
-    logger.info(`[Startup] Server running on port ${PORT}`);
-
-    logger.info(`[Startup] STORAGE_PROVIDER=${storageConfig.storageProvider}`);
-
-
-
-    try {
-
-      const routes: string[] = [];
-
-      const stack = (app as any)?._router?.stack || [];
-
-      for (const layer of stack) {
-
-        if (layer?.route?.path && layer?.route?.methods) {
-
-          const methods = Object.keys(layer.route.methods)
-
-            .filter((m) => layer.route.methods[m])
-
-            .map((m) => m.toUpperCase());
-
-          routes.push(`${methods.join(",")} ${layer.route.path}`);
-
-        } else if (layer?.name === "router" && layer?.handle?.stack) {
-
-          const mountPath = layer?.regexp?.toString?.() || "";
-
-          for (const handler of layer.handle.stack) {
-
-            if (!handler?.route) continue;
-
-            const methods = Object.keys(handler.route.methods)
-
-              .filter((m) => handler.route.methods[m])
-
-              .map((m) => m.toUpperCase());
-
-            routes.push(`${methods.join(",")} ${mountPath} ${handler.route.path}`);
-
-          }
-
-        }
-
-      }
-
-      console.log("Registered routes:");
-
-      for (const r of routes) console.log(r);
-
-    } catch (e) {
-
-      console.warn("Failed to list routes", e);
-
-    }
-
-  });
-
-
-
-  // Run schema migrations after server is up (non-fatal on transient DB issues)
-
-  try {
-
-    await ensureUsersSchema();
-
-    await ensureContentSchema();
-
-    await ensurePlaysSchema();
-
-    await ensureReactionsSchema();
-
-    await ensureSessionsSchema();
-
-    await ensureSubscriptionsSchema();
-
-    await ensureArtistStatsSchema();
-
-    await ensureUpsellSchema();
-
-    await ensureUserStatsSchema();
-
-    await ensurePlatformConfigSchema();
-
-    await ensureAuditLogsSchema();
-
-    await ensureFeaturedArtistsSchema();
-
-    console.log("[Startup] All database schemas ensured or updated ✅");
-
-
-
-    // ── Subscription Lifecycle Management ────────────────────────────────
-
-    // Sweeps for subscriptions where grace_ends_at < now() and updates to EXPIRED.
-
-    // Runs every 6 hours.
-
-    const sweepExpiredSubscriptions = async () => {
-
-      console.log("[Sweeper] Running subscription expiry sweep...");
-
+    server.close(async (serverError) => {
       try {
-
-        const result = await pool.query(`
-
-          UPDATE subscriptions
-
-          SET status = 'EXPIRED', updated_at = now()
-
-          WHERE status IN ('ACTIVE', 'GRACE', 'PAST_DUE')
-
-            AND next_billing_date < now()
-
-          RETURNING id, user_id, type, artist_id
-
-        `);
-
-        if (result.rowCount && result.rowCount > 0) {
-
-          console.log(`[Sweeper] Expired ${result.rowCount} stale subscriptions.`);
-
-          
-
-          // Trigger Win-back offers for newly expired subs
-
-          for (const row of result.rows) {
-
-            WinBackService.processChurnedUser(
-
-              row.id, 
-
-              row.user_id, 
-
-              row.type, 
-
-              row.artist_id
-
-            ).catch(e => console.error("[WinBack] Failed to trigger offer:", e));
-
-          }
-
+        if (serverError) {
+          logger.error({ error: serverError }, "[Shutdown] HTTP close error");
         }
-
-      } catch (err) {
-
-        console.error("[Sweeper] Failed to sweep subscriptions:", err);
-
+        const redisClose = redis?.quit ? redis.quit() : Promise.resolve("disabled");
+        await Promise.allSettled([pool.end(), poolRead.end(), redisClose]);
+        clearTimeout(forceExit);
+        process.exit(serverError ? 1 : 0);
+      } catch (error) {
+        logger.error({ error }, "[Shutdown] Resource cleanup failed");
+        process.exit(1);
       }
-
-    };
-
-
-
-    const notifyExpiringSubscriptions = async () => {
-
-      console.log("[Notifier] Checking for expiring subscriptions...");
-
-      try {
-
-        // Find subscriptions expiring in precisely 48 hours (+/- 1 hour margin to avoid double notify if run slightly off)
-
-        // Or simpler: Find subs expiring in < 48 hours that haven't been notified yet.
-
-        // For simplicity here, we'll find subs arriving at exactly the 48h mark.
-
-        const result = await pool.query(`
-
-          SELECT s.user_id, s.type, s.artist_id, u.name as artist_name
-
-          FROM subscriptions s
-
-          LEFT JOIN users u ON u.id = s.artist_id
-
-          WHERE s.status = 'ACTIVE'
-
-            AND s.next_billing_date > now()
-
-            AND s.next_billing_date <= now() + interval '48 hours'
-
-            AND s.next_billing_date > now() + interval '47 hours'
-
-        `);
-
-
-
-        for (const row of result.rows) {
-
-          NotificationService.sendToUser({
-
-            userId: String(row.user_id),
-
-            title: "Subscription Expiring Soon! ⏳",
-
-            body: `Your subscription to ${row.type === 'PLATFORM' ? 'the Platform' : row.artist_name || 'your artist'} will expire in 2 days. Renew now to stay premium!`,
-
-            data: { type: "expiry_warning", artistId: row.artist_id }
-
-          }).catch(e => logger.error(e, "[Notifier] Expiry warning failed"));
-
-        }
-
-      } catch (err) {
-
-        console.error("[Notifier] Failed to send expiry notifications:", err);
-
-      }
-
-    };
-
-
-
-    const sweepStaleSessions = async () => {
-
-      console.log("[Sweeper] Running stale session cleanup...");
-
-      try {
-
-        const result = await pool.query(`
-
-          DELETE FROM user_sessions
-
-          WHERE last_active_at < now() - interval '30 days'
-
-        `);
-
-        if (result.rowCount && result.rowCount > 0) {
-
-          console.log(`[Sweeper] Removed ${result.rowCount} stale user sessions.`);
-
-        }
-
-      } catch (err) {
-
-        console.error("[Sweeper] Failed to sweep sessions:", err);
-
-      }
-
-    };
-
-
-
-    // Run immediately on boot then every 6 hours
-
-    sweepExpiredSubscriptions();
-
-    setInterval(sweepExpiredSubscriptions, 6 * 60 * 60 * 1000);
-
-
-
-    // Run expiry notifications every hour (since it checks for a narrow window)
-
-    notifyExpiringSubscriptions();
-
-    setInterval(notifyExpiringSubscriptions, 60 * 60 * 1000);
-
-
-
-    // Run session cleanup every 24 hours
-
-    sweepStaleSessions();
-
-    setInterval(sweepStaleSessions, 24 * 60 * 60 * 1000);
-
-
-
-  } catch (err) {
-
-    console.error("[Startup] WARNING: DB schema migration failed — check DATABASE_URL:", (err as any)?.message ?? err);
-
-    console.error("[Startup] The server is still running but some features may not work until the DB is reachable.");
-
-  }
-
-})().catch((err) => {
-
-  console.error("[Startup] Fatal:", err);
-
+    });
+  };
+
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+}
+
+bootstrap().catch((error) => {
+  logger.fatal(
+    { error: error instanceof Error ? error.message : error },
+    "[Startup] Fatal startup failure; HTTP listener was not opened"
+  );
   process.exit(1);
-
 });
-
