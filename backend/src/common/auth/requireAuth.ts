@@ -1,142 +1,167 @@
-import { Request, Response, NextFunction } from "express";
+import { NextFunction, Response } from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../db";
+import { SessionService } from "./session.service";
 
-export const requireAuth = async (
-  req: any,
-  res: Response,
-  next: NextFunction
-) => {
+export type AuthenticatedUser = {
+  id: number;
+  email: string;
+  role: string;
+  status: string;
+  isVerified: boolean;
+  sessionId: number;
+  name?: string | null;
+};
+
+type TokenPayload = jwt.JwtPayload & {
+  id?: number;
+  userId?: number;
+  email?: string;
+  role?: string;
+  sid?: number;
+};
+
+function getBearerToken(authorization: unknown) {
+  if (typeof authorization !== "string") return null;
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+async function resolveAuthenticatedUser(token: string): Promise<AuthenticatedUser> {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error("JWT_SECRET is not configured");
+  }
+
+  const decoded = jwt.verify(token, secret) as TokenPayload;
+  const userId = Number(decoded?.id ?? decoded?.userId);
+  const sessionId = Number(decoded?.sid);
+
+  if (!Number.isInteger(userId) || userId <= 0 || !Number.isInteger(sessionId) || sessionId <= 0) {
+    const error: any = new Error("Invalid token payload");
+    error.status = 401;
+    error.code = "INVALID_SESSION";
+    throw error;
+  }
+
+  const activeSession = await SessionService.assertActiveSession(sessionId, userId);
+  if (!activeSession) {
+    const error: any = new Error("Session is no longer active");
+    error.status = 401;
+    error.code = "SESSION_REVOKED";
+    throw error;
+  }
+
+  const result = await pool.query(
+    `SELECT id, email, name, role, status, is_verified, is_deleted
+       FROM public.users
+      WHERE id = $1`,
+    [userId]
+  );
+  const user = result.rows?.[0];
+
+  if (!user) {
+    const error: any = new Error("Account is unavailable");
+    error.status = 401;
+    error.code = "ACCOUNT_NOT_FOUND";
+    throw error;
+  }
+
+  const role = String(user.role || "").toUpperCase();
+  const status = String(user.status || "").toUpperCase();
+  const isDeleted = user.is_deleted === true;
+
+  if (!role || isDeleted || status !== "ACTIVE") {
+    const error: any = new Error("Account is not active");
+    error.status = 403;
+    error.code = "ACCOUNT_INACTIVE";
+    throw error;
+  }
+
+  return {
+    id: Number(user.id),
+    email: String(user.email),
+    name: user.name ?? null,
+    role,
+    status,
+    isVerified: user.is_verified === true,
+    sessionId,
+  };
+}
+
+function sendAuthError(res: Response, error: any) {
+  const status = error?.status === 403 ? 403 : 401;
+  const code =
+    status === 403
+      ? error?.code || "FORBIDDEN"
+      : error?.code === "SESSION_REVOKED"
+        ? "SESSION_REVOKED"
+        : "UNAUTHORIZED";
+
+  return res.status(status).json({
+    success: false,
+    code,
+    message: status === 403 ? "Account is not permitted to access this resource" : "Authentication required",
+  });
+}
+
+export const requireAuth = async (req: any, res: Response, next: NextFunction) => {
   try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader) {
-      console.log("[Auth Error] Token missing");
+    const token = getBearerToken(req.headers.authorization);
+    if (!token) {
       return res.status(401).json({
         success: false,
-        message: "Token missing"
+        code: "UNAUTHORIZED",
+        message: "Authentication required",
       });
     }
 
-    const token = authHeader.split(" ")[1];
-    console.log("[Auth Debug] Token received, attempting to verify");
-
-    const decoded: any = jwt.verify(
-      token,
-      process.env.JWT_SECRET as string
-    );
-
-    const userId = decoded?.id ?? decoded?.userId;
-    console.log(`[Auth Debug] ID: ${userId}, Role: ${decoded?.role}, Secret Prefix: ${process.env.JWT_SECRET?.substring(0, 10)}`);
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid token payload"
-      });
-    }
-
-    const tokenRole = (decoded?.role ?? "").toString().toUpperCase();
-
-    // For admins we trust the token and skip DB lookups.
-    if (tokenRole === "ADMIN") {
-      req.user = {
-        ...decoded,
-        id: userId,
-        role: "ADMIN",
-        status: "ACTIVE"
-      };
-      return next();
-    }
-
-    let dbUser: any = null;
-    try {
-      const result = await pool.query(
-        "SELECT id, role, COALESCE(status, 'ACTIVE') as status, COALESCE(is_deleted, false) as is_deleted FROM public.users WHERE id = $1",
-        [userId]
-      );
-      dbUser = result.rows?.[0] ?? null;
-    } catch {
-      dbUser = null;
-    }
-
-    if (!dbUser) {
-      return res.status(401).json({
-        success: false,
-        message: "User not found"
-      });
-    }
-
-    const role = (dbUser.role ?? tokenRole ?? "").toString().toUpperCase();
-    const status = (dbUser.status ?? decoded.status ?? "ACTIVE").toString().toUpperCase();
-
-    const isDeleted = Boolean((dbUser as any)?.is_deleted);
-    if (role === "ARTIST" && isDeleted) {
-      return res.status(403).json({
-        success: false,
-        message: "Artist account is inactive"
-      });
-    }
-
-    if (role === "ARTIST" && status === "SUSPENDED") {
-      return res.status(403).json({
-        success: false,
-        message: "Artist account is suspended"
-      });
-    }
-
-    req.user = {
-      ...decoded,
-      id: dbUser.id,
-      role,
-      status,
-      isDeleted
-    };
-
-    next();
-  } catch (error) {
-    return res.status(401).json({
-      success: false,
-      message: "Invalid token"
-    });
+    req.user = await resolveAuthenticatedUser(token);
+    return next();
+  } catch (error: any) {
+    return sendAuthError(res, error);
   }
 };
 
 /**
- * Optional authentication middleware.
- * If a valid token is provided, populates req.user.
- * If token is missing or invalid, proceeds without req.user.
+ * Optional authentication never grants access based only on JWT claims. A token
+ * is treated as authenticated only when both its server session and current user
+ * state are valid. Invalid/revoked optional tokens are treated as guest access.
  */
-export const optionalAuth = async (
-  req: any,
-  res: Response,
-  next: NextFunction
-) => {
+export const optionalAuth = async (req: any, _res: Response, next: NextFunction) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) return next();
-
-    const token = authHeader.split(" ")[1];
+    const token = getBearerToken(req.headers.authorization);
     if (!token) return next();
-
-    const decoded: any = jwt.verify(
-      token,
-      process.env.JWT_SECRET as string
-    );
-
-    const userId = decoded?.id ?? decoded?.userId;
-    if (!userId) return next();
-
-    // Attach user but don't perform heavy DB checks to keep it fast
-    req.user = {
-      ...decoded,
-      id: userId,
-      role: (decoded.role || "FAN").toString().toUpperCase()
-    };
-
-    next();
-  } catch (error) {
-    // On JWT error, just treat as guest
-    next();
+    req.user = await resolveAuthenticatedUser(token);
+  } catch {
+    req.user = undefined;
   }
+  return next();
+};
+
+export const requireRoles = (...allowedRoles: string[]) => {
+  const allowed = new Set(allowedRoles.map((role) => role.toUpperCase()));
+
+  return (req: any, res: Response, next: NextFunction) => {
+    const role = String(req.user?.role || "").toUpperCase();
+    if (!role || !allowed.has(role)) {
+      return res.status(403).json({
+        success: false,
+        code: "FORBIDDEN",
+        message: "You do not have permission to perform this action",
+      });
+    }
+    return next();
+  };
+};
+
+export const requireVerifiedArtist = (req: any, res: Response, next: NextFunction) => {
+  if (String(req.user?.role || "").toUpperCase() !== "ARTIST" || req.user?.isVerified !== true) {
+    return res.status(403).json({
+      success: false,
+      code: "ARTIST_NOT_APPROVED",
+      message: "Artist approval is required",
+    });
+  }
+  return next();
 };
