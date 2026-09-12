@@ -1,6 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import { PoolClient } from "pg";
 import { pool } from "../../common/db";
 import { requireAuth } from "../../common/auth/requireAuth";
 import { authLimiter } from "../../common/security/rateLimit";
@@ -11,6 +12,8 @@ const router = Router();
 const PRIVILEGED_ROLES = new Set(["ADMIN", "MODERATOR", "FINANCE"]);
 
 router.post("/login", authLimiter, async (req, res) => {
+  let client: PoolClient | null = null;
+
   try {
     const { email, password, deviceId: bodyDeviceId, deviceName } = req.body as {
       email?: string;
@@ -31,15 +34,28 @@ router.post("/login", authLimiter, async (req, res) => {
       });
     }
 
-    const userResult = await pool.query(
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      throw new Error("JWT_SECRET is not configured");
+    }
+
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    // Use the same user-row -> session-advisory lock order as consumer login
+    // and password rotation. A privileged login that started with an old
+    // password cannot create a session after a password change has committed.
+    const userResult = await client.query(
       `SELECT id, email, password, role, status, is_deleted
          FROM users
-        WHERE email = $1`,
+        WHERE email = $1
+        FOR UPDATE`,
       [email.trim().toLowerCase()]
     );
     const user = userResult.rows?.[0];
 
     if (!user || !(await bcrypt.compare(password, user.password))) {
+      await client.query("ROLLBACK");
       return res.status(401).json({
         success: false,
         code: "INVALID_CREDENTIALS",
@@ -49,6 +65,7 @@ router.post("/login", authLimiter, async (req, res) => {
 
     const role = String(user.role || "").toUpperCase();
     if (!PRIVILEGED_ROLES.has(role)) {
+      await client.query("ROLLBACK");
       // Do not reveal that valid consumer credentials were supplied to the
       // wrong portal; public login failures remain indistinguishable.
       return res.status(401).json({
@@ -59,6 +76,7 @@ router.post("/login", authLimiter, async (req, res) => {
     }
 
     if (user.is_deleted === true || String(user.status || "").toUpperCase() !== "ACTIVE") {
+      await client.query("ROLLBACK");
       return res.status(403).json({
         success: false,
         code: "ACCOUNT_INACTIVE",
@@ -66,24 +84,20 @@ router.post("/login", authLimiter, async (req, res) => {
       });
     }
 
-    const session = await SessionService.createSession({
+    const session = await SessionService.createSessionInTransaction(client, {
       userId: Number(user.id),
       deviceId,
       deviceName: deviceName || String(req.headers["user-agent"] || "Admin browser"),
       maxActiveSessions: null,
     });
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      await SessionService.revokeSession(Number(user.id), session.id);
-      throw new Error("JWT_SECRET is not configured");
-    }
-
     const token = jwt.sign(
       { id: Number(user.id), email: user.email, role, sid: session.id },
       secret,
       { expiresIn: "1d" }
     );
+
+    await client.query("COMMIT");
 
     AuditService.log({
       action: "admin.login",
@@ -101,6 +115,8 @@ router.post("/login", authLimiter, async (req, res) => {
       user: { id: Number(user.id), email: user.email, role },
     });
   } catch (error: any) {
+    if (client) await client.query("ROLLBACK").catch(() => undefined);
+
     if (error?.code === "DEVICE_ID_REQUIRED" || error?.code === "INVALID_DEVICE_ID") {
       return res.status(400).json({
         success: false,
@@ -114,6 +130,8 @@ router.post("/login", authLimiter, async (req, res) => {
       success: false,
       message: "Server error",
     });
+  } finally {
+    client?.release();
   }
 });
 
