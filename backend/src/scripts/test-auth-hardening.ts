@@ -70,11 +70,13 @@ function testAuthSourceContracts() {
 
   assert.equal(passwordController.includes("DELETE FROM user_sessions WHERE user_id = $1"), true, "Password change must revoke pre-change sessions");
   assert.equal(passwordController.includes("sessionRotated: true"), true, "Password change must return replacement-session contract");
+  assert.equal(passwordController.includes("req.body?.deviceId"), true, "Browser password changes must carry stable device identity without widening CORS");
 
-  assert.equal(fanApi.includes("X-Device-Id"), true, "Fan client must send stable device identity");
+  assert.equal(fanApi.includes("X-Device-Id"), true, "Native fan client must send stable device identity");
+  assert.equal(fanApi.includes("Platform.OS === 'web'"), true, "Fan web must use the browser-safe device contract");
   assert.equal(fanApi.includes("sessionRotated"), true, "Fan client must persist rotated JWTs");
-  assert.equal(artistHttp.includes("X-Device-Id"), true, "Artist web must send stable device identity");
-  assert.equal(adminHttp.includes("X-Device-Id"), true, "Admin web must send stable device identity");
+  assert.equal(artistHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Artist web auth must send stable device identity in the request body");
+  assert.equal(adminHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Admin web login must send stable device identity in the request body");
 }
 
 function main() {
