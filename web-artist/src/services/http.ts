@@ -22,11 +22,12 @@ export const http = axios.create({
 });
 
 http.interceptors.request.use((config) => {
-  const isAuthRequest =
+  const needsDeviceIdentity =
     config.url?.includes("/api/v1/auth/login") ||
-    config.url?.includes("/api/v1/artist/onboard");
+    config.url?.includes("/api/v1/artist/onboard") ||
+    config.url?.includes("/api/v1/artist/update-password");
 
-  if (isAuthRequest && config.data && typeof config.data === "object") {
+  if (needsDeviceIdentity && config.data && typeof config.data === "object") {
     config.data = { ...config.data, deviceId: getOrCreateDeviceId() };
   }
 
@@ -39,7 +40,13 @@ http.interceptors.request.use((config) => {
 });
 
 http.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    const rotatedToken = res.data?.sessionRotated ? res.data?.token : null;
+    if (typeof rotatedToken === "string" && rotatedToken.length > 0) {
+      localStorage.setItem("artistToken", rotatedToken);
+    }
+    return res;
+  },
   (error) => {
     const status = error?.response?.status;
 
