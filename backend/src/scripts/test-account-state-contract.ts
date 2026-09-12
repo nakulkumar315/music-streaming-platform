@@ -16,7 +16,7 @@ function main() {
 
   const securityMount = adminIndex.indexOf('router.use("/", adminAccountSecurityRoutes)');
   const artistMount = adminIndex.indexOf('router.use("/artists", requireAuth, requireRoles("ADMIN"), adminArtistsRoutes)');
-  const contentMount = adminIndex.indexOf('adminContentRoutes');
+  const contentMount = adminIndex.indexOf('"/content",\n  requireAuth,\n  requireRoles("ADMIN", "MODERATOR"),\n  adminContentRoutes');
 
   assert.ok(securityMount >= 0, "Canonical admin account-security router must be mounted");
   assert.ok(artistMount > securityMount, "Account-security routes must intercept before the historical artist router");
