@@ -5,6 +5,10 @@ import { pool } from "../../common/db";
 import { invalidateArtistCache } from "../../common/cache";
 import { logger } from "../../common/logger";
 import { AuditService } from "../../shared/audit/audit.service";
+import {
+  ArtistApprovalDecision,
+  ArtistApprovalService,
+} from "../../modules/artist/artist-approval.service";
 
 const router = Router();
 const requireAdmin = requireRoles("ADMIN");
@@ -61,7 +65,7 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
         portfolioLinks: Array.isArray(u.portfolio_links) ? u.portfolio_links : [],
         appealMessage: u.artist_appeal_message ?? null,
         appealed: status === "REJECTED" && Boolean(appeal),
-        adminNote: u.admin_remarks ?? null
+        adminNote: u.admin_remarks ?? null,
       };
     });
 
@@ -71,120 +75,79 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
     return res.status(500).json({
       success: false,
       message: "Failed to fetch pending artists",
-      correlationId
+      correlationId,
     });
   }
 });
 
 router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
-  const id = Number(req.params.id);
-
-  if (!Number.isFinite(id) || id <= 0) {
-    return res.status(400).json({ success: false, message: "Invalid id", correlationId });
-  }
-
-  const { action, reason } = req.body as { action?: string; reason?: string };
-  const act = (action ?? "").toString().trim().toUpperCase();
-  const note = (reason ?? "").toString().trim();
-
-  if (act !== "APPROVE" && act !== "REJECT") {
-    return res.status(400).json({
-      success: false,
-      message: "action must be APPROVE or REJECT",
-      correlationId
-    });
-  }
-  if (act === "REJECT" && !note) {
-    return res.status(400).json({
-      success: false,
-      message: "reason is required for rejection",
-      correlationId
-    });
-  }
+  const artistId = Number(req.params.id);
+  const action = String(req.body?.action || "").trim().toUpperCase() as ArtistApprovalDecision;
+  const reason = String(req.body?.reason || "").trim();
 
   try {
-    logger.info({ correlationId, artistId: id, action: act }, "[ADMIN] Resolving artist approval");
+    const result = await ArtistApprovalService.resolve({
+      artistId,
+      action,
+      reason,
+    });
 
-    if (act === "APPROVE") {
-      const r = await pool.query(
-        `UPDATE users
-         SET artist_status = 'APPROVED',
-             is_verified = true,
-             verified = true,
-             admin_remarks = NULL,
-             updated_at = now()
-         WHERE id = $1 AND role = 'ARTIST'
-         RETURNING id, artist_status`,
-        [id]
-      );
-
-      if (!r.rows?.length) {
-        return res.status(404).json({ success: false, message: "Artist not found", correlationId });
-      }
-
-      await invalidateArtistCache();
-
-      await pool
-        .query(
-          "INSERT INTO artist_stats (artist_id, total_plays, total_subscribers, total_earnings, created_at, updated_at) VALUES ($1, 0, 0, 0, now(), now()) ON CONFLICT (artist_id) DO NOTHING",
-          [id]
-        )
-        .catch(() => undefined);
-
-      AuditService.log({
-        action: "admin.artist_approved",
-        entity: "user",
-        entityId: String(id),
-        performedBy: req.user?.id,
-        role: "admin",
-        status: "success",
-        correlationId,
-        metadata: { action: "approve" }
-      });
-
-      return res.json({ success: true, status: "APPROVED", correlationId });
-    }
-
-    const r = await pool.query(
-      `UPDATE users
-       SET artist_status = 'REJECTED',
-           is_verified = false,
-           verified = false,
-           admin_remarks = $2,
-           updated_at = now()
-       WHERE id = $1 AND role = 'ARTIST'
-       RETURNING id, artist_status`,
-      [id, note]
-    );
-
-    if (!r.rows?.length) {
-      return res.status(404).json({ success: false, message: "Artist not found", correlationId });
-    }
-
-    // A rejected artist may keep the authenticated account session for appeal
-    // and onboarding recovery, but public/discovery caches must be evicted
-    // immediately because verified + APPROVED is the fan visibility invariant.
+    // Public artist visibility depends on verified + APPROVED, so either
+    // decision must evict discovery/detail caches immediately.
     await invalidateArtistCache();
 
     AuditService.log({
-      action: "admin.artist_rejected",
+      action:
+        result.status === "APPROVED"
+          ? "admin.artist_approved"
+          : "admin.artist_rejected",
       entity: "user",
-      entityId: String(id),
+      entityId: String(result.artistId),
       performedBy: req.user?.id,
       role: "admin",
       status: "success",
       correlationId,
-      metadata: { reason: note }
+      metadata: {
+        action: result.status.toLowerCase(),
+        previousStatus: result.previousStatus,
+        ...(result.reason ? { reason: result.reason } : {}),
+      },
     });
 
-    return res.json({ success: true, status: "REJECTED", correlationId });
-  } catch {
-    logger.error({ correlationId, artistId: id, action: act }, "[ADMIN] resolve-artist failed");
-    return res.status(500).json({
+    logger.info(
+      {
+        correlationId,
+        artistId: result.artistId,
+        previousStatus: result.previousStatus,
+        status: result.status,
+      },
+      "[ADMIN] Artist approval resolved"
+    );
+
+    return res.json({
+      success: true,
+      status: result.status,
+      correlationId,
+    });
+  } catch (error: any) {
+    const status = [400, 404, 409].includes(Number(error?.status))
+      ? Number(error.status)
+      : 500;
+
+    logger.error(
+      { correlationId, artistId, action, code: error?.code || "SYSTEM_ERROR" },
+      "[ADMIN] resolve-artist failed"
+    );
+
+    return res.status(status).json({
       success: false,
-      message: "Failed to resolve artist",
-      correlationId
+      code: error?.code || "SYSTEM_ERROR",
+      message:
+        status === 500
+          ? "Failed to resolve artist"
+          : String(error?.message || "Unable to resolve artist"),
+      correlationId,
     });
   }
 });
