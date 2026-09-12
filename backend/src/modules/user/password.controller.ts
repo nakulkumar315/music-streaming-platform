@@ -5,9 +5,10 @@ import { pool } from "../../common/db";
 import { AuditService } from "../../shared/audit/audit.service";
 
 function requestDeviceId(req: any) {
+  const bodyValue = req.body?.deviceId;
   const headerValue = req.headers?.["x-device-id"];
-  const value = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-  return String(value || "").trim();
+  const candidate = bodyValue ?? (Array.isArray(headerValue) ? headerValue[0] : headerValue);
+  return String(candidate || "").trim();
 }
 
 export async function updatePasswordAndRotateSession(req: any, res: Response) {
