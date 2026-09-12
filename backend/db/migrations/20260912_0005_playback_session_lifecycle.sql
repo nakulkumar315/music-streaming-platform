@@ -30,4 +30,4 @@ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_playback_sessions_active_user
-  ON playback_sessions (user_id, ended_at, heartbeat_at DESC);
+  ON playback_sessions (user_id, heartbeat_at DESC);
