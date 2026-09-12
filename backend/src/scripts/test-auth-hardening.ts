@@ -50,6 +50,7 @@ function testAuthSourceContracts() {
   const adminIndex = source("routes/admin/index.ts");
   const adminAuth = source("routes/admin/auth.ts");
   const fanIndex = source("routes/fan/index.ts");
+  const publicArtists = source("modules/artist/public-artist.routes.ts");
   const rootAuth = source("routes/auth.ts");
   const app = source("app.ts");
   const onboarding = source("modules/artist/artist-onboarding.routes.ts");
@@ -68,6 +69,7 @@ function testAuthSourceContracts() {
   assert.equal(requireAuth.includes("SessionService.assertActiveSession"), true, "Protected requests must validate server session state");
   assert.equal(requireAuth.includes("COALESCE(status, 'ACTIVE')"), false, "Account state must not fail open to ACTIVE");
   assert.equal(requireAuth.includes('export { requireRoles } from "./requireRoles"'), true, "RBAC must have one canonical implementation");
+  assert.equal(requireAuth.includes("requireVerifiedArtist"), true, "Approved artist surfaces need a server-side verification guard");
 
   assert.equal(authService.includes("42703"), false, "Auth must not retry against weaker schemas");
   assert.equal(authService.includes("Email not found"), false, "Login must not enumerate account existence");
@@ -84,6 +86,14 @@ function testAuthSourceContracts() {
   assert.equal(adminIndex.includes("debug-audit"), false, "Admin debug endpoints must not be mounted");
   assert.equal(adminIndex.includes('requireRoles("ADMIN", "MODERATOR")'), true, "Content governance must preserve moderator boundary");
   assert.equal(fanIndex.includes('const requireFan = requireRoles("FAN")'), true, "Private fan domains must have an explicit FAN boundary");
+  assert.equal(fanIndex.includes('modules/artist/public-artist.routes'), true, "Fan discovery must use the fail-closed artist router");
+  assert.equal(fs.existsSync(path.join(srcRoot, "modules/artist/artist.routes.ts")), false, "Fail-open legacy public artist router must be removed");
+  assert.equal(publicArtists.includes("is_verified = true"), true, "Fan artist discovery must require verified artists");
+  assert.equal(publicArtists.includes("artist_status::text) = 'APPROVED'"), true, "Fan artist discovery must require approved artist state");
+  assert.equal(publicArtists.includes("isVerified: true, // Default"), false, "Artist visibility must never default to verified");
+  assert.equal(publicArtists.includes("Fallback if status or is_verified"), false, "Artist visibility must not retry with weaker schema assumptions");
+  assert.equal(publicArtists.includes("process.env.NODE_ENV"), false, "Development mode must not bypass artist/content approval visibility");
+
   assert.equal(streamRoutes.includes('const requireFan = requireRoles("FAN")'), true, "Playback control APIs must be FAN-scoped");
   assert.equal(analyticsRoutes.includes("getAdminDashboardMetrics"), false, "Admin analytics must never be exposed under the fan namespace");
   assert.equal(analyticsRoutes.includes('requireRoles("FAN")'), true, "Fan analytics ingestion must be FAN-scoped");
@@ -96,7 +106,12 @@ function testAuthSourceContracts() {
 
   const secureOnboardingMount = app.indexOf('app.use("/api/v1/artist/onboard", artistOnboardingRoutes)');
   const legacyArtistMount = app.indexOf('app.use("/api/v1/artist", artistRoutes)');
-  assert.ok(secureOnboardingMount >= 0 && legacyArtistMount > secureOnboardingMount, "Secure onboarding must intercept before the legacy artist router");
+  assert.ok(secureOnboardingMount >= 0 && legacyArtistMount > secureOnboardingMount, "Secure onboarding must intercept before the historical artist router");
+  assert.equal(app.includes('"/api/v1/artist/dashboard"'), true, "Artist dashboard must be covered by the verified-artist gate");
+  assert.equal(app.includes('"/api/v1/artist/pricing"'), true, "Artist pricing must be covered by the verified-artist gate");
+  assert.equal(app.includes('"/api/v1/artist/analytics"'), true, "Artist analytics must be covered by the verified-artist gate");
+  assert.equal(app.includes("requireVerifiedArtist"), true, "Artist business surfaces must enforce verification server-side");
+
   assert.equal(onboarding.includes("password = $"), false, "Artist onboarding continuation must never update an existing password");
   assert.equal(onboarding.includes("SessionService.createSessionInTransaction"), true, "New artist + first auth session must commit atomically");
   assert.equal(onboarding.includes("authenticatedId !== existingId"), true, "Existing-email onboarding must prove account ownership");
