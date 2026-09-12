@@ -17,7 +17,7 @@
     "test:stream-access-errors": "ts-node --transpile-only src/scripts/test-stream-access-error-mapping.ts",
     "test:payment-integrity": "ts-node --transpile-only src/scripts/test-payment-integrity.ts",
     "test:auth-hardening": "ts-node --transpile-only src/scripts/test-auth-hardening.ts",
-    "test:auth-db": "NODE_ENV=test ts-node --transpile-only src/scripts/test-auth-session-db.ts",
+    "test:auth-db": "ts-node --transpile-only src/scripts/test-auth-session-db.ts",
     "test:unit": "npm run test:payment-integrity && npm run test:cloudinary-identity && npm run test:playback-url-guard && npm run test:stream-access-errors && npm run test:auth-hardening",
     "verify": "npm run build && npm run test:unit",
     "test:storage": "ts-node --transpile-only src/scripts/test-storage-connection.ts",
