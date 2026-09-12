@@ -1,22 +1,14 @@
 import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
+import { requireRoles } from "../../common/auth/requireRoles";
 import { pool } from "../../common/db";
 import { invalidateArtistCache } from "../../common/cache";
 import { logger } from "../../common/logger";
 import { AuditService } from "../../shared/audit/audit.service";
 
 const router = Router();
+const requireAdmin = requireRoles("ADMIN");
 
-const requireAdmin = (req: any, res: any, next: any) => {
-  const role = (req.user?.role || "").toUpperCase();
-  if (role !== "ADMIN") {
-    return res.status(403).json({
-      success: false,
-      message: "Forbidden"
-    });
-  }
-  return next();
-};
 const safeQuery = async <T = any>(query: string, params: any[]): Promise<T[]> => {
   try {
     const r = await pool.query(query, params);
@@ -30,21 +22,6 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
   const correlationId = req?.correlationId || "-";
 
   try {
-    // Debug: First check all ARTIST users and their status
-    // Note: artist_status is ENUM type, don't use UPPER() on it
-    const allArtists = await safeQuery<any>(
-      `SELECT id, email, name, role, artist_status::text as artist_status, created_at, onboarded_at
-       FROM users
-       WHERE role = 'ARTIST'`,
-      []
-    );
-    logger.info({ 
-      correlationId, 
-      totalArtistCount: allArtists.length,
-      artists: allArtists.map(a => ({ id: a.id, email: a.email, status: a.artist_status, role: a.role }))
-    }, "[ADMIN] All artists in system");
-
-    // Note: artist_status is ENUM type, cast to text for comparison
     const rows = await safeQuery<any>(
       `SELECT
          id,
@@ -71,12 +48,6 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
       []
     );
 
-    logger.info({ 
-      correlationId, 
-      pendingCount: rows.length,
-      pendingIds: rows.map(r => r.id)
-    }, "[ADMIN] Pending artists query result");
-
     const items = rows.map((u) => {
       const status = (u.artist_status ?? "PENDING").toString().toUpperCase();
       const appeal = (u.artist_appeal_message ?? "").toString().trim();
@@ -95,8 +66,8 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
     });
 
     return res.json({ success: true, items, correlationId });
-  } catch (err: any) {
-    logger.error({ correlationId, error: err?.message }, "[ADMIN] pending-artists error");
+  } catch {
+    logger.error({ correlationId }, "[ADMIN] pending-artists failed");
     return res.status(500).json({
       success: false,
       message: "Failed to fetch pending artists",
@@ -108,8 +79,7 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
 router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const id = Number(req.params.id);
-  console.log("[admin] resolve-artist called", { correlationId, id, body: req.body });
-  
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ success: false, message: "Invalid id", correlationId });
   }
@@ -117,8 +87,6 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
   const { action, reason } = req.body as { action?: string; reason?: string };
   const act = (action ?? "").toString().trim().toUpperCase();
   const note = (reason ?? "").toString().trim();
-
-  console.log("[admin] resolve-artist parsed", { act, note });
 
   if (act !== "APPROVE" && act !== "REJECT") {
     return res.status(400).json({
@@ -136,9 +104,9 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
   }
 
   try {
+    logger.info({ correlationId, artistId: id, action: act }, "[ADMIN] Resolving artist approval");
 
     if (act === "APPROVE") {
-      console.log("[admin] Approving artist", id);
       const r = await pool.query(
         `UPDATE users
          SET artist_status = 'APPROVED',
@@ -150,8 +118,6 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
          RETURNING id, artist_status`,
         [id]
       );
-
-      console.log("[admin] Artist update result", r.rows);
 
       if (!r.rows?.length) {
         return res.status(404).json({ success: false, message: "Artist not found", correlationId });
@@ -167,20 +133,19 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
         .catch(() => undefined);
 
       AuditService.log({
-        action: 'admin.artist_approved',
-        entity: 'user',
+        action: "admin.artist_approved",
+        entity: "user",
         entityId: String(id),
         performedBy: req.user?.id,
-        role: 'admin',
-        status: 'success',
+        role: "admin",
+        status: "success",
         correlationId,
-        metadata: { action: 'approve' }
+        metadata: { action: "approve" }
       });
 
       return res.json({ success: true, status: "APPROVED", correlationId });
     }
 
-    console.log("[admin] Rejecting artist", id);
     const r = await pool.query(
       `UPDATE users
        SET artist_status = 'REJECTED',
@@ -193,27 +158,34 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
       [id, note]
     );
 
-    console.log("[admin] Artist reject result", r.rows);
-
     if (!r.rows?.length) {
       return res.status(404).json({ success: false, message: "Artist not found", correlationId });
     }
 
+    // A rejected artist may keep the authenticated account session for appeal
+    // and onboarding recovery, but public/discovery caches must be evicted
+    // immediately because verified + APPROVED is the fan visibility invariant.
+    await invalidateArtistCache();
+
     AuditService.log({
-      action: 'admin.artist_rejected',
-      entity: 'user',
+      action: "admin.artist_rejected",
+      entity: "user",
       entityId: String(id),
       performedBy: req.user?.id,
-      role: 'admin',
-      status: 'success',
+      role: "admin",
+      status: "success",
       correlationId,
       metadata: { reason: note }
     });
 
     return res.json({ success: true, status: "REJECTED", correlationId });
-  } catch (err: any) {
-    console.error("[admin] resolve-artist error", correlationId, err?.message, err?.stack);
-    return res.status(500).json({ success: false, message: "Failed to resolve artist", correlationId, error: err?.message });
+  } catch {
+    logger.error({ correlationId, artistId: id, action: act }, "[ADMIN] resolve-artist failed");
+    return res.status(500).json({
+      success: false,
+      message: "Failed to resolve artist",
+      correlationId
+    });
   }
 });
 
