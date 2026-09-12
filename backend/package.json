@@ -16,7 +16,8 @@
     "test:playback-url-guard": "ts-node --transpile-only src/scripts/test-playback-url-guard.ts",
     "test:stream-access-errors": "ts-node --transpile-only src/scripts/test-stream-access-error-mapping.ts",
     "test:payment-integrity": "ts-node --transpile-only src/scripts/test-payment-integrity.ts",
-    "test:unit": "npm run test:payment-integrity && npm run test:cloudinary-identity && npm run test:playback-url-guard && npm run test:stream-access-errors",
+    "test:auth-hardening": "ts-node --transpile-only src/scripts/test-auth-hardening.ts",
+    "test:unit": "npm run test:payment-integrity && npm run test:cloudinary-identity && npm run test:playback-url-guard && npm run test:stream-access-errors && npm run test:auth-hardening",
     "verify": "npm run build && npm run test:unit",
     "test:storage": "ts-node --transpile-only src/scripts/test-storage-connection.ts",
     "prisma": "prisma",
@@ -33,6 +34,7 @@
     "@types/compression": "^1.8.1",
     "@types/pino": "^7.0.4",
     "@types/pino-http": "^5.8.4",
+    "@types/pg": "^8.16.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3"
