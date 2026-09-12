@@ -22,6 +22,7 @@ import mediaRoutes from "./routes/media";
 import { razorpayWebhook } from "./controllers/paymentController";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
 import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
+import artistSecurityRoutes from "./modules/artist/artist-security.routes";
 import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
 import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
 import { MediaProviderFactory } from "./services/providers/MediaProviderFactory";
@@ -153,10 +154,10 @@ app.use((req: any, res, next) => {
 });
 
 app.use("/api/v1/fan", fanRoutes);
-// The public artist creation + authenticated continuation flow is isolated from
-// the historical artist router so account ownership/session rules are enforced
-// before any legacy /onboard handler can match the request.
+// Security-critical artist entry points are mounted before the historical
+// artist router so legacy handlers cannot bypass the canonical session model.
 app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
+app.use("/api/v1/artist/update-password", artistSecurityRoutes);
 app.use("/api/v1/artist", artistRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/auth", authRoutes);
