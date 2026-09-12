@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { requireAuth } from "../common/auth/requireAuth";
 import { authLimiter } from "../common/security/rateLimit";
 import { AuthController } from "../modules/auth/auth.controller";
 
@@ -11,6 +12,10 @@ router.post("/register", authLimiter, (req, res) =>
 
 router.post("/login", authLimiter, (req, res) =>
   authController.login(req, res)
+);
+
+router.post("/logout", requireAuth, (req, res) =>
+  authController.logout(req, res)
 );
 
 router.post("/artist/register", authLimiter, (req: any, res: any) => {
