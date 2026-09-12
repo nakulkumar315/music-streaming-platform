@@ -1,9 +1,15 @@
 import { Request, Response } from "express";
 import { AuthService } from "./auth.service";
-import { pool } from "../../common/db";
 import { AuditService } from "../../shared/audit/audit.service";
 
 const authService = new AuthService();
+
+function requestDeviceId(req: Request) {
+  const bodyDeviceId = req.body?.deviceId;
+  const headerDeviceId = req.headers["x-device-id"];
+  const candidate = bodyDeviceId ?? headerDeviceId;
+  return Array.isArray(candidate) ? candidate[0] : candidate;
+}
 
 export class AuthController {
   async register(req: Request, res: Response) {
@@ -13,165 +19,123 @@ export class AuthController {
       if (!email || !password) {
         return res.status(400).json({
           success: false,
-          message: "Email and password required"
+          message: "Email and password required",
         });
       }
 
       const result = await authService.register(email, password, name || fullName);
-
-      if (result.success) {
-        return res.status(201).json(result);
-      }
-
-      return res.status(400).json(result);
+      return res.status(result.success ? 201 : 400).json(result);
     } catch {
       return res.status(500).json({
         success: false,
-        message: "Server error"
+        message: "Server error",
       });
     }
   }
 
   async login(req: Request, res: Response) {
+    const correlationId = (req as any)?.correlationId || "-";
+
     try {
-      const { email, password, deviceId, deviceName } = req.body;
-      const result = await authService.login(email, password);
-
-      // Device Limit Enforcement
-      if (result.success && result.user) {
-        const sessionResult = await authService.checkAndRegisterSession(
-          result.user.id,
-          deviceId || "Unknown-ID",
-          deviceName || req.headers["user-agent"]
-        );
-
-        if (!sessionResult.success) {
-          if (sessionResult.message === "DEVICE_LIMIT_REACHED") {
-            return res.status(403).json({
-              success: false,
-              message: "Device limit reached. Please log out from another device first.",
-              code: "DEVICE_LIMIT_REACHED"
-            });
-          }
-          return res.status(500).json({ success: false, message: "Session registration failed" });
-        }
-      }
-
-      const correlationId = (req as any)?.correlationId || "-";
-      const role = (result as any)?.user?.role ?? null;
-      const userId = (result as any)?.user?.id ?? null;
-      const pendingApproval = Boolean((result as any)?.pendingApproval);
-
-      console.log(
-        `[AUDIT] ${JSON.stringify({
-          event: "user_login",
-          correlationId,
-          email,
-          userId,
-          role: role ? role.toString().toUpperCase() : null,
-          pendingApproval
-        })}`
+      const { email, password, deviceName } = req.body;
+      const deviceId = requestDeviceId(req);
+      const result = await authService.login(
+        email,
+        password,
+        String(deviceId || ""),
+        deviceName || String(req.headers["user-agent"] || "")
       );
 
+      const role = result.user.role;
+      const userId = result.user.id;
+
       AuditService.log({
-        action: 'user.login',
-        entity: 'user',
+        action: "user.login",
+        entity: "user",
         entityId: String(userId),
         performedBy: userId,
-        role: role ? role.toString().toLowerCase() as any : 'fan',
-        status: 'success',
+        role: role.toLowerCase() as any,
+        status: "success",
         correlationId,
-        metadata: { email, deviceId, deviceName }
+        metadata: { deviceId: String(deviceId) },
       });
 
       return res.json(result);
     } catch (err: any) {
-      const correlationId = (req as any)?.correlationId || "-";
-      console.log(
-        `[AUDIT] ${JSON.stringify({
-          event: "user_login",
-          outcome: "failed",
-          correlationId,
-          email: (req as any)?.body?.email ?? null,
-          message: err?.message || "Invalid credentials"
-        })}`
-      );
-
       AuditService.log({
-        action: 'auth.failed_login',
-        entity: 'user',
-        entityId: 'unauthenticated',
+        action: "auth.failed_login",
+        entity: "user",
+        entityId: "unauthenticated",
         performedBy: undefined,
-        role: 'system',
-        status: 'failed',
+        role: "system",
+        status: "failed",
         correlationId,
-        metadata: {
-          email: (req as any)?.body?.email ?? null,
-          message: err?.message || "Invalid credentials"
-        }
+        metadata: { code: err?.code || "INVALID_CREDENTIALS" },
       });
 
-      return res.status(err?.status || 401).json({
+      const status = err?.status === 400 || err?.status === 403 ? err.status : 401;
+      const code =
+        err?.code === "DEVICE_LIMIT_REACHED" ||
+        err?.code === "DEVICE_ID_REQUIRED" ||
+        err?.code === "INVALID_DEVICE_ID" ||
+        err?.code === "ACCOUNT_INACTIVE"
+          ? err.code
+          : "INVALID_CREDENTIALS";
+
+      return res.status(status).json({
         success: false,
-        message: err?.message || "Invalid credentials"
+        code,
+        message:
+          code === "DEVICE_LIMIT_REACHED"
+            ? "Device limit reached. Please log out from another device first."
+            : code === "DEVICE_ID_REQUIRED" || code === "INVALID_DEVICE_ID"
+              ? "Unable to identify this device"
+              : code === "ACCOUNT_INACTIVE"
+                ? "Account is not available"
+                : "Invalid email or password",
       });
     }
   }
 
-  async session(req: any, res: Response) {
-    try {
-      const tokenUser = req.user;
+  async logout(req: any, res: Response) {
+    const userId = Number(req.user?.id);
+    const sessionId = Number(req.user?.sessionId);
 
-      let dbUser: any = null;
-      try {
-        try {
-            const userQuery =
-              "SELECT id, name, full_name, email, status, role, COALESCE(is_verified, verified, false) as is_verified FROM public.users WHERE id = $1";
-            const userResult = await pool.query(userQuery, [tokenUser?.id]);
-          dbUser = userResult.rows?.[0] || null;
-        } catch (err2: any) {
-          if (err2?.code !== "42703") throw err2;
-          try {
-              const userQuery =
-                "SELECT id, name, full_name, email, status, role, COALESCE(verified, false) as is_verified FROM public.users WHERE id = $1";
-              const userResult = await pool.query(userQuery, [tokenUser?.id]);
-            dbUser = userResult.rows?.[0] || null;
-          } catch (err3: any) {
-            if (err3?.code !== "42703") throw err3;
-              const userQuery = "SELECT id, name, email, status, role FROM public.users WHERE id = $1";
-              const userResult = await pool.query(userQuery, [tokenUser?.id]);
-            dbUser = userResult.rows?.[0] || null;
-          }
-        }
-      } catch (err: any) {
-        if (err?.code === "42703") {
-            const userQuery = "SELECT id, name, email, role FROM public.users WHERE id = $1";
-            const userResult = await pool.query(userQuery, [tokenUser?.id]);
-          dbUser = userResult.rows?.[0] || null;
-        } else {
-          throw err;
-        }
-      }
-
-      return res.json({
-        success: true,
-        user: {
-          ...(tokenUser || {}),
-          ...(dbUser || {}),
-          name: dbUser?.name ?? (tokenUser as any)?.name ?? null,
-          fullName: dbUser?.name ?? null,
-          role: (dbUser?.role ?? (tokenUser as any)?.role ?? null) || null,
-          isVerified: Boolean(dbUser?.is_verified ?? (tokenUser as any)?.isVerified ?? false),
-          status: dbUser?.status ?? (tokenUser as any)?.status ?? "ACTIVE"
-        }
+    if (!userId || !sessionId) {
+      return res.status(401).json({
+        success: false,
+        code: "UNAUTHORIZED",
+        message: "Authentication required",
       });
-    } catch (err) {
-  console.error("SESSION API ERROR:", err);
+    }
 
-  return res.status(500).json({
-    success: false,
-    message: err instanceof Error ? err.message : "Session error"
-  });
-}
+    await authService.logout(userId, sessionId);
+    AuditService.log({
+      action: "user.logout",
+      entity: "user_session",
+      entityId: String(sessionId),
+      performedBy: userId,
+      role: String(req.user?.role || "fan").toLowerCase() as any,
+      status: "success",
+      correlationId: req?.correlationId || "-",
+    });
+
+    return res.json({ success: true });
+  }
+
+  async session(req: any, res: Response) {
+    const user = req.user;
+    return res.json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name ?? null,
+        fullName: user.name ?? null,
+        role: user.role,
+        isVerified: user.isVerified,
+        status: user.status,
+      },
+    });
   }
 }
