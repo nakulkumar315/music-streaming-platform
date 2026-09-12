@@ -47,10 +47,12 @@ router.post("/login", authLimiter, async (req, res) => {
 
     const role = String(user.role || "").toUpperCase();
     if (!PRIVILEGED_ROLES.has(role)) {
-      return res.status(403).json({
+      // Do not reveal that valid consumer credentials were supplied to the
+      // wrong portal; public login failures remain indistinguishable.
+      return res.status(401).json({
         success: false,
-        code: "FORBIDDEN",
-        message: "This account cannot access the administration portal",
+        code: "INVALID_CREDENTIALS",
+        message: "Invalid email or password",
       });
     }
 
