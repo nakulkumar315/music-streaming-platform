@@ -4,7 +4,7 @@ import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
 import authRoutes from "../../modules/auth/auth.routes";
 import userRoutes from "../../modules/user/user.routes";
-import artistRoutes from "../../modules/artist/artist.routes";
+import artistRoutes from "../../modules/artist/public-artist.routes";
 import contentRoutes from "../../modules/content/content.routes";
 import streamRoutes from "../../modules/streaming/stream.routes";
 import subRoutes from "../../modules/subscription/sub.routes";
