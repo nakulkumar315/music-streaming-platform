@@ -74,13 +74,13 @@ export const revokeSubscription = async (req: Request, res: Response) => {
 };
 
 /**
- * Support adjustment may change non-financial timing flags only. Subscription
- * status is a controlled state machine and cannot be overwritten here; use the
- * canonical payment webhook, cancellation, expiry or refund flows instead.
+ * Support adjustment may change canonical non-financial timing flags only.
+ * Subscription status is controlled by payment/cancellation/expiry/refund state
+ * machines and cannot be overwritten here.
  */
 export const adjustSubscription = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
-  const { status, next_billing_date, grace_ends_at, auto_renew } = req.body as any;
+  const { status, next_billing_date, auto_renew } = req.body as any;
   const correlationId = (req as any).correlationId || "-";
 
   if (!Number.isSafeInteger(id) || id <= 0) {
@@ -110,10 +110,6 @@ export const adjustSubscription = async (req: Request, res: Response) => {
     if (next_billing_date !== undefined) {
       updateParts.push(`next_billing_date = $${i++}`);
       values.push(next_billing_date || null);
-    }
-    if (grace_ends_at !== undefined) {
-      updateParts.push(`grace_ends_at = $${i++}`);
-      values.push(grace_ends_at || null);
     }
     if (typeof auto_renew === "boolean") {
       updateParts.push(`auto_renew = $${i++}`);
@@ -157,7 +153,6 @@ export const adjustSubscription = async (req: Request, res: Response) => {
       correlationId,
       metadata: {
         next_billing_date: next_billing_date ?? undefined,
-        grace_ends_at: grace_ends_at ?? undefined,
         auto_renew: auto_renew ?? undefined,
       },
     });
