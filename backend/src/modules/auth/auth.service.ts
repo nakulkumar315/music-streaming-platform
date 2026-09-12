@@ -68,7 +68,7 @@ export class AuthService {
       // in-flight old-password login can never create a session after password
       // rotation has committed.
       const userResult = await client.query(
-        `SELECT id, email, password, status, role, is_verified, is_deleted
+        `SELECT id, email, password, status, role, is_verified, artist_status, is_deleted
            FROM public.users
           WHERE email = $1
           FOR UPDATE`,
@@ -88,6 +88,7 @@ export class AuthService {
       const role = String(user.role || "").toUpperCase();
       const status = String(user.status || "").toUpperCase();
       const isVerified = user.is_verified === true;
+      const artistStatus = user.artist_status ? String(user.artist_status).toUpperCase() : null;
       const isDeleted = user.is_deleted === true;
 
       // The shared /auth surface is intentionally limited to FAN/ARTIST. ADMIN,
@@ -124,12 +125,14 @@ export class AuthService {
       return {
         success: true,
         token,
-        pendingApproval: role === "ARTIST" && !isVerified,
+        pendingApproval:
+          role === "ARTIST" && (isVerified !== true || artistStatus !== "APPROVED"),
         user: {
           id: Number(user.id),
           email: user.email,
           role,
           isVerified,
+          artistStatus,
           status,
         },
       };
