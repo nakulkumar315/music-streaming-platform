@@ -29,6 +29,7 @@ export interface MediaRecord {
 
 export interface PlaybackAccessResponse {
   mediaId: number;
+  sessionId: number;
   playbackUrl: string;
   expiresIn: number;
   contentType?: string;
