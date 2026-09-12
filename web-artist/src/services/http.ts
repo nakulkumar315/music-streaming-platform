@@ -22,11 +22,17 @@ export const http = axios.create({
 });
 
 http.interceptors.request.use((config) => {
-  config.headers = config.headers ?? {};
-  (config.headers as any)["X-Device-Id"] = getOrCreateDeviceId();
+  const isAuthRequest =
+    config.url?.includes("/api/v1/auth/login") ||
+    config.url?.includes("/api/v1/artist/onboard");
+
+  if (isAuthRequest && config.data && typeof config.data === "object") {
+    config.data = { ...config.data, deviceId: getOrCreateDeviceId() };
+  }
 
   const token = localStorage.getItem("artistToken");
   if (token) {
+    config.headers = config.headers ?? {};
     (config.headers as any).Authorization = `Bearer ${token}`;
   }
   return config;
