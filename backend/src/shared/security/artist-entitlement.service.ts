@@ -8,7 +8,7 @@ function positiveInteger(value: unknown): number | null {
 /**
  * Canonical Phase-1 paid-content entitlement.
  *
- * Access exists only when the authenticated user has an ACTIVE ARTIST
+ * Access exists only when an active, non-deleted user has an ACTIVE ARTIST
  * subscription for the content owner and the fixed access period has not
  * expired. There is intentionally no platform-plan, grace-state or feature-flag
  * bypass here.
@@ -23,13 +23,16 @@ export async function hasActiveArtistEntitlement(
 
   const result = await pool.query(
     `SELECT 1
-       FROM subscriptions
-      WHERE user_id = $1
-        AND artist_id = $2
-        AND type = 'ARTIST'
-        AND status = 'ACTIVE'
-        AND next_billing_date IS NOT NULL
-        AND next_billing_date > now()
+       FROM subscriptions s
+       JOIN users u ON u.id = s.user_id
+      WHERE s.user_id = $1
+        AND s.artist_id = $2
+        AND s.type = 'ARTIST'
+        AND s.status = 'ACTIVE'
+        AND s.next_billing_date IS NOT NULL
+        AND s.next_billing_date > now()
+        AND UPPER(COALESCE(u.status, '')) = 'ACTIVE'
+        AND COALESCE(u.is_deleted, false) = false
       LIMIT 1`,
     [userId, artistId]
   );
