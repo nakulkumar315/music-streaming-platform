@@ -8,7 +8,7 @@ import type {
 
 class MockRefundGateway implements RefundGateway {
   createCalls = 0;
-  mode: "processed" | "ambiguous" = "processed";
+  mode: "processed" | "ambiguous" | "pendingThenFailed" = "processed";
   lastInput:
     | {
         paymentId: string;
@@ -29,11 +29,12 @@ class MockRefundGateway implements RefundGateway {
     if (this.mode === "ambiguous") {
       throw new Error("simulated network timeout after gateway acceptance");
     }
-    return this.refund("processed");
+    return this.refund(this.mode === "pendingThenFailed" ? "pending" : "processed");
   }
 
   async listRefunds(): Promise<GatewayRefund[]> {
-    return this.lastInput ? [this.refund("processed")] : [];
+    if (!this.lastInput) return [];
+    return [this.refund(this.mode === "pendingThenFailed" ? "failed" : "processed")];
   }
 
   async fetchPayment(paymentId: string) {
@@ -41,10 +42,10 @@ class MockRefundGateway implements RefundGateway {
     return {
       paymentId,
       amountPaise: amount,
-      amountRefundedPaise: amount,
+      amountRefundedPaise: this.mode === "pendingThenFailed" ? 0 : amount,
       currency: "INR",
       status: "captured",
-      refundStatus: "full",
+      refundStatus: this.mode === "pendingThenFailed" ? "failed" : "full",
     };
   }
 
@@ -76,10 +77,11 @@ async function main() {
   }
   process.env.DATABASE_URL = testDatabaseUrl;
 
-  const [{ pool }, refundModule, cancellationModule] = await Promise.all([
+  const [{ pool }, refundModule, cancellationModule, entitlementModule] = await Promise.all([
     import("../common/db"),
     import("../modules/payment/payment.refund.service"),
     import("../modules/subscription/subscription.cancellation.service"),
+    import("../shared/security/artist-entitlement.service"),
   ]);
   const {
     initiateFullRefund,
@@ -88,6 +90,7 @@ async function main() {
     reconcileRefundRequest,
   } = refundModule;
   const { cancelSubscription } = cancellationModule;
+  const { hasActiveArtistEntitlement } = entitlementModule;
 
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const userIds: number[] = [];
@@ -153,6 +156,7 @@ async function main() {
   try {
     // Full refund derives its amount from the captured payment and revokes access.
     const first = await createCapturedPurchase(1);
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
     const gateway = new MockRefundGateway();
     const firstRefund = await initiateFullRefund(
       first.paymentId,
@@ -162,6 +166,11 @@ async function main() {
     assert.equal(firstRefund.request.status, "COMPLETED");
     assert.equal(firstRefund.request.amountPaise, first.amount);
     assert.equal(gateway.createCalls, 1);
+    assert.equal(
+      await hasActiveArtistEntitlement(fanId, artistId),
+      false,
+      "Confirmed full refund must revoke canonical Phase-02 entitlement"
+    );
 
     const firstPayment = await pool.query(`SELECT status, amount FROM payments WHERE id = $1`, [first.paymentId]);
     assert.equal(firstPayment.rows[0].status, "REFUNDED");
@@ -188,7 +197,17 @@ async function main() {
     assert.equal(duplicate.request.status, "COMPLETED");
     assert.equal(gateway.createCalls, 1, "Duplicate refund must not create another gateway refund");
 
-    // Failed/uncaptured local payment is not refundable.
+    // Unknown, failed and unauthorized refund requests are rejected before gateway mutation.
+    await assert.rejects(
+      () =>
+        initiateFullRefund(
+          uuidv4(),
+          { userId: 900001, role: "FINANCE" },
+          new MockRefundGateway()
+        ),
+      (error: any) => error?.code === "PAYMENT_NOT_FOUND"
+    );
+
     const failed = await createCapturedPurchase(2, "FAILED");
     await assert.rejects(
       () =>
@@ -198,6 +217,15 @@ async function main() {
           new MockRefundGateway()
         ),
       (error: any) => error?.code === "PAYMENT_NOT_REFUNDABLE"
+    );
+    await assert.rejects(
+      () =>
+        initiateFullRefund(
+          failed.paymentId,
+          { userId: 900001, role: "MODERATOR" } as any,
+          new MockRefundGateway()
+        ),
+      (error: any) => error?.code === "REFUND_FORBIDDEN"
     );
 
     // Concurrent double-clicks converge on one durable intent and one provider call.
@@ -236,8 +264,36 @@ async function main() {
     assert.equal(reconciled.status, "COMPLETED");
     assert.equal(ambiguousGateway.createCalls, 1);
 
+    // A provider refund may be accepted as pending and later fail. Reconciliation
+    // records terminal failure without revoking entitlement or altering captured money.
+    const providerFailed = await createCapturedPurchase(5);
+    const failingGateway = new MockRefundGateway();
+    failingGateway.mode = "pendingThenFailed";
+    const pendingFailure = await initiateFullRefund(
+      providerFailed.paymentId,
+      { userId: 900001, role: "FINANCE" },
+      failingGateway
+    );
+    assert.equal(pendingFailure.request.status, "PROVIDER_PENDING");
+    const failedReconciled = await reconcileRefundRequest(
+      pendingFailure.request.id,
+      failingGateway
+    );
+    assert.equal(failedReconciled.status, "FAILED");
+    const failedProviderPayment = await pool.query(
+      `SELECT status FROM payments WHERE id = $1`,
+      [providerFailed.paymentId]
+    );
+    assert.equal(failedProviderPayment.rows[0].status, "SUCCESS");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
+    const failedProviderTx = await pool.query(
+      `SELECT refund_status FROM transactions WHERE razorpay_payment_id = $1`,
+      [providerFailed.gatewayPaymentId]
+    );
+    assert.equal(failedProviderTx.rows[0].refund_status, "FAILED");
+
     // Provider/webhook partial refund is explicitly rejected in Phase 1.
-    const partial = await createCapturedPurchase(5);
+    const partial = await createCapturedPurchase(6);
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -257,19 +313,19 @@ async function main() {
     }
 
     // Cancellation is a separate entitlement transition and leaves money untouched.
-    const cancelOnly = await createCapturedPurchase(6);
+    const cancelOnly = await createCapturedPurchase(7);
     const cancelled = await cancelSubscription(
       cancelOnly.subscriptionId,
       { userId: 900001, role: "ADMIN" },
       "Support cancellation test"
     );
     assert.equal(cancelled.status, "CANCELLED");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), false);
     const cancelPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [cancelOnly.paymentId]);
     assert.equal(cancelPayment.rows[0].status, "SUCCESS", "Cancellation must not fabricate a refund");
     const cancelRefund = await pool.query(`SELECT COUNT(*)::int AS count FROM refund_requests WHERE payment_id = $1`, [cancelOnly.paymentId]);
     assert.equal(cancelRefund.rows[0].count, 0, "Cancellation must not create refund intent");
 
-    // Refund status remains queryable without altering it.
     const queried = await getRefundRequest(firstRefund.request.id);
     assert.equal(queried.status, "COMPLETED");
 
