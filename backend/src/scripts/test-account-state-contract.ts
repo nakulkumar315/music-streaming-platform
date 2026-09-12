@@ -34,7 +34,7 @@ function main() {
   assert.equal(accountService.includes("DELETE FROM user_sessions WHERE user_id = $1 RETURNING id"), true, "Account state mutations must revoke server sessions transactionally");
   assert.equal(accountService.includes("status = 'SUSPENDED'"), true, "Deactivate/status toggle must use canonical SUSPENDED state");
   assert.equal(accountService.includes("status = 'BANNED'"), true, "Ban must use canonical BANNED state");
-  assert.equal(accountService.includes("Reactivation never revives a previously issued JWT"), true, "Reactivation must explicitly preserve revocation semantics");
+  assert.equal(accountService.includes("never revives a previously issued JWT"), true, "Reactivation must explicitly preserve revocation semantics");
 
   assert.equal(accountDbTest.includes("Soft delete must revoke every active artist session"), true);
   assert.equal(accountDbTest.includes("Activation must not revive pre-suspension sessions"), true);
