@@ -123,6 +123,84 @@ export class AuthController {
     return res.json({ success: true });
   }
 
+  async logoutAll(req: any, res: Response) {
+    const userId = Number(req.user?.id);
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        code: "UNAUTHORIZED",
+        message: "Authentication required",
+      });
+    }
+
+    await authService.logoutAll(userId);
+    AuditService.log({
+      action: "user.logout_all",
+      entity: "user_session",
+      entityId: String(userId),
+      performedBy: userId,
+      role: String(req.user?.role || "fan").toLowerCase() as any,
+      status: "success",
+      correlationId: req?.correlationId || "-",
+    });
+    return res.json({ success: true });
+  }
+
+  async sessions(req: any, res: Response) {
+    const userId = Number(req.user?.id);
+    const currentSessionId = Number(req.user?.sessionId);
+    if (!userId || !currentSessionId) {
+      return res.status(401).json({
+        success: false,
+        code: "UNAUTHORIZED",
+        message: "Authentication required",
+      });
+    }
+
+    const sessions = await authService.listSessions(userId, currentSessionId);
+    return res.json({ success: true, sessions });
+  }
+
+  async revokeSession(req: any, res: Response) {
+    const userId = Number(req.user?.id);
+    const sessionId = Number(req.params?.sessionId);
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        code: "UNAUTHORIZED",
+        message: "Authentication required",
+      });
+    }
+    if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_SESSION_ID",
+        message: "Session id is invalid",
+      });
+    }
+
+    const revoked = await authService.revokeSession(userId, sessionId);
+    if (!revoked) {
+      // User-scoped delete deliberately does not reveal another user's session.
+      return res.status(404).json({
+        success: false,
+        code: "SESSION_NOT_FOUND",
+        message: "Session not found",
+      });
+    }
+
+    AuditService.log({
+      action: "user.session_revoked",
+      entity: "user_session",
+      entityId: String(sessionId),
+      performedBy: userId,
+      role: String(req.user?.role || "fan").toLowerCase() as any,
+      status: "success",
+      correlationId: req?.correlationId || "-",
+    });
+    return res.json({ success: true, revokedSessionId: sessionId });
+  }
+
   async session(req: any, res: Response) {
     const user = req.user;
     return res.json({
