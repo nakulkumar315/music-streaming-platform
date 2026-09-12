@@ -1,52 +1,85 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios, { AxiosHeaders } from 'axios';
 import * as Sentry from '@sentry/react-native';
+import { Platform } from 'react-native';
 import { API_HOST_BASE_URL } from '../config/env';
 
 export const API_BASE_URL = `${API_HOST_BASE_URL}/api/v1/fan`;
 export const JWT_STORAGE_KEY = 'jwt';
 export const USER_TOKEN_STORAGE_KEY = 'userToken';
+export const DEVICE_ID_STORAGE_KEY = 'fanDeviceId';
 
 const DEFAULT_TIMEOUT_MS = 30000;
+let unauthorizedHandler: (() => void | Promise<void>) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void | Promise<void>) | null) {
+  unauthorizedHandler = handler;
+}
+
+async function getOrCreateDeviceId() {
+  const existing = await AsyncStorage.getItem(DEVICE_ID_STORAGE_KEY);
+  if (existing) return existing;
+
+  const generated = `${Platform.OS}-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+  await AsyncStorage.setItem(DEVICE_ID_STORAGE_KEY, generated);
+  return generated;
+}
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
 export const apiV1 = axios.create({
   baseURL: `${API_HOST_BASE_URL}/api/v1/fan`,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
 export const contentApi = axios.create({
   baseURL: `${API_HOST_BASE_URL}/api/v1/content`,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
 export const searchApi = axios.create({
   baseURL: `${API_HOST_BASE_URL}/api/v1/search`,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
-function attachRetry(client: typeof api) {
+const clients = [api, apiV1, contentApi, searchApi];
+
+for (const client of clients) {
+  client.interceptors.request.use(async (config) => {
+    const token =
+      (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
+      (await AsyncStorage.getItem(JWT_STORAGE_KEY));
+    const deviceId = await getOrCreateDeviceId();
+
+    const headers =
+      config.headers instanceof AxiosHeaders
+        ? config.headers
+        : new AxiosHeaders(config.headers);
+
+    headers.set('X-Device-Id', deviceId);
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    config.headers = headers;
+    return config;
+  });
+
   client.interceptors.response.use(
     (res) => res,
     async (error) => {
       const config = error?.config as (typeof error.config & { __retryCount?: number }) | undefined;
       const status = error?.response?.status;
+
+      if (status === 401) {
+        await AsyncStorage.removeItem(USER_TOKEN_STORAGE_KEY);
+        await AsyncStorage.removeItem(JWT_STORAGE_KEY);
+        await unauthorizedHandler?.();
+      }
 
       if (status >= 500) {
         Sentry.captureException(error, { extra: { status, url: config?.url } });
@@ -68,80 +101,3 @@ function attachRetry(client: typeof api) {
     }
   );
 }
-
-attachRetry(api);
-attachRetry(apiV1);
-attachRetry(searchApi);
-attachRetry(contentApi);
-
-api.interceptors.request.use(async (config) => {
-  const token =
-    (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-    (await AsyncStorage.getItem(JWT_STORAGE_KEY));
-
-  if (token) {
-    const headers =
-      config.headers instanceof AxiosHeaders
-        ? config.headers
-        : new AxiosHeaders(config.headers);
-
-    headers.set('Authorization', `Bearer ${token}`);
-    config.headers = headers;
-  }
-
-  return config;
-});
-
-contentApi.interceptors.request.use(async (config) => {
-  const token =
-    (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-    (await AsyncStorage.getItem(JWT_STORAGE_KEY));
-
-  if (token) {
-    const headers =
-      config.headers instanceof AxiosHeaders
-        ? config.headers
-        : new AxiosHeaders(config.headers);
-
-    headers.set('Authorization', `Bearer ${token}`);
-    config.headers = headers;
-  }
-
-  return config;
-});
-
-searchApi.interceptors.request.use(async (config) => {
-  const token =
-    (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-    (await AsyncStorage.getItem(JWT_STORAGE_KEY));
-
-  if (token) {
-    const headers =
-      config.headers instanceof AxiosHeaders
-        ? config.headers
-        : new AxiosHeaders(config.headers);
-
-    headers.set('Authorization', `Bearer ${token}`);
-    config.headers = headers;
-  }
-
-  return config;
-});
-
-apiV1.interceptors.request.use(async (config) => {
-  const token =
-    (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-    (await AsyncStorage.getItem(JWT_STORAGE_KEY));
-
-  if (token) {
-    const headers =
-      config.headers instanceof AxiosHeaders
-        ? config.headers
-        : new AxiosHeaders(config.headers);
-
-    headers.set('Authorization', `Bearer ${token}`);
-    config.headers = headers;
-  }
-
-  return config;
-});
