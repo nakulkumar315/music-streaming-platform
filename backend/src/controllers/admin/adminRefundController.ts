@@ -6,6 +6,7 @@ import {
   initiateFullRefund,
   reconcileRefundRequest,
 } from "../../modules/payment/payment.refund.service";
+import { listPaymentsForRefundReview } from "../../modules/payment/payment.refund.query";
 import { PaymentDomainError } from "../../modules/payment/payment.service";
 
 function sendError(res: Response, error: unknown, fallback: string) {
@@ -24,6 +25,12 @@ function sendError(res: Response, error: unknown, fallback: string) {
   });
 }
 
+function auditRole(role: string): "admin" | "finance" | "system" {
+  if (role === "ADMIN") return "admin";
+  if (role === "FINANCE") return "finance";
+  return "system";
+}
+
 function serialize(request: any) {
   return {
     id: request.id,
@@ -39,6 +46,19 @@ function serialize(request: any) {
     completedAt: request.completedAt,
   };
 }
+
+export const listRefundablePayments = async (req: any, res: Response) => {
+  try {
+    const items = await listPaymentsForRefundReview(Number(req.query?.limit || 50));
+    return res.json({
+      success: true,
+      items,
+      correlationId: req?.correlationId || "-",
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to fetch payment refund review data");
+  }
+};
 
 export const initiateRefund = async (req: any, res: Response) => {
   const correlationId = req?.correlationId || "-";
@@ -72,7 +92,7 @@ export const initiateRefund = async (req: any, res: Response) => {
       entity: "refund_request",
       entityId: result.request.id,
       performedBy: actorId,
-      role: role.toLowerCase() as any,
+      role: auditRole(role),
       status: completed ? "success" : "pending",
       correlationId,
       metadata: {
@@ -84,8 +104,7 @@ export const initiateRefund = async (req: any, res: Response) => {
       },
     });
 
-    const httpStatus = completed ? 200 : 202;
-    return res.status(httpStatus).json({
+    return res.status(completed ? 200 : 202).json({
       success: true,
       refund: serialize(result.request),
       idempotent: result.idempotent,
@@ -101,7 +120,7 @@ export const initiateRefund = async (req: any, res: Response) => {
       entity: "payment",
       entityId: String(req.params.paymentId || "unknown"),
       performedBy: Number.isSafeInteger(actorId) ? actorId : undefined,
-      role: role.toLowerCase() as any,
+      role: auditRole(role),
       status: "failed",
       correlationId,
       metadata: {
