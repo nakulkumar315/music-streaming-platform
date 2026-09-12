@@ -3,80 +3,102 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../../common/db";
 import { authLimiter } from "../../common/security/rateLimit";
+import { SessionService } from "../../common/auth/session.service";
 
 const router = Router();
+const PRIVILEGED_ROLES = new Set(["ADMIN", "MODERATOR", "FINANCE"]);
 
 router.post("/login", authLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body as {
+    const { email, password, deviceId: bodyDeviceId, deviceName } = req.body as {
       email?: string;
       password?: string;
+      deviceId?: string;
+      deviceName?: string;
     };
+
+    const headerDeviceId = req.headers["x-device-id"];
+    const deviceId = String(
+      bodyDeviceId || (Array.isArray(headerDeviceId) ? headerDeviceId[0] : headerDeviceId) || ""
+    );
 
     if (!email || !password) {
       return res.status(400).json({
         success: false,
-        message: "Email and password required"
+        message: "Email and password required",
       });
     }
 
-    const userQuery = "SELECT id, email, password, role FROM users WHERE email = $1";
-    const userResult = await pool.query(userQuery, [email]);
+    const userResult = await pool.query(
+      `SELECT id, email, password, role, status, is_deleted
+         FROM users
+        WHERE email = $1`,
+      [email.trim().toLowerCase()]
+    );
+    const user = userResult.rows?.[0];
 
-    if (userResult.rows.length === 0) {
-      console.warn("[ADMIN LOGIN] user not found", { email });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({
         success: false,
-        message: "Invalid credentials"
+        code: "INVALID_CREDENTIALS",
+        message: "Invalid email or password",
       });
     }
 
-    const user = userResult.rows[0] as {
-      id: number;
-      email: string;
-      password: string;
-      role?: string | null;
-    };
-
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      console.warn("[ADMIN LOGIN] invalid password", { email, userId: user.id });
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials"
-      });
-    }
-
-    if ((user.role || "").toUpperCase() !== "ADMIN") {
-      console.warn("[ADMIN LOGIN] forbidden role", {
-        email,
-        userId: user.id,
-        role: user.role
-      });
+    const role = String(user.role || "").toUpperCase();
+    if (!PRIVILEGED_ROLES.has(role)) {
       return res.status(403).json({
         success: false,
-        message: "Forbidden"
+        code: "FORBIDDEN",
+        message: "This account cannot access the administration portal",
       });
+    }
+
+    if (user.is_deleted === true || String(user.status || "").toUpperCase() !== "ACTIVE") {
+      return res.status(403).json({
+        success: false,
+        code: "ACCOUNT_INACTIVE",
+        message: "Account is not available",
+      });
+    }
+
+    const session = await SessionService.createSession({
+      userId: Number(user.id),
+      deviceId,
+      deviceName: deviceName || String(req.headers["user-agent"] || "Admin browser"),
+      maxActiveSessions: null,
+    });
+
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      await SessionService.revokeSession(Number(user.id), session.id);
+      throw new Error("JWT_SECRET is not configured");
     }
 
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: "ADMIN" },
-      process.env.JWT_SECRET as string,
+      { id: Number(user.id), email: user.email, role, sid: session.id },
+      secret,
       { expiresIn: "1d" }
     );
-
-    (req as any).user = { id: user.id, role: "ADMIN" };
 
     return res.json({
       success: true,
       token,
-      user: { id: user.id, email: user.email, role: "ADMIN" }
+      user: { id: Number(user.id), email: user.email, role },
     });
-  } catch {
-    console.error("[ADMIN LOGIN] server error");
+  } catch (error: any) {
+    if (error?.code === "DEVICE_ID_REQUIRED" || error?.code === "INVALID_DEVICE_ID") {
+      return res.status(400).json({
+        success: false,
+        code: error.code,
+        message: "Unable to identify this browser session",
+      });
+    }
+
+    console.error("[ADMIN LOGIN] authentication failed");
     return res.status(500).json({
       success: false,
-      message: "Server error"
+      message: "Server error",
     });
   }
 });
