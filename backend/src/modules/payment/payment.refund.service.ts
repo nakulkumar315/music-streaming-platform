@@ -501,13 +501,17 @@ async function persistProviderOutcome(requestId: string, refund: GatewayRefund) 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const requestRow = await lockRequest(client, requestId);
+
+    // Canonical financial lock order is payment/subscription -> refund request.
+    // The webhook path uses the same order, preventing API/webhook deadlocks.
     const payment = await loadPayment(client, {
-      gatewayPaymentId: String(requestRow.razorpay_payment_id),
+      gatewayPaymentId: refund.paymentId,
     });
+    const requestRow = await lockRequest(client, requestId);
 
     if (
       refund.paymentId !== String(requestRow.razorpay_payment_id) ||
+      String(payment.id) !== String(requestRow.payment_id) ||
       refund.amountPaise !== Number(requestRow.amount) ||
       refund.currency !== String(requestRow.currency).toUpperCase()
     ) {
