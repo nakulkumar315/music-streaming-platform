@@ -52,6 +52,7 @@ function testAuthSourceContracts() {
   const fanIndex = source("routes/fan/index.ts");
   const publicArtists = source("modules/artist/public-artist.routes.ts");
   const rootAuth = source("routes/auth.ts");
+  const searchRoutes = source("routes/search.ts");
   const app = source("app.ts");
   const onboarding = source("modules/artist/artist-onboarding.routes.ts");
   const artistSecurity = source("modules/artist/artist-security.routes.ts");
@@ -59,6 +60,7 @@ function testAuthSourceContracts() {
   const passwordController = source("modules/user/password.controller.ts");
   const streamRoutes = source("modules/streaming/stream.routes.ts");
   const analyticsRoutes = source("modules/analytics/analytics.routes.ts");
+  const authDbTest = source("scripts/test-auth-session-db.ts");
   const envValidation = source("config/env.validation.ts");
   const packageJson = source("../package.json");
   const fanApi = source("../../mobile/apps/fan/src/services/api.ts");
@@ -78,10 +80,14 @@ function testAuthSourceContracts() {
   assert.equal(authService.includes("42703"), false, "Auth must not retry against weaker schemas");
   assert.equal(authService.includes("Email not found"), false, "Login must not enumerate account existence");
   assert.equal(authService.includes("Incorrect password"), false, "Login must not expose credential mismatch type");
-  assert.equal(authService.includes("SessionService.createSession"), true, "Login must create authoritative server sessions");
+  assert.equal(authService.includes("FOR UPDATE"), true, "Credential verification must lock the user row before session creation");
+  assert.equal(authService.includes("SessionService.createSessionInTransaction"), true, "Login must create the session inside the credential transaction");
   assert.equal(authService.includes('role !== "FAN" && role !== "ARTIST"'), true, "Shared login must reject privileged portal roles");
+  assert.equal(authService.includes('artistStatus !== "APPROVED"'), true, "Artist login pending state must match the canonical approval gate");
 
   assert.equal(adminAuth.includes("This account cannot access the administration portal"), false, "Admin login must not reveal valid consumer credentials");
+  assert.equal(adminAuth.includes("FOR UPDATE"), true, "Privileged login must lock the user row before session creation");
+  assert.equal(adminAuth.includes("SessionService.createSessionInTransaction"), true, "Privileged session creation must share the login transaction");
   assert.equal(adminAuth.includes('router.post("/logout", requireAuth'), true, "Privileged logout must revoke the backend session");
   assert.equal(authController.includes("Unknown-ID"), false, "Unknown-ID must not be used as durable device identity");
   assert.equal(authRoutes.includes('router.get("/sessions"'), true, "Owned device sessions must be listable");
@@ -99,6 +105,8 @@ function testAuthSourceContracts() {
   assert.equal(publicArtists.includes("Fallback if status or is_verified"), false, "Artist visibility must not retry with weaker schema assumptions");
   assert.equal(publicArtists.includes("process.env.NODE_ENV"), false, "Development mode must not bypass artist/content approval visibility");
 
+  assert.equal(searchRoutes.includes('const requireFan = requireRoles("FAN")'), true, "Search history must be FAN-scoped");
+  assert.equal(searchRoutes.includes("router.use(requireAuth, requireFan)"), true, "Search history must enforce auth and role centrally");
   assert.equal(streamRoutes.includes('const requireFan = requireRoles("FAN")'), true, "Playback control APIs must be FAN-scoped");
   assert.equal(analyticsRoutes.includes("getAdminDashboardMetrics"), false, "Admin analytics must never be exposed under the fan namespace");
   assert.equal(analyticsRoutes.includes('requireRoles("FAN")'), true, "Fan analytics ingestion must be FAN-scoped");
@@ -106,6 +114,9 @@ function testAuthSourceContracts() {
   assert.equal(userRoutes.includes("test-push"), false, "Production user router must not expose test push");
   assert.equal(userRoutes.includes("authLimiter, requireAuth, updatePasswordAndRotateSession"), true, "Password change must be rate-limited and session-aware");
   assert.equal(passwordController.includes("DELETE FROM user_sessions WHERE user_id = $1"), true, "Password change must revoke pre-change sessions");
+  assert.equal(passwordController.includes("normalizeDeviceId"), true, "Password rotation must use canonical device validation");
+  assert.equal(passwordController.includes("SessionService.createSessionInTransaction"), true, "Password replacement session must share the password transaction");
+  assert.equal(passwordController.includes("FOR UPDATE"), true, "Password rotation must lock the user row before updating credentials");
   assert.equal(passwordController.includes("sessionRotated: true"), true, "Password change must return replacement-session contract");
   assert.equal(artistSecurity.includes("updatePasswordAndRotateSession"), true, "Artist password changes must use canonical session rotation");
 
@@ -132,6 +143,9 @@ function testAuthSourceContracts() {
   assert.equal(envValidation.includes("media-secret-change-me"), false, "Static media signing fallback is forbidden");
 
   assert.equal(packageJson.includes('"test:auth-db"'), true, "Disposable-DB auth integration suite must have a repeatable npm command");
+  assert.equal(authDbTest.includes("auth-test-race-old-login"), true, "DB suite must cover old-password login racing password rotation");
+  assert.equal(authDbTest.includes('tokenFor(userF, fSession.id, "ADMIN")'), true, "DB suite must prove JWT role claims cannot override DB role");
+  assert.equal(authDbTest.includes("AUTH_TEST_DATABASE_URL"), true, "DB suite must require an explicit disposable database URL");
 
   assert.equal(fanApi.includes("X-Device-Id"), true, "Native fan client must send stable device identity");
   assert.equal(fanApi.includes("Platform.OS === 'web'"), true, "Fan web must use the browser-safe device contract");
