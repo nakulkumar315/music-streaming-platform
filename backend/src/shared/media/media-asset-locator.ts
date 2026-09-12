@@ -1,4 +1,4 @@
-import { extractPublicIdFromUrl, isValidPublicId, normalizePublicId } from "../utils/cloudinary.utils";
+import { isValidPublicId, normalizePublicId } from "../utils/cloudinary.utils";
 
 export type MediaAssetKind = "audio" | "video" | "thumbnail";
 
@@ -12,11 +12,6 @@ export interface ContentMediaIdentityRow {
   audio_provider_asset_id?: string | null;
   video_provider_asset_id?: string | null;
   thumbnail_provider_asset_id?: string | null;
-  media_url?: string | null;
-  audio_url?: string | null;
-  video_url?: string | null;
-  file_key?: string | null;
-  thumbnail_url?: string | null;
 }
 
 export interface ResolvedMediaIdentity {
@@ -26,24 +21,12 @@ export interface ResolvedMediaIdentity {
 }
 
 function normalizeProvider(provider: string | null | undefined): string {
-  return (provider || "local").toString().trim().toLowerCase();
+  return String(provider || "").trim().toLowerCase();
 }
 
-function normalizeCloudinaryId(candidate: string | null | undefined): string | null {
-  const raw = (candidate || "").toString().trim();
-  if (!raw) return null;
-  if (raw.startsWith("http://") || raw.startsWith("https://")) {
-    const extracted = extractPublicIdFromUrl(raw);
-    if (!extracted) return null;
-    try {
-      const normalized = normalizePublicId(extracted);
-      return isValidPublicId(normalized) ? normalized : null;
-    } catch {
-      return null;
-    }
-  }
-  // Some rows store Cloudinary public_id with extension (e.g. foo/bar.mp4)
-  // or version prefix (e.g. v123/foo/bar). Normalize to a true public_id.
+function normalizeExplicitCloudinaryId(candidate: string | null | undefined): string | null {
+  const raw = String(candidate || "").trim();
+  if (!raw || raw.startsWith("http://") || raw.startsWith("https://")) return null;
   try {
     const normalized = normalizePublicId(raw);
     return isValidPublicId(normalized) ? normalized : null;
@@ -52,38 +35,12 @@ function normalizeCloudinaryId(candidate: string | null | undefined): string | n
   }
 }
 
-function cloudinaryFallbackFromUrl(
-  row: ContentMediaIdentityRow,
-  kind: MediaAssetKind
-): string | null {
-  if (kind === "thumbnail") {
-    return normalizeCloudinaryId(row.thumbnail_url ?? null);
-  }
-  if (kind === "video") {
-    return (
-      normalizeCloudinaryId(row.video_url ?? null) ||
-      normalizeCloudinaryId(row.file_key ?? null) ||
-      null
-    );
-  }
-  return (
-    normalizeCloudinaryId(row.audio_url ?? null) ||
-    normalizeCloudinaryId(row.media_url ?? null) ||
-    normalizeCloudinaryId(row.file_key ?? null) ||
-    null
-  );
-}
-
 function resolveInternalStorageKey(
   row: ContentMediaIdentityRow,
   kind: MediaAssetKind
 ): string | null {
-  if (kind === "thumbnail") {
-    return row.thumbnail_storage_key ?? null;
-  }
-  if (kind === "video") {
-    return row.video_storage_key ?? row.storage_key ?? null;
-  }
+  if (kind === "thumbnail") return row.thumbnail_storage_key ?? null;
+  if (kind === "video") return row.video_storage_key ?? row.storage_key ?? null;
   return row.storage_key ?? null;
 }
 
@@ -91,63 +48,39 @@ function resolveCloudinaryProviderAssetId(
   row: ContentMediaIdentityRow,
   kind: MediaAssetKind
 ): string | null {
-  const type = (row.type || "").toString().toLowerCase();
+  const type = String(row.type || "").toLowerCase();
   const isVideoContent = type.includes("video");
 
-  let candidate: string | null = null;
   if (kind === "thumbnail") {
-    candidate = (
-      normalizeCloudinaryId(row.thumbnail_provider_asset_id ?? null) ||
-      cloudinaryFallbackFromUrl(row, "thumbnail") ||
-      normalizeCloudinaryId(row.thumbnail_storage_key ?? null)
-    );
-  } else if (kind === "video") {
-    candidate = (
-      normalizeCloudinaryId(row.video_provider_asset_id ?? null) ||
-      (isVideoContent ? normalizeCloudinaryId(row.provider_asset_id ?? null) : null) ||
-      cloudinaryFallbackFromUrl(row, "video") ||
-      normalizeCloudinaryId(row.video_storage_key ?? null) ||
-      normalizeCloudinaryId(row.storage_key ?? null)
-    );
-  } else {
-    candidate = (
-      normalizeCloudinaryId(row.audio_provider_asset_id ?? null) ||
-      (!isVideoContent ? normalizeCloudinaryId(row.provider_asset_id ?? null) : null) ||
-      cloudinaryFallbackFromUrl(row, "audio") ||
-      normalizeCloudinaryId(row.storage_key ?? null)
+    return normalizeExplicitCloudinaryId(row.thumbnail_provider_asset_id);
+  }
+  if (kind === "video") {
+    return (
+      normalizeExplicitCloudinaryId(row.video_provider_asset_id) ||
+      (isVideoContent ? normalizeExplicitCloudinaryId(row.provider_asset_id) : null)
     );
   }
-
-  // Fallback for missing/mock artist 42 assets during development/E2E
-  if (!candidate || candidate.includes("artists/42/")) {
-    if (kind === "thumbnail") {
-      return "artists/73/thumbnails/c1c85b32/cloudinary-upload-1782719097073_ipdltf";
-    }
-    return "artists/73/media/809c837d/cloudinary-upload-1782719099585_am1smz";
-  }
-
-  return candidate;
+  return (
+    normalizeExplicitCloudinaryId(row.audio_provider_asset_id) ||
+    (!isVideoContent ? normalizeExplicitCloudinaryId(row.provider_asset_id) : null)
+  );
 }
 
+/**
+ * Resolve only explicit database identities. Raw public URLs and hard-coded
+ * development assets are never treated as an authorization-safe media identity.
+ */
 export function resolveMediaIdentity(
   row: ContentMediaIdentityRow,
   kind: MediaAssetKind
 ): ResolvedMediaIdentity {
-  const provider = normalizeProvider(row.storage_provider ?? null);
+  const provider = normalizeProvider(row.storage_provider);
   const internalStorageKey = resolveInternalStorageKey(row, kind);
-
-  if (provider === "cloudinary") {
-    return {
-      provider,
-      internalStorageKey,
-      providerAssetId: resolveCloudinaryProviderAssetId(row, kind)
-    };
-  }
 
   return {
     provider,
     internalStorageKey,
-    providerAssetId: null
+    providerAssetId:
+      provider === "cloudinary" ? resolveCloudinaryProviderAssetId(row, kind) : null,
   };
 }
-
