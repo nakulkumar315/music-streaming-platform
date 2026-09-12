@@ -54,75 +54,91 @@ export class AuthService {
       throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
     }
 
-    const userResult = await pool.query(
-      `SELECT id, email, password, status, role, is_verified, is_deleted
-         FROM public.users
-        WHERE email = $1`,
-      [normalizedEmail]
-    );
-
-    const user = userResult.rows?.[0] as any;
-    if (!user) {
-      throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
-    }
-
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
-    }
-
-    const role = String(user.role || "").toUpperCase();
-    const status = String(user.status || "").toUpperCase();
-    const isVerified = user.is_verified === true;
-    const isDeleted = user.is_deleted === true;
-
-    // The shared /auth surface is intentionally limited to FAN/ARTIST. ADMIN,
-    // MODERATOR and FINANCE identities must use the privileged admin login so
-    // portal-specific controls cannot be bypassed through a consumer endpoint.
-    if (role !== "FAN" && role !== "ARTIST") {
-      throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
-    }
-
-    if (isDeleted || status !== "ACTIVE") {
-      throw authError("Account is not available", 403, "ACCOUNT_INACTIVE");
-    }
-
-    const session = await SessionService.createSession({
-      userId: Number(user.id),
-      deviceId,
-      deviceName,
-      maxActiveSessions: 2,
-    });
-
     const secret = process.env.JWT_SECRET;
     if (!secret) {
-      await SessionService.revokeSession(Number(user.id), session.id);
       throw new Error("JWT_SECRET is not configured");
     }
 
-    const token = jwt.sign(
-      {
-        id: Number(user.id),
-        email: user.email,
-        role,
-        sid: session.id,
-      },
-      secret,
-      { expiresIn: "1d" }
-    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    return {
-      success: true,
-      token,
-      pendingApproval: role === "ARTIST" && !isVerified,
-      user: {
-        id: Number(user.id),
-        email: user.email,
-        role,
-        isVerified,
-        status,
-      },
-    };
+      // Credential verification and session creation share one transaction and
+      // one user-row lock. Password change takes the same lock first, so an
+      // in-flight old-password login can never create a session after password
+      // rotation has committed.
+      const userResult = await client.query(
+        `SELECT id, email, password, status, role, is_verified, is_deleted
+           FROM public.users
+          WHERE email = $1
+          FOR UPDATE`,
+        [normalizedEmail]
+      );
+
+      const user = userResult.rows?.[0] as any;
+      if (!user) {
+        throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
+      }
+
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
+      }
+
+      const role = String(user.role || "").toUpperCase();
+      const status = String(user.status || "").toUpperCase();
+      const isVerified = user.is_verified === true;
+      const isDeleted = user.is_deleted === true;
+
+      // The shared /auth surface is intentionally limited to FAN/ARTIST. ADMIN,
+      // MODERATOR and FINANCE identities must use the privileged admin login so
+      // portal-specific controls cannot be bypassed through a consumer endpoint.
+      if (role !== "FAN" && role !== "ARTIST") {
+        throw authError("Invalid credentials", 401, "INVALID_CREDENTIALS");
+      }
+
+      if (isDeleted || status !== "ACTIVE") {
+        throw authError("Account is not available", 403, "ACCOUNT_INACTIVE");
+      }
+
+      const session = await SessionService.createSessionInTransaction(client, {
+        userId: Number(user.id),
+        deviceId,
+        deviceName,
+        maxActiveSessions: 2,
+      });
+
+      const token = jwt.sign(
+        {
+          id: Number(user.id),
+          email: user.email,
+          role,
+          sid: session.id,
+        },
+        secret,
+        { expiresIn: "1d" }
+      );
+
+      await client.query("COMMIT");
+
+      return {
+        success: true,
+        token,
+        pendingApproval: role === "ARTIST" && !isVerified,
+        user: {
+          id: Number(user.id),
+          email: user.email,
+          role,
+          isVerified,
+          status,
+        },
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async logout(userId: number, sessionId: number) {
