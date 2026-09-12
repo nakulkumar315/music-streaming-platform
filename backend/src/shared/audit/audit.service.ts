@@ -6,8 +6,8 @@ interface AuditLogPayload {
   entity: string;
   entityId: string;
   performedBy?: number | string;
-  role?: 'fan' | 'artist' | 'admin' | 'system';
-  status: 'success' | 'failed' | 'pending';
+  role?: "fan" | "artist" | "admin" | "finance" | "moderator" | "system";
+  status: "success" | "failed" | "pending";
   correlationId?: string;
   ipAddress?: string;
   metadata?: Record<string, any>;
@@ -15,11 +15,11 @@ interface AuditLogPayload {
 
 export class AuditService {
   /**
-   * Non-blocking async logging using raw pg connection for max throughput.
-   * Resolves immediately to the caller, runs INSERT in background.
+   * Non-blocking governance/observability audit. Financial workflows must also
+   * persist their durable state/audit markers inside their own DB transaction;
+   * this asynchronous log is not used as the financial source of truth.
    */
   static log(payload: AuditLogPayload): void {
-    // Fire and forget - Do not await this so API remains fast
     setImmediate(async () => {
       try {
         const id = uuidv4();
@@ -33,13 +33,13 @@ export class AuditService {
           payload.entity,
           payload.entityId,
           payload.performedBy || null,
-          payload.role || 'system',
+          payload.role || "system",
           payload.status,
           payload.correlationId || null,
           payload.ipAddress || null,
-          payload.metadata ? JSON.stringify(payload.metadata) : null
+          payload.metadata ? JSON.stringify(payload.metadata) : null,
         ];
-        
+
         await pool.query(query, values);
       } catch (error) {
         console.error("[AuditService] Failed to insert audit log:", error);
