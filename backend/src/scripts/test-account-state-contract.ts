@@ -22,11 +22,12 @@ function main() {
   assert.ok(artistMount > securityMount, "Account-security routes must intercept before the historical artist router");
   assert.ok(contentMount > securityMount, "Account-security routes must intercept before the historical moderation router");
 
-  assert.equal(accountRouter.includes('router.use(requireAuth, requireRoles("ADMIN"))'), true, "Account-state mutations must remain ADMIN-only");
-  assert.equal(accountRouter.includes('router.patch("/artists/:id/soft-delete"'), true);
-  assert.equal(accountRouter.includes('router.patch("/artists/:id/reactivate"'), true);
-  assert.equal(accountRouter.includes('router.patch("/artists/:id/status"'), true);
-  assert.equal(accountRouter.includes('router.post("/content/artists/:artistId/ban"'), true);
+  assert.equal(accountRouter.includes("router.use(requireAuth"), false, "Root-mounted account security must not globally block unrelated MODERATOR routes");
+  assert.equal(accountRouter.includes('const requireAdmin = requireRoles("ADMIN")'), true, "Account-state mutations must retain an ADMIN guard");
+  assert.equal(accountRouter.includes('router.patch("/artists/:id/soft-delete", requireAuth, requireAdmin'), true);
+  assert.equal(accountRouter.includes('router.patch("/artists/:id/reactivate", requireAuth, requireAdmin'), true);
+  assert.equal(accountRouter.includes('router.patch("/artists/:id/status", requireAuth, requireAdmin'), true);
+  assert.equal(accountRouter.includes('router.post("/content/artists/:artistId/ban", requireAuth, requireAdmin'), true);
   assert.equal(accountRouter.includes("reauthenticationRequired: true"), true, "Explicit reactivation must require fresh authentication");
 
   assert.equal(accountService.includes("FOR UPDATE"), true, "Privileged account mutations must lock the user row");
