@@ -1,5 +1,6 @@
 import { Router } from "express";
 import adminAuthRoutes from "./auth";
+import adminAccountSecurityRoutes from "./account-security";
 import adminAnalyticsRoutes from "./analytics";
 import adminArtistApprovalsRoutes from "./artist-approvals";
 import adminArtistsRoutes from "./artists";
@@ -15,6 +16,11 @@ const router = Router();
 
 // Authentication endpoints are the only public routes under /admin.
 router.use("/", adminAuthRoutes);
+
+// Canonical account-security state changes are mounted before historical artist
+// and moderation routers so deactivate/delete/ban/reactivate can never bypass
+// transactional server-session revocation.
+router.use("/", adminAccountSecurityRoutes);
 
 // Every privileged route requires both a valid server-backed session and an
 // explicit role boundary. Child routers may keep narrower guards for endpoint-
