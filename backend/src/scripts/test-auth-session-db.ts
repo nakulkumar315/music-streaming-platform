@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 
 const CURRENT_PASSWORD = "AuthCurrentPassword123!";
 const NEW_PASSWORD = "AuthNewPassword456!";
+const TEST_CORRELATION_ID = "00000000-0000-4000-8000-000000000003";
 
 async function main() {
   if (process.env.NODE_ENV === "production") {
@@ -95,7 +96,7 @@ async function main() {
         deviceId: input.deviceId,
       },
       headers: { "user-agent": "Auth DB integration test" },
-      correlationId: "auth-db-password-rotation",
+      correlationId: TEST_CORRELATION_ID,
     };
     const res: any = {
       status(code: number) {
