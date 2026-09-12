@@ -63,7 +63,17 @@ for (const client of clients) {
         ? config.headers
         : new AxiosHeaders(config.headers);
 
-    headers.set('X-Device-Id', deviceId);
+    if (Platform.OS === 'web') {
+      const url = String(config.url || '');
+      const needsDeviceBody =
+        url.includes('/auth/login') || url.includes('/user/update-password');
+      if (needsDeviceBody && config.data && typeof config.data === 'object') {
+        config.data = { ...config.data, deviceId };
+      }
+    } else {
+      headers.set('X-Device-Id', deviceId);
+    }
+
     if (token) headers.set('Authorization', `Bearer ${token}`);
     config.headers = headers;
     return config;
