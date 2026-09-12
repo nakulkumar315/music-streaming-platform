@@ -138,7 +138,7 @@ export class SessionService {
     return result.rowCount === 1;
   }
 
-  static async listSessions(userId: number, currentSessionId: number) {
+  static async listSessions(userId: number, currentSessionId?: number) {
     const result = await pool.query(
       `SELECT id, device_id, device_name, last_active_at, created_at
          FROM user_sessions
@@ -154,7 +154,7 @@ export class SessionService {
       deviceName: row.device_name ? String(row.device_name) : null,
       lastActiveAt: row.last_active_at,
       createdAt: row.created_at,
-      current: Number(row.id) === currentSessionId,
+      current: currentSessionId !== undefined && Number(row.id) === currentSessionId,
     }));
   }
 
