@@ -26,13 +26,16 @@ async function main() {
     { pool },
     { SessionService },
     { requireAuth },
+    { AuthService },
     { updatePasswordAndRotateSession },
   ] = await Promise.all([
     import("../common/db"),
     import("../common/auth/session.service"),
     import("../common/auth/requireAuth"),
+    import("../modules/auth/auth.service"),
     import("../modules/user/password.controller"),
   ]);
+  const authService = new AuthService();
 
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const userIds: number[] = [];
@@ -123,8 +126,6 @@ async function main() {
       maxActiveSessions: 2,
     });
 
-    // Two simultaneous requests compete for the final available slot. Advisory
-    // locking must serialize them so exactly one wins and total active <= 2.
     const finalSlotRace = await Promise.allSettled([
       SessionService.createSession({
         userId: userA.id,
@@ -156,7 +157,6 @@ async function main() {
     const winningOther = activeAfterRace.find((session) => session.deviceId !== "auth-test-device-1");
     assert.ok(winningOther, "One second device must remain active");
 
-    // Same-device retry rotates that device's session rather than adding a third.
     const rotated = await SessionService.createSession({
       userId: userA.id,
       deviceId: winningOther!.deviceId,
@@ -183,8 +183,6 @@ async function main() {
     assert.equal(afterLogout.nextCalled, false, "Revoked token must not reach protected API");
     assert.equal(afterLogout.statusCode, 401, "Revoked token must return 401");
 
-    // Explicit device removal is user-scoped and must not remove another user's
-    // session even when its numeric id is known/pasted.
     const userB = await createUser("FAN");
     const userBSession = await SessionService.createSession({
       userId: userB.id,
@@ -202,8 +200,6 @@ async function main() {
       "User B session must remain active after User A IDOR attempt"
     );
 
-    // Suspension and deletion must invalidate access even while the server-side
-    // session row still exists.
     const suspensionSession = await SessionService.createSession({
       userId: userA.id,
       deviceId: "auth-test-suspension-device",
@@ -221,7 +217,6 @@ async function main() {
     assert.equal(deleted.statusCode, 403, "Deleted account must fail closed");
     assert.equal(deleted.nextCalled, false);
 
-    // Removing one device must not unexpectedly revoke another allowed device.
     const userC = await createUser("FAN");
     const c1 = await SessionService.createSession({
       userId: userC.id,
@@ -237,8 +232,6 @@ async function main() {
     assert.equal(await SessionService.assertActiveSession(c1.id, userC.id), false);
     assert.equal(await SessionService.assertActiveSession(c2.id, userC.id), true);
 
-    // Exercise the real password-change controller. It must invalidate every
-    // prior token, rotate to one current-device session, and persist the new hash.
     const userD = await createUser("FAN");
     const d1 = await SessionService.createSession({
       userId: userD.id,
@@ -274,24 +267,66 @@ async function main() {
     );
 
     const passwordRow = await pool.query("SELECT password FROM users WHERE id = $1", [userD.id]);
-    assert.equal(
-      await bcrypt.compare(NEW_PASSWORD, String(passwordRow.rows[0].password)),
-      true,
-      "New password hash must be persisted"
-    );
-    assert.equal(
-      await bcrypt.compare(CURRENT_PASSWORD, String(passwordRow.rows[0].password)),
-      false,
-      "Old password must no longer match"
-    );
+    assert.equal(await bcrypt.compare(NEW_PASSWORD, String(passwordRow.rows[0].password)), true);
+    assert.equal(await bcrypt.compare(CURRENT_PASSWORD, String(passwordRow.rows[0].password)), false);
 
     const dSessions = await SessionService.listSessions(userD.id);
     assert.equal(dSessions.length, 1, "Password change must leave exactly one replacement session");
-    assert.equal(
-      dSessions[0].deviceId,
-      "auth-test-password-current",
-      "Replacement session must be bound to the verified current device"
-    );
+    assert.equal(dSessions[0].deviceId, "auth-test-password-current");
+
+    // Password change and an old-password login deliberately race. Because both
+    // take the same user-row lock before the session advisory lock, either login
+    // finishes first and its session is then revoked by password change, or
+    // password change finishes first and the old password is rejected. The
+    // forbidden outcome is an old-password session surviving afterward.
+    const userE = await createUser("FAN");
+    const oldPasswordLogin = authService
+      .login(userE.email, CURRENT_PASSWORD, "auth-test-race-old-login", "Old password race")
+      .then((value: any) => ({ ok: true as const, value }))
+      .catch((error: any) => ({ ok: false as const, error }));
+    const passwordRaceChange = invokePasswordChange({
+      userId: userE.id,
+      oldPassword: CURRENT_PASSWORD,
+      newPassword: NEW_PASSWORD,
+      deviceId: "auth-test-race-current",
+    });
+
+    const [raceLoginResult, racePasswordResult] = await Promise.all([
+      oldPasswordLogin,
+      passwordRaceChange,
+    ]);
+    assert.equal(racePasswordResult.statusCode, 200, "Concurrent password rotation must complete");
+
+    const raceSessions = await SessionService.listSessions(userE.id);
+    assert.equal(raceSessions.length, 1, "Only the password-change replacement session may survive the race");
+    assert.equal(raceSessions[0].deviceId, "auth-test-race-current");
+
+    if (raceLoginResult.ok) {
+      const racedOldToken = String(raceLoginResult.value.token);
+      assert.equal(
+        (await invokeAuth(racedOldToken)).statusCode,
+        401,
+        "A login that authenticated with the old password before rotation must be revoked by rotation"
+      );
+    } else {
+      assert.equal(
+        raceLoginResult.error?.code,
+        "INVALID_CREDENTIALS",
+        "If password rotation wins the lock, the old-password login must be rejected"
+      );
+    }
+
+    // JWT role claims are never authorization truth. Current DB role wins.
+    const userF = await createUser("FAN");
+    const fSession = await SessionService.createSession({
+      userId: userF.id,
+      deviceId: "auth-test-forged-role",
+      maxActiveSessions: 2,
+    });
+    const forgedAdminClaim = tokenFor(userF, fSession.id, "ADMIN");
+    const resolvedForged = await invokeAuth(forgedAdminClaim);
+    assert.equal(resolvedForged.nextCalled, true);
+    assert.equal(resolvedForged.req.user?.role, "FAN", "Current DB role must override JWT role claim");
 
     console.log("Auth DB integration checks passed.");
   } finally {
