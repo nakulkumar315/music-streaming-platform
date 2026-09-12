@@ -38,6 +38,7 @@ function testRoleGuards() {
   assert.equal(evaluateGuard(["ADMIN"], "FAN").statusCode, 403);
   assert.equal(evaluateGuard(["ADMIN", "MODERATOR"], "MODERATOR").nextCalled, true);
   assert.equal(evaluateGuard(["ADMIN", "MODERATOR"], "FINANCE").statusCode, 403);
+  assert.equal(evaluateGuard(["FAN"], "ARTIST").statusCode, 403);
   assert.equal(evaluateGuard(["ADMIN", "MODERATOR"], undefined).statusCode, 403);
 }
 
@@ -45,9 +46,19 @@ function testAuthSourceContracts() {
   const requireAuth = source("common/auth/requireAuth.ts");
   const authService = source("modules/auth/auth.service.ts");
   const authController = source("modules/auth/auth.controller.ts");
+  const authRoutes = source("modules/auth/auth.routes.ts");
   const adminIndex = source("routes/admin/index.ts");
+  const adminAuth = source("routes/admin/auth.ts");
+  const fanIndex = source("routes/fan/index.ts");
+  const rootAuth = source("routes/auth.ts");
+  const app = source("app.ts");
+  const onboarding = source("modules/artist/artist-onboarding.routes.ts");
+  const artistSecurity = source("modules/artist/artist-security.routes.ts");
   const userRoutes = source("modules/user/user.routes.ts");
   const passwordController = source("modules/user/password.controller.ts");
+  const streamRoutes = source("modules/streaming/stream.routes.ts");
+  const analyticsRoutes = source("modules/analytics/analytics.routes.ts");
+  const envValidation = source("config/env.validation.ts");
   const fanApi = source("../../mobile/apps/fan/src/services/api.ts");
   const artistHttp = source("../../web-artist/src/services/http.ts");
   const adminHttp = source("../../web-admin/src/services/http.ts");
@@ -56,26 +67,54 @@ function testAuthSourceContracts() {
   assert.equal(requireAuth.includes("trust the token"), false, "No role may bypass authoritative DB state");
   assert.equal(requireAuth.includes("SessionService.assertActiveSession"), true, "Protected requests must validate server session state");
   assert.equal(requireAuth.includes("COALESCE(status, 'ACTIVE')"), false, "Account state must not fail open to ACTIVE");
+  assert.equal(requireAuth.includes('export { requireRoles } from "./requireRoles"'), true, "RBAC must have one canonical implementation");
 
   assert.equal(authService.includes("42703"), false, "Auth must not retry against weaker schemas");
   assert.equal(authService.includes("Email not found"), false, "Login must not enumerate account existence");
   assert.equal(authService.includes("Incorrect password"), false, "Login must not expose credential mismatch type");
   assert.equal(authService.includes("SessionService.createSession"), true, "Login must create authoritative server sessions");
+  assert.equal(authService.includes('role !== "FAN" && role !== "ARTIST"'), true, "Shared login must reject privileged portal roles");
 
+  assert.equal(adminAuth.includes("This account cannot access the administration portal"), false, "Admin login must not reveal valid consumer credentials");
   assert.equal(authController.includes("Unknown-ID"), false, "Unknown-ID must not be used as durable device identity");
+  assert.equal(authRoutes.includes('router.get("/sessions"'), true, "Owned device sessions must be listable");
+  assert.equal(authRoutes.includes('router.delete("/sessions/:sessionId"'), true, "Owned device sessions must be explicitly revocable");
+  assert.equal(authRoutes.includes('router.post("/logout-all"'), true, "Logout-all must have backend semantics");
+
   assert.equal(adminIndex.includes("debug-audit"), false, "Admin debug endpoints must not be mounted");
   assert.equal(adminIndex.includes('requireRoles("ADMIN", "MODERATOR")'), true, "Content governance must preserve moderator boundary");
+  assert.equal(fanIndex.includes('const requireFan = requireRoles("FAN")'), true, "Private fan domains must have an explicit FAN boundary");
+  assert.equal(streamRoutes.includes('const requireFan = requireRoles("FAN")'), true, "Playback control APIs must be FAN-scoped");
+  assert.equal(analyticsRoutes.includes("getAdminDashboardMetrics"), false, "Admin analytics must never be exposed under the fan namespace");
+  assert.equal(analyticsRoutes.includes('requireRoles("FAN")'), true, "Fan analytics ingestion must be FAN-scoped");
+
   assert.equal(userRoutes.includes("test-push"), false, "Production user router must not expose test push");
   assert.equal(userRoutes.includes("authLimiter, requireAuth, updatePasswordAndRotateSession"), true, "Password change must be rate-limited and session-aware");
-
   assert.equal(passwordController.includes("DELETE FROM user_sessions WHERE user_id = $1"), true, "Password change must revoke pre-change sessions");
   assert.equal(passwordController.includes("sessionRotated: true"), true, "Password change must return replacement-session contract");
-  assert.equal(passwordController.includes("req.body?.deviceId"), true, "Browser password changes must carry stable device identity without widening CORS");
+  assert.equal(artistSecurity.includes("updatePasswordAndRotateSession"), true, "Artist password changes must use canonical session rotation");
+
+  const secureOnboardingMount = app.indexOf('app.use("/api/v1/artist/onboard", artistOnboardingRoutes)');
+  const legacyArtistMount = app.indexOf('app.use("/api/v1/artist", artistRoutes)');
+  assert.ok(secureOnboardingMount >= 0 && legacyArtistMount > secureOnboardingMount, "Secure onboarding must intercept before the legacy artist router");
+  assert.equal(onboarding.includes("password = $"), false, "Artist onboarding continuation must never update an existing password");
+  assert.equal(onboarding.includes("SessionService.createSessionInTransaction"), true, "New artist + first auth session must commit atomically");
+  assert.equal(onboarding.includes("authenticatedId !== existingId"), true, "Existing-email onboarding must prove account ownership");
+  assert.equal(onboarding.includes("SIGNATURE_ENCRYPTION_KEY ||"), true, "Onboarding signature encryption must be explicitly configured");
+
+  assert.equal(rootAuth.includes("registerFan"), false, "Root auth must not retain the duplicate legacy registration controller");
+  assert.equal(fs.existsSync(path.join(srcRoot, "controllers/auth.ts")), false, "Credential-logging legacy registration controller must be removed");
+
+  assert.equal(envValidation.includes('envStr("JWT_SECRET")'), true, "JWT secret must fail fast at startup");
+  assert.equal(envValidation.includes('envStr("SIGNATURE_ENCRYPTION_KEY")'), true, "Signature encryption key must fail fast at startup");
+  assert.equal(envValidation.includes('envStr("MEDIA_SIGNED_TOKEN_SECRET")'), true, "Media signing secret must not use a static fallback");
+  assert.equal(envValidation.includes("media-secret-change-me"), false, "Static media signing fallback is forbidden");
 
   assert.equal(fanApi.includes("X-Device-Id"), true, "Native fan client must send stable device identity");
   assert.equal(fanApi.includes("Platform.OS === 'web'"), true, "Fan web must use the browser-safe device contract");
   assert.equal(fanApi.includes("sessionRotated"), true, "Fan client must persist rotated JWTs");
-  assert.equal(artistHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Artist web auth must send stable device identity in the request body");
+  assert.equal(artistHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Artist web auth must send stable device identity in request bodies");
+  assert.equal(artistHttp.includes("sessionRotated"), true, "Artist web must persist rotated password-change sessions");
   assert.equal(adminHttp.includes("deviceId: getOrCreateDeviceId()"), true, "Admin web login must send stable device identity in the request body");
 }
 
