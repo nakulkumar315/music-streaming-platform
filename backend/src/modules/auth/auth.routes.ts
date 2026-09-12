@@ -18,4 +18,8 @@ router.get("/session", requireAuth, (req, res) =>
   authController.session(req, res)
 );
 
+router.post("/logout", requireAuth, (req, res) =>
+  authController.logout(req, res)
+);
+
 export default router;
