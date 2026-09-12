@@ -70,7 +70,17 @@ for (const client of clients) {
   });
 
   client.interceptors.response.use(
-    (res) => res,
+    async (res) => {
+      // Security-sensitive operations may rotate the backend session. Persist
+      // the replacement token before the next API call so pre-rotation tokens
+      // are never reused by the client.
+      const rotatedToken = res.data?.sessionRotated ? res.data?.token : null;
+      if (typeof rotatedToken === 'string' && rotatedToken.length > 0) {
+        await AsyncStorage.setItem(USER_TOKEN_STORAGE_KEY, rotatedToken);
+        await AsyncStorage.removeItem(JWT_STORAGE_KEY);
+      }
+      return res;
+    },
     async (error) => {
       const config = error?.config as (typeof error.config & { __retryCount?: number }) | undefined;
       const status = error?.response?.status;
