@@ -7,7 +7,9 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck",
+    "verify": "npm run typecheck",
     "start": "expo start",
     "build": "expo build:android",
     "deploy": "expo deploy",
