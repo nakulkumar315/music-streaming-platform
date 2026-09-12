@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+
+const CURRENT_PASSWORD = "AuthCurrentPassword123!";
+const NEW_PASSWORD = "AuthNewPassword456!";
 
 async function main() {
   if (process.env.NODE_ENV === "production") {
@@ -17,27 +21,41 @@ async function main() {
   process.env.JWT_SECRET =
     process.env.JWT_SECRET || "auth-integration-test-secret-not-for-real-environments";
 
-  const [{ pool }, { SessionService }, { requireAuth }] = await Promise.all([
+  const [
+    { pool },
+    { SessionService },
+    { requireAuth },
+    { updatePasswordAndRotateSession },
+  ] = await Promise.all([
     import("../common/db"),
     import("../common/auth/session.service"),
     import("../common/auth/requireAuth"),
+    import("../modules/user/password.controller"),
   ]);
 
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const userIds: number[] = [];
+  const passwordHash = await bcrypt.hash(CURRENT_PASSWORD, 10);
 
   const createUser = async (role = "FAN") => {
     const email = `auth-test-${suffix}-${userIds.length}@example.invalid`;
     const result = await pool.query(
       `INSERT INTO users (email, password, role, status, is_deleted, name)
-       VALUES ($1, 'test-password-hash', $2, 'ACTIVE', false, 'Auth Test')
+       VALUES ($1, $2, $3, 'ACTIVE', false, 'Auth Test')
        RETURNING id, email`,
-      [email, role]
+      [email, passwordHash, role]
     );
     const id = Number(result.rows[0].id);
     userIds.push(id);
     return { id, email };
   };
+
+  const tokenFor = (user: { id: number; email: string }, sessionId: number, role = "FAN") =>
+    jwt.sign(
+      { id: user.id, email: user.email, role, sid: sessionId },
+      process.env.JWT_SECRET!,
+      { expiresIn: "1d" }
+    );
 
   const invokeAuth = async (token: string) => {
     const req: any = { headers: { authorization: `Bearer ${token}` } };
@@ -59,6 +77,39 @@ async function main() {
       nextCalled = true;
     });
     return { req, statusCode, body, nextCalled };
+  };
+
+  const invokePasswordChange = async (input: {
+    userId: number;
+    oldPassword: string;
+    newPassword: string;
+    deviceId: string;
+  }) => {
+    let statusCode = 200;
+    let body: any = null;
+    const req: any = {
+      user: { id: input.userId },
+      body: {
+        oldPassword: input.oldPassword,
+        newPassword: input.newPassword,
+        deviceId: input.deviceId,
+      },
+      headers: { "user-agent": "Auth DB integration test" },
+      correlationId: "auth-db-password-rotation",
+    };
+    const res: any = {
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(payload: any) {
+        body = payload;
+        return this;
+      },
+    };
+
+    await updatePasswordAndRotateSession(req, res);
+    return { statusCode, body };
   };
 
   try {
@@ -123,11 +174,7 @@ async function main() {
       "Same-device retry must not increase active session count"
     );
 
-    const token = jwt.sign(
-      { id: userA.id, email: userA.email, role: "FAN", sid: device1.id },
-      process.env.JWT_SECRET!,
-      { expiresIn: "1d" }
-    );
+    const token = tokenFor(userA, device1.id);
     assert.equal((await invokeAuth(token)).nextCalled, true, "Active token must reach protected API");
 
     await SessionService.revokeSession(userA.id, device1.id);
@@ -161,11 +208,7 @@ async function main() {
       deviceId: "auth-test-suspension-device",
       maxActiveSessions: 2,
     });
-    const suspensionToken = jwt.sign(
-      { id: userA.id, email: userA.email, role: "FAN", sid: suspensionSession.id },
-      process.env.JWT_SECRET!,
-      { expiresIn: "1d" }
-    );
+    const suspensionToken = tokenFor(userA, suspensionSession.id);
 
     await pool.query("UPDATE users SET status = 'SUSPENDED' WHERE id = $1", [userA.id]);
     const suspended = await invokeAuth(suspensionToken);
@@ -192,6 +235,62 @@ async function main() {
     assert.equal(await SessionService.revokeSession(userC.id, c1.id), true);
     assert.equal(await SessionService.assertActiveSession(c1.id, userC.id), false);
     assert.equal(await SessionService.assertActiveSession(c2.id, userC.id), true);
+
+    // Exercise the real password-change controller. It must invalidate every
+    // prior token, rotate to one current-device session, and persist the new hash.
+    const userD = await createUser("FAN");
+    const d1 = await SessionService.createSession({
+      userId: userD.id,
+      deviceId: "auth-test-password-d1",
+      maxActiveSessions: 2,
+    });
+    const d2 = await SessionService.createSession({
+      userId: userD.id,
+      deviceId: "auth-test-password-d2",
+      maxActiveSessions: 2,
+    });
+    const oldD1Token = tokenFor(userD, d1.id);
+    const oldD2Token = tokenFor(userD, d2.id);
+    assert.equal((await invokeAuth(oldD1Token)).nextCalled, true);
+    assert.equal((await invokeAuth(oldD2Token)).nextCalled, true);
+
+    const changed = await invokePasswordChange({
+      userId: userD.id,
+      oldPassword: CURRENT_PASSWORD,
+      newPassword: NEW_PASSWORD,
+      deviceId: "auth-test-password-current",
+    });
+    assert.equal(changed.statusCode, 200, "Password change must succeed with the current password");
+    assert.equal(changed.body?.sessionRotated, true, "Password change must report session rotation");
+    assert.equal(typeof changed.body?.token, "string", "Password change must return replacement JWT");
+
+    assert.equal((await invokeAuth(oldD1Token)).statusCode, 401, "First pre-change token must be revoked");
+    assert.equal((await invokeAuth(oldD2Token)).statusCode, 401, "Second pre-change token must be revoked");
+    assert.equal(
+      (await invokeAuth(String(changed.body.token))).nextCalled,
+      true,
+      "Replacement password-change token must be immediately usable"
+    );
+
+    const passwordRow = await pool.query("SELECT password FROM users WHERE id = $1", [userD.id]);
+    assert.equal(
+      await bcrypt.compare(NEW_PASSWORD, String(passwordRow.rows[0].password)),
+      true,
+      "New password hash must be persisted"
+    );
+    assert.equal(
+      await bcrypt.compare(CURRENT_PASSWORD, String(passwordRow.rows[0].password)),
+      false,
+      "Old password must no longer match"
+    );
+
+    const dSessions = await SessionService.listSessions(userD.id);
+    assert.equal(dSessions.length, 1, "Password change must leave exactly one replacement session");
+    assert.equal(
+      dSessions[0].deviceId,
+      "auth-test-password-current",
+      "Replacement session must be bound to the verified current device"
+    );
 
     console.log("Auth DB integration checks passed.");
   } finally {
