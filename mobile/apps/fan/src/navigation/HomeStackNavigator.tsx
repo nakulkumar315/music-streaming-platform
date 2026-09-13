@@ -2,7 +2,7 @@ import React, {} from 'react';
 
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-import ArtistScreen from '../screens/ArtistScreen';
+import AuthoritativeArtistScreen from './AuthoritativeArtistScreen';
 import ArtistSubscriptionScreen from '../screens/ArtistSubscriptionScreen';
 import ContentPlayerScreen from '../screens/ContentPlayerScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -10,7 +10,6 @@ import SeeAllTrendingScreen from '../screens/SeeAllTrendingScreen';
 import SubscriptionFlowScreen from '../screens/SubscriptionFlowScreen';
 import SeeAllSongsScreen from '../screens/SeeAllSongsScreen';
 import FullPlayerScreen from '../screens/FullPlayerScreen';
-
 
 import type { MediaItem } from '../media.types';
 
@@ -22,7 +21,6 @@ export type HomeStackParamList = {
   };
   Artist: {
     artistId?: string;
-    unlocked?: boolean;
     contentId?: string;
   };
   SubscriptionFlow: {
@@ -77,7 +75,7 @@ export default function HomeStackNavigator() {
       />
       <Stack.Screen
         name="Artist"
-        component={ArtistScreen}
+        component={AuthoritativeArtistScreen}
         options={{ animation: 'slide_from_right' }}
       />
       <Stack.Screen name="ArtistSubscription" component={ArtistSubscriptionScreen} />
