@@ -356,6 +356,40 @@ export async function releaseActivePlaybackLease(): Promise<boolean> {
 }
 
 /**
+ * Explicitly replace an expired same-content server lease. This is used only
+ * after the backend has rejected the old heartbeat/session as expired. The
+ * fresh access request re-checks account/content/subscription authorization and
+ * concurrency before a new lease is accepted locally.
+ *
+ * The returned signed URL is intentionally not persisted. Native playback may
+ * already have an open/buffered source; this command repairs the control-plane
+ * authorization lease so subsequent trusted heartbeats are bound to a current
+ * server session. Normal player URL refresh paths still apply fresh URLs when
+ * the source itself needs renewal.
+ */
+export async function reacquireExpiredPlaybackLease(
+  contentId: string | number
+): Promise<ActivePlaybackLease> {
+  const numericContentId = positiveInteger(contentId);
+  if (!numericContentId) {
+    throw new StreamAccessError('Invalid content id', 'INVALID_CONTENT_ID', null);
+  }
+
+  const stale = getActivePlaybackLease(numericContentId);
+  if (stale) {
+    clearActivePlaybackLease(stale.sessionId);
+    await terminatePlaybackAccess(stale.sessionId, stale.contentId);
+  }
+
+  const access = await getPlaybackAccess(numericContentId);
+  activePlaybackLease = {
+    contentId: numericContentId,
+    sessionId: access.sessionId,
+  };
+  return { ...activePlaybackLease };
+}
+
+/**
  * Managed URL helper used by the single global mobile player. Repeated calls
  * for the same content are token refreshes and reuse one server lease. A call
  * for different content releases the old lease before allocating a new one.
