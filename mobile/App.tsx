@@ -1,11 +1,11 @@
 import 'react-native-gesture-handler';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import * as Sentry from '@sentry/react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import AppNavigator from './apps/fan/src/navigation/AppNavigator';
-import { AuthProvider } from './apps/fan/src/store/authStore';
+import { AuthProvider, useAuth } from './apps/fan/src/store/authStore';
 import { ConnectivityProvider } from './apps/fan/src/providers/ConnectivityProvider';
 import {
   MediaPlayerProvider,
@@ -43,17 +43,30 @@ const queryClient = new QueryClient({
 });
 
 /**
- * The media player intentionally keeps a lease while paused so Resume remains
- * the same playback session. When Close clears the queue/current item, release
- * that lease immediately instead of waiting for the server's stale-session TTL.
+ * Keeps native playback and the server playback lease aligned with player and
+ * authentication lifecycle. Pause intentionally preserves the lease so Resume
+ * remains the same playback session.
  */
 function PlaybackLeaseLifecycleBridge() {
-  const { currentItem } = useMediaPlayer();
+  const { currentItem, close } = useMediaPlayer();
+  const { isAuthenticated, isRestoring } = useAuth();
+  const hadAuthenticatedSessionRef = useRef(false);
 
   useEffect(() => {
-    if (!currentItem) {
-      void releaseActivePlaybackLease();
+    if (isAuthenticated) {
+      hadAuthenticatedSessionRef.current = true;
+      return;
     }
+    if (isRestoring || !hadAuthenticatedSessionRef.current) return;
+
+    // A remote revocation/401 can clear auth without going through the explicit
+    // logout button. Stop native playback and release the lease immediately.
+    hadAuthenticatedSessionRef.current = false;
+    void close().finally(() => releaseActivePlaybackLease());
+  }, [close, isAuthenticated, isRestoring]);
+
+  useEffect(() => {
+    if (!currentItem) void releaseActivePlaybackLease();
   }, [currentItem]);
 
   useEffect(() => {
