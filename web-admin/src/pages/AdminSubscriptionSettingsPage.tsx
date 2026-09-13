@@ -14,7 +14,6 @@ import {
   Wallet,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import PageWrapper from "../components/PageWrapper";
 import { http } from "../services/http";
 
@@ -33,8 +32,6 @@ type ConfigResponse = {
 };
 
 export default function AdminSubscriptionSettingsPage() {
-  const navigate = useNavigate();
-
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -57,16 +54,11 @@ export default function AdminSubscriptionSettingsPage() {
       if (res.data?.success && res.data.config) {
         setPrice(String(res.data.config.price));
         setYearlyPrice(String(res.data.config.yearly_price || ""));
-        setCurrency(res.data.config.currency);
+        setCurrency(String(res.data.config.currency || "INR").toUpperCase());
         setDuration(res.data.config.duration || "monthly");
         setFeatures(res.data.config.features || []);
       }
     } catch (e: any) {
-      if (e?.response?.status === 401 || e?.response?.status === 403) {
-        localStorage.removeItem("adminToken");
-        navigate("/admin/login", { replace: true });
-        return;
-      }
       setApiError(
         e?.response?.data?.message ||
           e?.message ||
@@ -78,10 +70,22 @@ export default function AdminSubscriptionSettingsPage() {
   };
 
   useEffect(() => {
-    load();
+    void load();
   }, []);
 
   const handleSave = async () => {
+    const monthly = Number(price);
+    const yearly = yearlyPrice.trim() ? Number(yearlyPrice) : null;
+
+    if (!Number.isFinite(monthly) || monthly <= 0) {
+      setApiError("Monthly price must be a positive INR amount.");
+      return;
+    }
+    if (yearly !== null && (!Number.isFinite(yearly) || yearly <= 0)) {
+      setApiError("Yearly price must be a positive INR amount when provided.");
+      return;
+    }
+
     setSaving(true);
     setApiError(null);
     setSuccessMsg(null);
@@ -89,17 +93,18 @@ export default function AdminSubscriptionSettingsPage() {
       const res = await http.put(
         "/api/v1/admin/subscriptions/platform-config",
         {
-          price: Number(price),
-          yearlyPrice: Number(yearlyPrice),
-          currency,
+          price: monthly,
+          yearlyPrice: yearly,
+          currency: currency.toUpperCase(),
           duration,
           features,
         }
       );
 
       if (res.data?.success) {
+        await load();
         setSuccessMsg("Platform configuration updated successfully");
-        setTimeout(() => setSuccessMsg(null), 3000);
+        window.setTimeout(() => setSuccessMsg(null), 3000);
       } else {
         setApiError(res.data?.message || "Failed to update configuration");
       }
@@ -115,9 +120,19 @@ export default function AdminSubscriptionSettingsPage() {
   };
 
   const addFeature = () => {
-    if (!newFeature.trim()) return;
-    setFeatures([...features, newFeature.trim()]);
+    const next = newFeature.trim();
+    if (!next) return;
+    if (next.length > 160) {
+      setApiError("A plan benefit cannot exceed 160 characters.");
+      return;
+    }
+    if (features.length >= 20) {
+      setApiError("A plan can contain at most 20 benefits.");
+      return;
+    }
+    setFeatures([...features, next]);
     setNewFeature("");
+    setApiError(null);
   };
 
   const removeFeature = (index: number) => {
@@ -142,7 +157,7 @@ export default function AdminSubscriptionSettingsPage() {
   const monthlyPrice = Number(price) || 0;
   const yearlyPriceNum = Number(yearlyPrice) || 0;
   const savings =
-    yearlyPriceNum > 0
+    monthlyPrice > 0 && yearlyPriceNum > 0
       ? Math.round((1 - yearlyPriceNum / 12 / monthlyPrice) * 100)
       : 0;
 
@@ -150,7 +165,6 @@ export default function AdminSubscriptionSettingsPage() {
     <PageWrapper
       title="Platform Plan"
       subtitle="Configure the default subscription plan for your users">
-      {/* Stats Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-5 hover:border-white/10 transition-all duration-300">
           <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -225,7 +239,6 @@ export default function AdminSubscriptionSettingsPage() {
         </div>
       </div>
 
-      {/* Error/Success Messages */}
       {apiError && (
         <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/5 px-5 py-4 flex items-start gap-3">
           <AlertCircle size={18} className="text-red-400 mt-0.5" />
@@ -246,9 +259,7 @@ export default function AdminSubscriptionSettingsPage() {
         </div>
       )}
 
-      {/* Main Content - Two Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        {/* Left Column - Pricing */}
         <div className="lg:col-span-2 space-y-6">
           <div className="rounded-2xl border border-white/5 bg-surface p-6">
             <div className="flex items-center gap-3 mb-6">
@@ -272,9 +283,12 @@ export default function AdminSubscriptionSettingsPage() {
                 </label>
                 <input
                   type="number"
+                  min="0.01"
+                  step="0.01"
                   value={price}
                   onChange={(e) => setPrice(e.target.value)}
-                  className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white text-lg font-bold outline-none focus:border-primary/50 transition-all"
+                  disabled={saving}
+                  className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white text-lg font-bold outline-none focus:border-primary/50 transition-all disabled:opacity-50"
                   placeholder="0.00"
                 />
                 <p className="text-xs text-[#8D7B77] mt-1.5">
@@ -288,9 +302,12 @@ export default function AdminSubscriptionSettingsPage() {
                 </label>
                 <input
                   type="number"
+                  min="0.01"
+                  step="0.01"
                   value={yearlyPrice}
                   onChange={(e) => setYearlyPrice(e.target.value)}
-                  className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white text-lg font-bold outline-none focus:border-primary/50 transition-all"
+                  disabled={saving}
+                  className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white text-lg font-bold outline-none focus:border-primary/50 transition-all disabled:opacity-50"
                   placeholder="0.00"
                 />
                 <div className="flex items-center gap-2 mt-1.5">
@@ -309,8 +326,8 @@ export default function AdminSubscriptionSettingsPage() {
                   <input
                     type="text"
                     value={currency}
-                    onChange={(e) => setCurrency(e.target.value)}
-                    className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all"
+                    readOnly
+                    className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white/70 outline-none"
                   />
                 </div>
                 <div>
@@ -320,7 +337,8 @@ export default function AdminSubscriptionSettingsPage() {
                   <select
                     value={duration}
                     onChange={(e) => setDuration(e.target.value)}
-                    className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2020%2020%22%3E%3Cpath%20stroke%3D%22%238D7B77%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20stroke-width%3D%222%22%20d%3D%22m6%208%204%204%204-4%22%2F%3E%3C%2Fsvg%3E')] bg-[length:20px_20px] bg-[right_14px_center] bg-no-repeat">
+                    disabled={saving}
+                    className="w-full h-[48px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all appearance-none disabled:opacity-50 bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2020%2020%22%3E%3Cpath%20stroke%3D%22%238D7B77%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20stroke-width%3D%222%22%20d%3D%22m6%208%204%204%204-4%22%2F%3E%3C%2Fsvg%3E')] bg-[length:20px_20px] bg-[right_14px_center] bg-no-repeat">
                     <option value="monthly">Monthly</option>
                     <option value="yearly">Yearly</option>
                   </select>
@@ -330,7 +348,6 @@ export default function AdminSubscriptionSettingsPage() {
           </div>
         </div>
 
-        {/* Right Column - Features */}
         <div className="lg:col-span-3">
           <div className="rounded-2xl border border-white/5 bg-surface p-6 h-full">
             <div className="flex items-center justify-between mb-6">
@@ -366,7 +383,7 @@ export default function AdminSubscriptionSettingsPage() {
               ) : (
                 features.map((feat, idx) => (
                   <div
-                    key={idx}
+                    key={`${feat}-${idx}`}
                     className="group flex items-center gap-3 p-3 rounded-xl bg-black/20 border border-white/5 hover:border-primary/30 hover:bg-white/5 transition-all">
                     <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                       <CheckCircle2 size={16} className="text-primary" />
@@ -375,7 +392,9 @@ export default function AdminSubscriptionSettingsPage() {
                     <button
                       type="button"
                       onClick={() => removeFeature(idx)}
-                      className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-all">
+                      disabled={saving}
+                      className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-all disabled:opacity-40"
+                      aria-label={`Remove ${feat}`}>
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -388,11 +407,13 @@ export default function AdminSubscriptionSettingsPage() {
                 <div className="flex-1 relative">
                   <input
                     type="text"
+                    maxLength={160}
                     value={newFeature}
                     onChange={(e) => setNewFeature(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && addFeature()}
+                    disabled={saving || features.length >= 20}
                     placeholder="Add a feature (e.g. Ad-free experience)"
-                    className="w-full h-[44px] rounded-xl bg-black/30 border border-white/10 px-4 pr-14 text-sm text-white placeholder:text-[#8D7B77] outline-none focus:border-primary/50 transition-all"
+                    className="w-full h-[44px] rounded-xl bg-black/30 border border-white/10 px-4 pr-14 text-sm text-white placeholder:text-[#8D7B77] outline-none focus:border-primary/50 transition-all disabled:opacity-50"
                   />
                   <span className="absolute top-1/2 right-3 -translate-y-1/2 text-[10px] text-[#8D7B77] font-medium uppercase tracking-wider">
                     Enter
@@ -401,7 +422,9 @@ export default function AdminSubscriptionSettingsPage() {
                 <button
                   type="button"
                   onClick={addFeature}
-                  className="h-[44px] w-[44px] flex items-center justify-center rounded-xl bg-primary text-white hover:bg-secondary transition-all hover:shadow-lg hover:shadow-primary/30">
+                  disabled={saving || features.length >= 20}
+                  className="h-[44px] w-[44px] flex items-center justify-center rounded-xl bg-primary text-white hover:bg-secondary transition-all hover:shadow-lg hover:shadow-primary/30 disabled:opacity-50"
+                  aria-label="Add plan benefit">
                   <Plus size={20} />
                 </button>
               </div>
@@ -410,7 +433,6 @@ export default function AdminSubscriptionSettingsPage() {
         </div>
       </div>
 
-      {/* Save Button */}
       <div className="mt-8 flex justify-end">
         <button
           type="button"
