@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { pool } from "../common/db";
 import { logger } from "../common/logger";
+import { AuditService } from "../shared/audit/audit.service";
 
 const MAX_FEATURES = 20;
 const MAX_FEATURE_LENGTH = 160;
@@ -54,10 +55,7 @@ function normalizeFeatures(value: unknown): string[] {
   });
 }
 
-/**
- * GET /api/v1/subscriptions/platform-config
- * Returns the currently active platform subscription configuration.
- */
+/** GET /api/v1/subscriptions/platform-config */
 export const getPlatformConfig = async (_req: Request, res: Response) => {
   try {
     const result = await pool.query(
@@ -80,77 +78,79 @@ export const getPlatformConfig = async (_req: Request, res: Response) => {
 
 /**
  * PUT /api/v1/admin/subscriptions/platform-config
- * Updates the platform subscription configuration. (Admin only)
- *
- * Prices remain expressed in INR rupees at this configuration boundary. The
- * payment domain converts authoritative rupee prices to integer paise before
- * creating gateway orders.
+ * Prices are INR rupees at this configuration boundary; payment conversion to
+ * integer paise remains inside the canonical payment domain.
  */
 export const updatePlatformConfig = async (req: Request, res: Response) => {
+  const correlationId = (req as any)?.correlationId || undefined;
+  const actorId = Number((req as any)?.user?.id);
+  const actorRole = String((req as any)?.user?.role || "admin").toLowerCase();
+
+  const {
+    price,
+    yearlyPrice,
+    discountPrice,
+    discountMonths,
+    currency,
+    duration,
+    features,
+  } = req.body ?? {};
+
+  let normalizedPrice: number;
+  let normalizedYearlyPrice: number | null;
+  let normalizedDiscountPrice: number | null;
+  let normalizedDiscountMonths: number;
+  let normalizedFeatures: string[];
+
   try {
-    const {
-      price,
-      yearlyPrice,
-      discountPrice,
-      discountMonths,
-      currency,
-      duration,
-      features,
-    } = req.body ?? {};
+    normalizedPrice = parseMoney(price, "price", true) as number;
+    normalizedYearlyPrice = parseMoney(yearlyPrice, "yearlyPrice");
+    normalizedDiscountPrice = parseMoney(discountPrice, "discountPrice");
+    normalizedDiscountMonths = parsePositiveInteger(discountMonths, "discountMonths", 1);
+    normalizedFeatures = normalizeFeatures(features);
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_SUBSCRIPTION_CONFIG",
+      message: error instanceof Error ? error.message : "Invalid subscription configuration",
+      correlationId,
+    });
+  }
 
-    let normalizedPrice: number;
-    let normalizedYearlyPrice: number | null;
-    let normalizedDiscountPrice: number | null;
-    let normalizedDiscountMonths: number;
-    let normalizedFeatures: string[];
+  const normalizedCurrency = String(currency || "INR").trim().toUpperCase();
+  if (normalizedCurrency !== "INR") {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_SUBSCRIPTION_CONFIG",
+      message: "currency must be INR",
+      correlationId,
+    });
+  }
 
-    try {
-      normalizedPrice = parseMoney(price, "price", true) as number;
-      normalizedYearlyPrice = parseMoney(yearlyPrice, "yearlyPrice");
-      normalizedDiscountPrice = parseMoney(discountPrice, "discountPrice");
-      normalizedDiscountMonths = parsePositiveInteger(
-        discountMonths,
-        "discountMonths",
-        1
-      );
-      normalizedFeatures = normalizeFeatures(features);
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        code: "INVALID_SUBSCRIPTION_CONFIG",
-        message: error instanceof Error ? error.message : "Invalid subscription configuration",
-      });
-    }
+  const normalizedDuration = String(duration || "monthly").trim().toLowerCase();
+  if (normalizedDuration !== "monthly" && normalizedDuration !== "yearly") {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_SUBSCRIPTION_CONFIG",
+      message: "duration must be monthly or yearly",
+      correlationId,
+    });
+  }
 
-    const normalizedCurrency = String(currency || "INR").trim().toUpperCase();
-    if (normalizedCurrency !== "INR") {
-      return res.status(400).json({
-        success: false,
-        code: "INVALID_SUBSCRIPTION_CONFIG",
-        message: "currency must be INR",
-      });
-    }
+  const params = [
+    normalizedPrice,
+    normalizedYearlyPrice,
+    normalizedDiscountPrice,
+    normalizedDiscountMonths,
+    normalizedCurrency,
+    normalizedDuration,
+    JSON.stringify(normalizedFeatures),
+  ];
 
-    const normalizedDuration = String(duration || "monthly").trim().toLowerCase();
-    if (normalizedDuration !== "monthly" && normalizedDuration !== "yearly") {
-      return res.status(400).json({
-        success: false,
-        code: "INVALID_SUBSCRIPTION_CONFIG",
-        message: "duration must be monthly or yearly",
-      });
-    }
-
-    const params = [
-      normalizedPrice,
-      normalizedYearlyPrice,
-      normalizedDiscountPrice,
-      normalizedDiscountMonths,
-      normalizedCurrency,
-      normalizedDuration,
-      JSON.stringify(normalizedFeatures),
-    ];
-
-    const result = await pool.query(
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
       `UPDATE platform_subscription_configs
        SET price = $1,
            yearly_price = $2,
@@ -161,25 +161,60 @@ export const updatePlatformConfig = async (req: Request, res: Response) => {
            features = $7,
            updated_at = now()
        WHERE is_active = true
-       RETURNING *`,
+       RETURNING id`,
       params
     );
 
+    let configId = Number(result.rows[0]?.id || 0);
     if (result.rowCount === 0) {
-      await pool.query(
+      const inserted = await client.query<{ id: number }>(
         `INSERT INTO platform_subscription_configs
           (price, yearly_price, discount_price, discount_months, currency, duration, features, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+         RETURNING id`,
         params
       );
+      configId = Number(inserted.rows[0]?.id || 0);
     }
 
+    await AuditService.logCritical(
+      {
+        action: "pricing.platform_config_updated",
+        entity: "platform_subscription_config",
+        entityId: String(configId || "active"),
+        performedBy: Number.isSafeInteger(actorId) && actorId > 0 ? actorId : undefined,
+        role: actorRole === "admin" ? "admin" : "system",
+        status: "success",
+        correlationId,
+        metadata: {
+          price: normalizedPrice,
+          yearlyPrice: normalizedYearlyPrice,
+          discountPrice: normalizedDiscountPrice,
+          discountMonths: normalizedDiscountMonths,
+          currency: normalizedCurrency,
+          duration: normalizedDuration,
+          featureCount: normalizedFeatures.length,
+        },
+      },
+      client
+    );
+
+    await client.query("COMMIT");
     return res.json({
       success: true,
       message: "Platform subscription updated successfully",
+      correlationId,
     });
   } catch (error) {
-    logger.error({ error }, "Error updating platform subscription config");
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    await client.query("ROLLBACK").catch(() => undefined);
+    logger.error({ error, correlationId }, "Error updating platform subscription config");
+    return res.status(500).json({
+      success: false,
+      code: "SUBSCRIPTION_CONFIG_UPDATE_FAILED",
+      message: "Platform subscription update failed",
+      correlationId,
+    });
+  } finally {
+    client.release();
   }
 };
