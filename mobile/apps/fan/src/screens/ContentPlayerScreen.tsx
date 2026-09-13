@@ -11,14 +11,12 @@ import {
   ToastAndroid,
   Platform,
   Alert,
-  TouchableOpacity,
 } from 'react-native';
 
 import { LinearGradient } from 'expo-linear-gradient';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { ArrowLeft, Pause, Play, Settings } from 'lucide-react-native';
+import { ArrowLeft, Pause, Play } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import { useConnectivity } from '../providers/ConnectivityProvider';
 import { apiV1 } from '../services/api';
@@ -32,7 +30,7 @@ type Content = {
   thumbnail: string;
   isLocked: boolean;
   artistId?: string;
-  mediaUrl?: string | null;
+  mediaType: 'audio' | 'video';
 };
 
 export default function ContentPlayerScreen({ navigation, route }: any) {
@@ -49,23 +47,44 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
   const [seekProgress, setSeekProgress] = useState(0);
   const [trackWidth, setTrackWidth] = useState(0);
   const [mediaError, setMediaError] = useState<string | null>(null);
-  
-  // Subscription expiry state for testing
-  const [isSubscriptionActive, setIsSubscriptionActive] = useState(true);
-  const [showDebugToggle, setShowDebugToggle] = useState(__DEV__);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const playerRef = useRef<AudioPlayer | null>(null);
+  const sessionRef = useRef<{ sessionId: number; contentId: number } | null>(null);
   const progressOpacity = useRef(new Animated.Value(0)).current;
-
   const contentId = route?.params?.contentId;
+
+  const terminateSession = async () => {
+    const active = sessionRef.current;
+    sessionRef.current = null;
+    if (!active) return;
+    await apiV1
+      .post('/stream/terminate', {
+        sessionId: active.sessionId,
+        contentId: active.contentId,
+      })
+      .catch(() => undefined);
+  };
+
+  const disposePlayer = async () => {
+    try {
+      if (playerRef.current) {
+        playerRef.current.remove();
+        playerRef.current = null;
+      }
+    } finally {
+      await terminateSession();
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
         setIsLoading(true);
+        setMediaError(null);
 
-        const id = typeof contentId === 'string' && contentId.length > 0 ? contentId : '';
+        const id = String(contentId || '').trim();
         if (!id) {
           if (mounted) setCurrentContent(null);
           return;
@@ -80,16 +99,21 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
 
         const next: Content = {
           id: String(c.id),
-          title: (c.title ?? 'Untitled').toString(),
-          artist: (c.artistName ?? c.artist_name ?? 'Artist').toString(),
-          description: (c.type ?? '').toString(),
-          thumbnail: (c.artwork ?? c.thumbnailUrl ?? '').toString(),
+          title: String(c.title ?? 'Untitled'),
+          artist: String(c.artistName ?? c.artist_name ?? 'Artist'),
+          description: String(c.type ?? ''),
+          thumbnail: String(c.artwork ?? c.thumbnailUrl ?? ''),
           isLocked: Boolean(c.isLocked ?? c.locked ?? false),
           artistId: c.artistId !== undefined && c.artistId !== null ? String(c.artistId) : undefined,
-          mediaUrl: c.mediaUrl ? String(c.mediaUrl) : null,
+          mediaType: String(c.mediaType || c.type || '').toLowerCase().includes('video') ? 'video' : 'audio',
         };
 
         if (mounted) setCurrentContent(next);
+      } catch (error: any) {
+        if (mounted) {
+          setCurrentContent(null);
+          setMediaError(error?.response?.data?.message || 'Failed to load content');
+        }
       } finally {
         if (mounted) setIsLoading(false);
       }
@@ -102,78 +126,102 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
 
   useEffect(() => {
     let mounted = true;
-    let intervalId: any = null;
+    let progressTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
+      await disposePlayer();
       if (!currentContent) return;
 
+      setMediaError(null);
+      setIsPlaying(false);
+      setPositionMs(0);
+      setDurationMs(0);
+      progressOpacity.setValue(0);
+
+      if (currentContent.isLocked) {
+        if (mounted) setMediaError('An active artist subscription is required to play this content.');
+        return;
+      }
+      if (currentContent.mediaType !== 'audio') {
+        if (mounted) setMediaError('Open this release in the video player.');
+        return;
+      }
+
       try {
-        setMediaError(null);
-        setIsPlaying(false);
-        setPositionMs(0);
-        setDurationMs(0);
-        progressOpacity.setValue(0);
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          shouldPlayInBackground: true,
+          interruptionMode: 'duckOthers',
+        });
 
-        if (playerRef.current) {
-          playerRef.current.remove();
-          playerRef.current = null;
+        const access = await apiV1.post('/stream/access', {
+          contentId: Number(currentContent.id),
+          kind: 'audio',
+          quality: 'Auto',
+        });
+        const playbackUrl = String(access.data?.playbackUrl || '').trim();
+        const sessionId = Number(access.data?.sessionId);
+        if (!playbackUrl || !Number.isSafeInteger(sessionId) || sessionId <= 0) {
+          throw new Error('Protected playback access was not issued');
         }
 
-        try {
-          await setAudioModeAsync({
-            playsInSilentMode: true,
-            shouldPlayInBackground: false,
-            interruptionMode: 'duckOthers',
-          });
-        } catch (e) {
-          if (mounted) setMediaError('Failed to initialize audio mode');
-          return;
-        }
+        sessionRef.current = {
+          sessionId,
+          contentId: Number(currentContent.id),
+        };
 
-        // Future: POST /v1/stream/access to get signed URL before starting the audio.
-        const mediaUrl = (currentContent.mediaUrl ?? '').toString();
-        if (!mediaUrl) {
-          if (mounted) setMediaError('No audio source available');
-          return;
-        }
-
-        let player: AudioPlayer;
-        try {
-          player = createAudioPlayer({ uri: mediaUrl }, { updateInterval: 350 });
-          playerRef.current = player;
-        } catch (e) {
-          if (mounted) setMediaError('Failed to load audio');
-          return;
-        }
-
+        const player = createAudioPlayer({ uri: playbackUrl }, { updateInterval: 350 });
+        playerRef.current = player;
         try {
           player.pause();
         } catch {
-          // ignore
+          // Player may still be loading; it remains paused by default.
         }
 
-        intervalId = setInterval(() => {
+        progressTimer = setInterval(() => {
           if (!mounted) return;
-          const p = playerRef.current;
-          if (!p || !p.isLoaded) return;
-          if (!isSeeking) setPositionMs(Math.max(0, Math.round((p.currentTime || 0) * 1000)));
-          setDurationMs(Math.max(0, Math.round((p.duration || 0) * 1000)));
-          setIsPlaying(Boolean(p.playing));
+          const active = playerRef.current;
+          if (!active || !active.isLoaded) return;
+          if (!isSeeking) {
+            setPositionMs(Math.max(0, Math.round((active.currentTime || 0) * 1000)));
+          }
+          setDurationMs(Math.max(0, Math.round((active.duration || 0) * 1000)));
+          setIsPlaying(Boolean(active.playing));
         }, 350);
-      } catch {
-        if (mounted) setMediaError('Failed to prepare player');
+
+        heartbeatTimer = setInterval(() => {
+          const active = sessionRef.current;
+          if (!active) return;
+          void apiV1
+            .post('/stream/heartbeat', {
+              sessionId: active.sessionId,
+              contentId: active.contentId,
+            })
+            .catch(() => {
+              if (mounted) setMediaError('Playback authorization expired. Retry to reconnect.');
+            });
+        }, 45_000);
+      } catch (error: any) {
+        await disposePlayer();
+        if (mounted) {
+          const code = String(error?.response?.data?.code || '');
+          setMediaError(
+            code === 'MEDIA_ACCESS_DENIED' || code === 'MEDIA_NOT_READY'
+              ? error?.response?.data?.message || 'This content is not available.'
+              : 'Failed to prepare protected playback'
+          );
+        }
       }
     })();
 
     return () => {
       mounted = false;
-
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = null;
-      }
+      if (progressTimer) clearInterval(progressTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      void disposePlayer();
     };
-  }, [currentContent, progressOpacity, isSeeking]);
+  }, [currentContent, progressOpacity, isSeeking, reloadKey]);
 
   useEffect(() => {
     Animated.timing(progressOpacity, {
@@ -184,7 +232,6 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
   }, [isPlaying, progressOpacity]);
 
   useEffect(() => {
-    // Handle offline state - pause audio and show toast
     const handleOfflineState = async () => {
       if (!isConnected || !isInternetReachable) {
         if (isPlaying) {
@@ -192,82 +239,46 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
           try {
             const player = playerRef.current;
             if (player && player.isLoaded && player.playing) player.pause();
-          } catch (error) {
-            console.error('Error pausing audio:', error);
+          } catch {
+            // Best-effort pause while the network is unavailable.
           }
         }
-        
-        // Show offline message
         const message = 'Waiting for network...';
-        if (Platform.OS === 'android') {
-          ToastAndroid.show(message, ToastAndroid.SHORT);
-        } else {
-          Alert.alert('Offline', message);
-        }
+        if (Platform.OS === 'android') ToastAndroid.show(message, ToastAndroid.SHORT);
+        else Alert.alert('Offline', message);
       } else if (wasPlayingBeforeOffline) {
-        // Resume playback when connection is restored
         setWasPlayingBeforeOffline(false);
         try {
           const player = playerRef.current;
           if (player && player.isLoaded && !player.playing) player.play();
-        } catch (error) {
-          console.error('Error resuming audio:', error);
+        } catch {
+          setMediaError('Playback failed after reconnecting');
         }
       }
     };
 
-    handleOfflineState();
+    void handleOfflineState();
   }, [isConnected, isInternetReachable, isPlaying, wasPlayingBeforeOffline]);
 
-  useEffect(() => {
-    return () => {
-      (async () => {
-        try {
-          if (playerRef.current) {
-            playerRef.current.remove();
-            playerRef.current = null;
-          }
-        } catch {
-          // ignore
-        }
-      })();
-    };
-  }, []);
-
   const onBack = async () => {
-    try {
-      if (playerRef.current) {
-        playerRef.current.remove();
-        playerRef.current = null;
-      }
-    } finally {
-      navigation.goBack();
-    }
+    await disposePlayer();
+    navigation.goBack();
   };
 
   const handlePlayPress = async () => {
-    if (!currentContent) return;
-    if (mediaError) return;
-
-    // Check network connectivity before playing
+    if (!currentContent || mediaError) return;
     if (!isConnected || !isInternetReachable) {
       const message = 'Cannot play while offline. Please check your connection.';
-      if (Platform.OS === 'android') {
-        ToastAndroid.show(message, ToastAndroid.LONG);
-      } else {
-        Alert.alert('Offline', message);
-      }
+      if (Platform.OS === 'android') ToastAndroid.show(message, ToastAndroid.LONG);
+      else Alert.alert('Offline', message);
       return;
     }
 
     try {
       const player = playerRef.current;
       if (!player || !player.isLoaded) return;
-      if (player.playing) {
-        player.pause();
-      } else {
-        player.play();
-      }
+      if (player.playing) player.pause();
+      else player.play();
     } catch {
       setMediaError('Playback failed');
     }
@@ -275,7 +286,7 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
 
   const retryMedia = () => {
     setMediaError(null);
-    setCurrentContent((c) => (c ? { ...c } : c));
+    setReloadKey((value) => value + 1);
   };
 
   const formatTime = (ms: number) => {
@@ -292,10 +303,8 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
   const seekToProgress = async (nextProgress: number) => {
     const player = playerRef.current;
     if (!player || !player.isLoaded) return;
-
     const nextDurationMs = Math.max(0, Math.round((player.duration || 0) * 1000));
-    if (!nextDurationMs || nextDurationMs <= 0) return;
-
+    if (!nextDurationMs) return;
     const nextMs = Math.max(0, Math.min(nextDurationMs, Math.round(nextProgress * nextDurationMs)));
     await player.seekTo(nextMs / 1000);
     setPositionMs(nextMs);
@@ -316,34 +325,22 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
           setSeekProgress(x / trackWidth);
         },
         onPanResponderRelease: async () => {
-          const next = Math.min(1, Math.max(0, seekProgress));
           try {
-            await seekToProgress(next);
+            await seekToProgress(Math.min(1, Math.max(0, seekProgress)));
           } finally {
             setIsSeeking(false);
           }
         },
-        onPanResponderTerminate: () => {
-          setIsSeeking(false);
-        },
+        onPanResponderTerminate: () => setIsSeeking(false),
       }),
-    [displayedProgress, seekProgress, trackWidth, durationMs]
-  );
-
-  const mini = useMemo(
-    () => ({
-      title: 'Midnight Dreams',
-      artist: 'Luna Ray',
-      thumbnail:
-        'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=400&q=80',
-    }),
-    []
+    [displayedProgress, seekProgress, trackWidth]
   );
 
   if (isLoading || !currentContent) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator color="#FF6A00" />
+        {mediaError ? <Text style={styles.loadError}>{mediaError}</Text> : null}
       </View>
     );
   }
@@ -353,21 +350,13 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
       <ErrorBoundary label="Media Player">
         <SafeAreaView style={styles.container} edges={['top']}>
           <View style={[styles.loading, { backgroundColor: '#4b1927' }]}>
-            <Text style={{ color: '#e6d6d2', fontSize: 16, fontWeight: '600' }}>Something went wrong</Text>
-            <Text style={{ color: '#d8c7c3', fontSize: 13, marginTop: 6 }}>{mediaError}</Text>
-            <Pressable
-              onPress={retryMedia}
-              style={{
-                marginTop: 14,
-                borderRadius: 12,
-                paddingVertical: 10,
-                paddingHorizontal: 14,
-                borderWidth: 1,
-                borderColor: 'rgba(255,255,255,0.18)',
-                backgroundColor: 'rgba(255,255,255,0.08)',
-              }}
-            >
+            <Text style={{ color: '#e6d6d2', fontSize: 16, fontWeight: '600' }}>Unable to play</Text>
+            <Text style={{ color: '#d8c7c3', fontSize: 13, marginTop: 6, textAlign: 'center' }}>{mediaError}</Text>
+            <Pressable onPress={retryMedia} style={styles.retryButton}>
               <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '600' }}>Retry</Text>
+            </Pressable>
+            <Pressable onPress={onBack} style={[styles.retryButton, { marginTop: 8 }]}>
+              <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '600' }}>Back</Text>
             </Pressable>
           </View>
         </SafeAreaView>
@@ -379,82 +368,60 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
     <ErrorBoundary label="Media Player">
       <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.container}>
-          {/* Debug Toggle */}
-          {showDebugToggle && (
-            <View style={styles.debugToggle}>
-              <TouchableOpacity
-                style={[
-                  styles.debugButton,
-                  !isSubscriptionActive && styles.debugButtonActive
-                ]}
-                onPress={() => setIsSubscriptionActive(!isSubscriptionActive)}
-              >
-                <Settings size={16} color="#fff" />
-                <Text style={styles.debugButtonText}>
-                  Sub: {isSubscriptionActive ? 'Active' : 'Expired'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
+          <Image source={{ uri: currentContent.thumbnail }} style={styles.bgImg} blurRadius={32} />
+          <LinearGradient
+            colors={['rgba(0,0,0,0.0)', 'rgba(0,0,0,0.92)']}
+            style={styles.bgGradient}
+          />
 
-        <Image source={{ uri: currentContent.thumbnail }} style={styles.bgImg} blurRadius={32} />
-        <LinearGradient
-          colors={['rgba(0,0,0,0.0)', 'rgba(0,0,0,0.92)']}
-          style={styles.bgGradient}
-        />
-
-        <Pressable onPress={onBack} style={styles.backBtn}>
-          <ArrowLeft color="#fff" size={22} />
-        </Pressable>
-
-        <View style={styles.headerTextWrap}>
-          <Text style={styles.title}>{currentContent.title}</Text>
-          <Text style={styles.artist}>{currentContent.artist}</Text>
-        </View>
-
-        <View style={styles.centerWrap}>
-          <Pressable onPress={handlePlayPress} style={styles.playOuter}>
-            <LinearGradient
-              colors={['rgba(255,255,255,0.06)', 'rgba(255,255,255,0.02)']}
-              style={styles.playOuterGrad}
-            >
-              <View style={styles.playInner}>
-                {isPlaying ? (
-                  <Pause color="#fff" fill="#fff" size={30} />
-                ) : (
-                  <Play color="#fff" fill="#fff" size={30} />
-                )}
-              </View>
-            </LinearGradient>
+          <Pressable onPress={onBack} style={styles.backBtn}>
+            <ArrowLeft color="#fff" size={22} />
           </Pressable>
 
-          <Text style={styles.description}>{currentContent.description}</Text>
-        </View>
-
-        <Animated.View style={[styles.progressWrap, { opacity: progressOpacity, bottom: tabBarHeight + 92 }]}>
-          <View style={styles.progressRow}>
-            <Text style={styles.progressTime}>{formatTime(positionMs)}</Text>
-            <Pressable
-              style={styles.progressTrack}
-              onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
-              onPress={async (e) => {
-                if (trackWidth <= 0) return;
-                const x = e.nativeEvent.locationX;
-                const next = Math.min(1, Math.max(0, x / trackWidth));
-                await seekToProgress(next);
-              }}
-            >
-              <View style={[styles.progressFill, { width: `${displayedProgress * 100}%` }]} />
-              <View
-                style={[styles.progressDot, { left: `${displayedProgress * 100}%` }]}
-                {...panResponder.panHandlers}
-              />
-            </Pressable>
-            <Text style={styles.progressTime}>-{formatTime(remainingMs)}</Text>
+          <View style={styles.headerTextWrap}>
+            <Text style={styles.title}>{currentContent.title}</Text>
+            <Text style={styles.artist}>{currentContent.artist}</Text>
           </View>
-        </Animated.View>
 
-      </View>
+          <View style={styles.centerWrap}>
+            <Pressable onPress={handlePlayPress} style={styles.playOuter}>
+              <LinearGradient
+                colors={['rgba(255,255,255,0.06)', 'rgba(255,255,255,0.02)']}
+                style={styles.playOuterGrad}
+              >
+                <View style={styles.playInner}>
+                  {isPlaying ? (
+                    <Pause color="#fff" fill="#fff" size={30} />
+                  ) : (
+                    <Play color="#fff" fill="#fff" size={30} />
+                  )}
+                </View>
+              </LinearGradient>
+            </Pressable>
+            <Text style={styles.description}>{currentContent.description}</Text>
+          </View>
+
+          <Animated.View style={[styles.progressWrap, { opacity: progressOpacity, bottom: tabBarHeight + 92 }]}>
+            <View style={styles.progressRow}>
+              <Text style={styles.progressTime}>{formatTime(positionMs)}</Text>
+              <Pressable
+                style={styles.progressTrack}
+                onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
+                onPress={async (e) => {
+                  if (trackWidth <= 0) return;
+                  await seekToProgress(Math.min(1, Math.max(0, e.nativeEvent.locationX / trackWidth)));
+                }}
+              >
+                <View style={[styles.progressFill, { width: `${displayedProgress * 100}%` }]} />
+                <View
+                  style={[styles.progressDot, { left: `${displayedProgress * 100}%` }]}
+                  {...panResponder.panHandlers}
+                />
+              </Pressable>
+              <Text style={styles.progressTime}>-{formatTime(remainingMs)}</Text>
+            </View>
+          </Animated.View>
+        </View>
       </SafeAreaView>
     </ErrorBoundary>
   );
@@ -466,6 +433,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  loadError: {
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 12,
+    textAlign: 'center',
   },
   container: {
     flex: 1,
@@ -545,7 +518,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     lineHeight: 20,
   },
-
   progressWrap: {
     position: 'absolute',
     left: 22,
@@ -582,32 +554,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#FF7A18',
     marginLeft: -6,
   },
-
-  // Debug styles
-  debugToggle: {
-    position: 'absolute',
-    top: 12,
-    right: 14,
-    zIndex: 1000,
-  },
-  debugButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    gap: 6,
+  retryButton: {
+    marginTop: 14,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  debugButtonActive: {
-    backgroundColor: 'rgba(255, 106, 0, 0.2)',
-    borderColor: '#FF6A00',
-  },
-  debugButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    borderColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
   },
 });
