@@ -79,4 +79,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package-lock.json ios/Podfile.lock apps/fan/src/screens/SubscriptionFlowScreen.tsx
           git commit -m "Phase 06: verify mobile dependencies and native iOS linkage"
+
+          # A documentation or source-only commit may land while this relatively
+          # expensive macOS job is running. Rebase the verified generated-output
+          # commit instead of force-pushing or losing those newer changes.
+          git pull --rebase origin fix/phase-06-mobile-fan-hardening
           git push origin HEAD:fix/phase-06-mobile-fan-hardening
