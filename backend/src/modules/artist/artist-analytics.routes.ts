@@ -70,7 +70,8 @@ router.get("/dashboard/summary", async (req: any, res: any) => {
         `SELECT COUNT(p.id)::int AS value
            FROM content_plays p
            JOIN content_items c ON c.id = p.content_id
-          WHERE c.artist_id = $1`,
+          WHERE c.artist_id = $1
+            AND p.playback_session_id IS NOT NULL`,
         [artistId]
       ),
       pool.query<{ value: string | number }>(
@@ -133,6 +134,7 @@ router.get("/dashboard/growth", async (req: any, res: any) => {
            FROM content_plays p
            JOIN content_items c ON c.id = p.content_id
           WHERE c.artist_id = $1
+            AND p.playback_session_id IS NOT NULL
             AND p.created_at >= $2
           GROUP BY 1
           ORDER BY 1 ASC`,
@@ -214,7 +216,9 @@ router.get("/dashboard/new-plays", async (req: any, res: any) => {
     const result = await pool.query(
       `SELECT c.id, c.title, c.thumbnail_url, COUNT(p.id)::int AS plays
          FROM content_items c
-         LEFT JOIN content_plays p ON p.content_id = c.id
+         LEFT JOIN content_plays p
+           ON p.content_id = c.id
+          AND p.playback_session_id IS NOT NULL
         WHERE c.artist_id = $1
         GROUP BY c.id
         ORDER BY plays DESC, c.created_at DESC
@@ -254,6 +258,7 @@ router.get("/analytics/content-performance", async (req: any, res: any) => {
          FROM content_items c
          LEFT JOIN content_plays p
            ON p.content_id = c.id
+          AND p.playback_session_id IS NOT NULL
           AND p.created_at >= $2
         WHERE c.artist_id = $1
         GROUP BY c.id
