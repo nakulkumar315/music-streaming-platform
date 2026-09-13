@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import axios, { AxiosHeaders } from 'axios';
+import axios, { AxiosHeaders, type AxiosError, type AxiosInstance } from 'axios';
 import * as Sentry from '@sentry/react-native';
 import { Platform } from 'react-native';
 import { API_HOST_BASE_URL } from '../config/env';
@@ -10,10 +10,38 @@ export const USER_TOKEN_STORAGE_KEY = 'userToken';
 export const DEVICE_ID_STORAGE_KEY = 'fanDeviceId';
 
 const DEFAULT_TIMEOUT_MS = 30000;
+const SAFE_RETRY_METHODS = new Set(['get', 'head', 'options']);
 let unauthorizedHandler: (() => void | Promise<void>) | null = null;
+
+export type NormalizedApiError = {
+  status: number | null;
+  code: string;
+  message: string;
+  retryable: boolean;
+};
 
 export function setUnauthorizedHandler(handler: (() => void | Promise<void>) | null) {
   unauthorizedHandler = handler;
+}
+
+export function normalizeApiError(error: unknown): NormalizedApiError {
+  const axiosError = error as AxiosError<any>;
+  const status = typeof axiosError?.response?.status === 'number' ? axiosError.response.status : null;
+  const code = String(
+    axiosError?.response?.data?.code ||
+      (status === 401 ? 'UNAUTHORIZED' : status === 403 ? 'FORBIDDEN' : 'REQUEST_FAILED')
+  );
+  const message = String(
+    axiosError?.response?.data?.message ||
+      (status === 401
+        ? 'Your session has expired. Please sign in again.'
+        : status === 403
+          ? 'This action is not allowed for your account.'
+          : 'Something went wrong. Please try again.')
+  );
+  const isTimeout = axiosError?.code === 'ECONNABORTED' || /timeout/i.test(String(axiosError?.message ?? ''));
+  const retryable = isTimeout || !axiosError?.response;
+  return { status, code, message, retryable };
 }
 
 async function getOrCreateDeviceId() {
@@ -25,37 +53,21 @@ async function getOrCreateDeviceId() {
   return generated;
 }
 
-export const api = axios.create({
-  baseURL: API_BASE_URL,
-  headers: { 'Content-Type': 'application/json' },
-  timeout: DEFAULT_TIMEOUT_MS,
-});
+async function getStoredToken() {
+  return (
+    (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
+    (await AsyncStorage.getItem(JWT_STORAGE_KEY))
+  );
+}
 
-export const apiV1 = axios.create({
-  baseURL: `${API_HOST_BASE_URL}/api/v1/fan`,
-  headers: { 'Content-Type': 'application/json' },
-  timeout: DEFAULT_TIMEOUT_MS,
-});
+function isSafeRetry(config: any): boolean {
+  const method = String(config?.method || 'get').toLowerCase();
+  return SAFE_RETRY_METHODS.has(method);
+}
 
-export const contentApi = axios.create({
-  baseURL: `${API_HOST_BASE_URL}/api/v1/content`,
-  headers: { 'Content-Type': 'application/json' },
-  timeout: DEFAULT_TIMEOUT_MS,
-});
-
-export const searchApi = axios.create({
-  baseURL: `${API_HOST_BASE_URL}/api/v1/search`,
-  headers: { 'Content-Type': 'application/json' },
-  timeout: DEFAULT_TIMEOUT_MS,
-});
-
-const clients = [api, apiV1, contentApi, searchApi];
-
-for (const client of clients) {
+function attachClientPolicy(client: AxiosInstance) {
   client.interceptors.request.use(async (config) => {
-    const token =
-      (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-      (await AsyncStorage.getItem(JWT_STORAGE_KEY));
+    const token = await getStoredToken();
     const deviceId = await getOrCreateDeviceId();
 
     const headers =
@@ -102,7 +114,13 @@ for (const client of clients) {
       }
 
       if (status >= 500) {
-        Sentry.captureException(error, { extra: { status, url: config?.url } });
+        Sentry.captureException(error, {
+          extra: {
+            status,
+            method: String(config?.method || '').toUpperCase(),
+            path: config?.url,
+          },
+        });
       }
 
       if (!config) throw error;
@@ -111,7 +129,10 @@ for (const client of clients) {
       const isTimeout = error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message ?? ''));
       const isNetwork = !error?.response;
 
-      if ((isTimeout || isNetwork) && retryCount < 1) {
+      // Retry only safe reads. POST/PATCH/DELETE requests may have reached the
+      // backend even when the client timed out; blindly replaying them can
+      // duplicate payments, sessions, reactions or other business commands.
+      if (isSafeRetry(config) && (isTimeout || isNetwork) && retryCount < 1) {
         config.__retryCount = retryCount + 1;
         config.timeout = Math.max(Number(config.timeout ?? 0) || 0, 45000);
         return client.request(config);
@@ -120,4 +141,23 @@ for (const client of clients) {
       throw error;
     }
   );
+
+  return client;
 }
+
+function createClient(baseURL: string) {
+  return attachClientPolicy(
+    axios.create({
+      baseURL,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: DEFAULT_TIMEOUT_MS,
+    })
+  );
+}
+
+export const api = createClient(API_BASE_URL);
+// Historical alias retained only at the import surface; there is one underlying
+// fan Axios instance/interceptor stack.
+export const apiV1 = api;
+export const contentApi = createClient(`${API_HOST_BASE_URL}/api/v1/content`);
+export const searchApi = createClient(`${API_HOST_BASE_URL}/api/v1/search`);
