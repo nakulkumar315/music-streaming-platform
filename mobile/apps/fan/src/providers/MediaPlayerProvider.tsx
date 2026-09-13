@@ -46,6 +46,7 @@ type Track = any;
 import { startHeartbeat, stopHeartbeat } from "../services/heartbeatService";
 import { recordPlayback } from "../services/libraryService";
 import {
+  getPlaybackErrorPresentation,
   getPlaybackUrl,
   normalizePlaybackUrl,
   validatePlaybackUrl,
@@ -586,15 +587,35 @@ export function MediaPlayerProvider({ children }: { children: ReactNode }) {
               scheduleTokenRefresh(nextUrl, "video");
             }
           } catch (e) {
+            const presentation = getPlaybackErrorPresentation(e);
             logger.warn(
               `[MediaPlayer] Failed to background refresh ${type} token`,
               e
             );
+            if (presentation.shouldStopPlayback) {
+              if (type === "audio" && TrackPlayerAvailable) {
+                try {
+                  await TrackPlayer.pause();
+                } catch {
+                  // ignore native pause failures; state still fails closed
+                }
+              } else {
+                try {
+                  videoPlayer?.pause();
+                } catch {
+                  // ignore native pause failures; state still fails closed
+                }
+              }
+              setState((s) => ({ ...s, isPlaying: false }));
+              if (AppState.currentState === "active") {
+                Alert.alert(presentation.title, presentation.message);
+              }
+            }
           }
         })().catch(() => undefined);
       }, delay);
     },
-    []
+    [preferredQuality, videoPlayer]
   );
 
   const preloadNextItem = useCallback(async () => {
@@ -651,17 +672,14 @@ export function MediaPlayerProvider({ children }: { children: ReactNode }) {
             preferredQuality
           );
         } catch (e) {
+          const presentation = getPlaybackErrorPresentation(e);
           logger.warn("[MediaPlayer] getPlaybackUrl failed", e);
-          Alert.alert(
-            "Playback Error",
-            "Could not get playback URL. Try again."
-          );
+          Alert.alert(presentation.title, presentation.message);
           return;
         }
       }
 
-      // Fallback: if still no URL but we have an item ID, try stream resolution anyway.
-      // This handles items (e.g. "Pizza Making") where useStreamAccess=false but mediaUrl is empty.
+      // Fallback: if still no URL but we have an item ID, try canonical stream resolution anyway.
       if (!playbackUrl && (item.contentId || item.id)) {
         try {
           const fallbackUrl = await getPlaybackUrl(
@@ -676,8 +694,11 @@ export function MediaPlayerProvider({ children }: { children: ReactNode }) {
               item.title
             );
           }
-        } catch {
-          // ignore – we'll surface the error below
+        } catch (e) {
+          const presentation = getPlaybackErrorPresentation(e);
+          logger.warn("[MediaPlayer] fallback stream resolution failed", e);
+          Alert.alert(presentation.title, presentation.message);
+          return;
         }
       }
 
@@ -701,7 +722,7 @@ export function MediaPlayerProvider({ children }: { children: ReactNode }) {
           logger.log("[MediaPlayer] TrackPlayer not available, falling back to videoPlayer for audio");
           setVideoSource(playbackUrl);
           scheduleTokenRefresh(playbackUrl, "audio");
-          
+
           if (videoPlayer) {
             videoPlayer.replace(playbackUrl);
             videoPlayer.play();
@@ -828,11 +849,9 @@ export function MediaPlayerProvider({ children }: { children: ReactNode }) {
           item = { ...item, mediaUrl: url };
           nextState.queue[nextState.currentIndex] = item;
         } catch (e) {
+          const presentation = getPlaybackErrorPresentation(e);
           logger.warn("[MediaPlayer] getPlaybackUrl for video failed", e);
-          Alert.alert(
-            "Playback Error",
-            "Could not get playback URL. Try again."
-          );
+          Alert.alert(presentation.title, presentation.message);
           return;
         }
       }
