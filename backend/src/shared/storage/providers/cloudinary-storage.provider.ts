@@ -2,8 +2,8 @@
  * Canonical Cloudinary storage adapter.
  *
  * Protected audio/video are uploaded as authenticated Cloudinary assets.
- * Artwork is intentionally public. The adapter streams the supplied body
- * directly to Cloudinary and never introduces production test bypasses.
+ * Artwork/public images are intentionally public. The adapter streams the
+ * supplied body directly to Cloudinary and never introduces production test bypasses.
  */
 
 import { v2 as cloudinary } from "cloudinary";
@@ -44,7 +44,9 @@ function inferKind(contentType: string | undefined, storageKey: string): "audio"
   if (mime.startsWith("video/")) return "video";
 
   const key = storageKey.toLowerCase();
-  if (key.includes("/thumbnail") || key.includes("/artwork")) return "thumbnail";
+  if (key.includes("/thumbnail") || key.includes("/artwork") || key.includes("/images/")) {
+    return "thumbnail";
+  }
   if (key.includes("/audio/")) return "audio";
   if (key.includes("/video/")) return "video";
   throw new Error("Unable to determine Cloudinary media type");
