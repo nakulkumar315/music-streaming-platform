@@ -54,6 +54,7 @@
     "expo-linear-gradient": "~15.0.8",
     "expo-notifications": "~0.32.16",
     "expo-screen-orientation": "~9.0.8",
+    "expo-secure-store": "~15.0.8",
     "expo-sharing": "~14.0.8",
     "expo-video": "~3.0.16",
     "lucide-react-native": "^0.564.0",
