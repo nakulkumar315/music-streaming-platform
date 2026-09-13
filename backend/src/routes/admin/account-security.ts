@@ -2,7 +2,6 @@ import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
 import { ArtistAccountStateService } from "../../common/auth/account-state.service";
-import { AuditService } from "../../shared/audit/audit.service";
 import { invalidateArtistCache, invalidateCachePattern } from "../../common/cache";
 
 const router = Router();
@@ -24,8 +23,17 @@ function responseCorrelationId(req: any) {
   return String(req?.correlationId || "-");
 }
 
+function auditContext(req: any, reason?: string) {
+  return {
+    actorId: Number(req.user?.id),
+    actorRole: "admin" as const,
+    correlationId: auditCorrelationId(req),
+    ...(reason ? { reason } : {}),
+  };
+}
+
 function sendStateError(res: any, error: any, correlationId: string) {
-  const status = [400, 404, 409].includes(Number(error?.status)) ? Number(error.status) : 500;
+  const status = [400, 401, 404, 409].includes(Number(error?.status)) ? Number(error.status) : 500;
   const code = error?.code || (status === 500 ? "SYSTEM_ERROR" : "ACCOUNT_STATE_ERROR");
   return res.status(status).json({
     success: false,
@@ -42,28 +50,10 @@ async function invalidateArtistStateCaches() {
   ]);
 }
 
-function auditStateChange(req: any, state: any, reason?: string) {
-  AuditService.log({
-    action: "admin.artist_status_changed",
-    entity: "user",
-    entityId: String(state.id),
-    performedBy: Number(req.user?.id),
-    role: "admin",
-    status: "success",
-    correlationId: auditCorrelationId(req),
-    metadata: {
-      action: state.operation,
-      status: state.status,
-      isDeleted: state.isDeleted,
-      sessionsRevoked: state.sessionsRevoked,
-      ...(reason ? { reason } : {}),
-    },
-  });
-}
-
 // These routes are mounted before the historical admin artist/content routers.
-// Guards are attached per intercepted path so unrelated MODERATOR routes fall
-// through to their canonical content router instead of being blocked here.
+// Each privileged mutation passes actor context into the canonical account-state
+// transaction so state change, session revocation and audit persistence are one
+// atomic operation.
 router.patch("/artists/:id/soft-delete", requireAuth, requireAdmin, async (req: any, res) => {
   const id = artistId(req.params.id);
   const correlationId = responseCorrelationId(req);
@@ -73,9 +63,12 @@ router.patch("/artists/:id/soft-delete", requireAuth, requireAdmin, async (req: 
 
   const reason = String(req.body?.reason ?? req.body?.deletionReason ?? "").trim();
   try {
-    const state = await ArtistAccountStateService.softDelete(id, reason);
+    const state = await ArtistAccountStateService.softDelete(
+      id,
+      reason,
+      auditContext(req, reason)
+    );
     await invalidateArtistStateCaches();
-    auditStateChange(req, state, reason);
     return res.json({
       success: true,
       artist: {
@@ -101,9 +94,8 @@ router.patch("/artists/:id/reactivate", requireAuth, requireAdmin, async (req: a
   }
 
   try {
-    const state = await ArtistAccountStateService.reactivate(id);
+    const state = await ArtistAccountStateService.reactivate(id, auditContext(req));
     await invalidateArtistStateCaches();
-    auditStateChange(req, state);
     return res.json({
       success: true,
       artist: {
@@ -129,10 +121,13 @@ router.patch("/artists/:id/status", requireAuth, requireAdmin, async (req: any, 
     return res.status(400).json({ success: false, code: "INVALID_ARTIST_ID", message: "Invalid id", correlationId });
   }
 
+  const reason = String(req.body?.reason || "").trim();
   try {
-    const state = await ArtistAccountStateService.toggleSuspension(id);
+    const state = await ArtistAccountStateService.toggleSuspension(
+      id,
+      auditContext(req, reason || undefined)
+    );
     await invalidateArtistStateCaches();
-    auditStateChange(req, state, String(req.body?.reason || "").trim() || undefined);
     return res.json({
       success: true,
       status: state.status,
@@ -153,10 +148,13 @@ router.post("/content/artists/:artistId/ban", requireAuth, requireAdmin, async (
     return res.status(400).json({ success: false, code: "INVALID_ARTIST_ID", message: "Invalid artistId", correlationId });
   }
 
+  const reason = String(req.body?.reason || "").trim();
   try {
-    const state = await ArtistAccountStateService.ban(id);
+    const state = await ArtistAccountStateService.ban(
+      id,
+      auditContext(req, reason || undefined)
+    );
     await invalidateArtistStateCaches();
-    auditStateChange(req, state, String(req.body?.reason || "").trim() || undefined);
     return res.json({
       success: true,
       status: state.status,
