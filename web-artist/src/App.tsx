@@ -41,7 +41,6 @@ export default function App() {
           <Route path="/artist/pricing" element={<ArtistPricingPage />} />
           <Route path="/artist/analytics-summary" element={<ArtistAnalyticsSummaryPage />} />
           <Route path="/artist/content-history" element={<ArtistContentHistoryPage />} />
-          <Route path="/artist/content-upload" element={<Navigate to="/artist/content-history" replace />} />
         </Route>
         <Route path="*" element={<Navigate to="/artist/login" replace />} />
       </Routes>
