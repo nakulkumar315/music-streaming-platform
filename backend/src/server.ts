@@ -60,13 +60,11 @@ export async function startServer(): Promise<void> {
         await new Promise<void>((resolve) => server!.close(() => resolve()));
       }
 
-      const [{ pool, poolRead }, { redis }] = await Promise.all([
+      const [{ pool, poolRead }, { closeRedis }] = await Promise.all([
         import("./common/db"),
         import("./common/redis"),
       ]);
-      const closers: Promise<unknown>[] = [pool.end(), poolRead.end()];
-      if (redis) closers.push(redis.quit());
-      await Promise.allSettled(closers);
+      await Promise.allSettled([pool.end(), poolRead.end(), closeRedis()]);
       clearTimeout(forceExit);
       logger.info({ reason }, "[Shutdown] Resources closed");
       process.exit(exitCode);
@@ -103,7 +101,7 @@ export async function startServer(): Promise<void> {
 }
 
 if (require.main === module) {
-  startServer().catch(async (error) => {
+  startServer().catch((error) => {
     // Logger/config dependencies may not be available when validation itself fails.
     console.error("[Startup] Backend failed before becoming ready", error instanceof Error ? error.message : error);
     process.exit(1);
