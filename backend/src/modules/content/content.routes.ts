@@ -16,6 +16,17 @@ function boundedInt(value: unknown, fallback: number, min: number, max: number) 
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
+function parseContentCursor(value: unknown): { createdAt: Date; id: number } | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const separator = raw.lastIndexOf("|");
+  if (separator <= 0) return null;
+  const createdAt = new Date(raw.slice(0, separator));
+  const id = positiveInteger(raw.slice(separator + 1));
+  if (Number.isNaN(createdAt.getTime()) || !id) return null;
+  return { createdAt, id };
+}
+
 function thumbnailUrl(contentId: number) {
   return publicAppUrl(`/api/v1/fan/stream/thumbnail/${contentId}`);
 }
@@ -88,14 +99,13 @@ router.get("/", optionalAuth, async (req: any, res: any) => {
   const limit = boundedInt(req.query?.limit, 50, 1, 100);
   const offset = boundedInt(req.query?.offset, 0, 0, 100_000);
   const cursorRaw = String(req.query?.cursor || "").trim();
-  const cursor = cursorRaw ? new Date(cursorRaw) : null;
-  const useCursor = Boolean(cursor && !Number.isNaN(cursor.getTime()));
+  const cursor = parseContentCursor(cursorRaw);
 
-  if (cursorRaw && !useCursor) {
+  if (cursorRaw && !cursor) {
     return res.status(400).json({
       success: false,
       code: "INVALID_CURSOR",
-      message: "cursor must be a valid ISO timestamp",
+      message: "cursor is invalid",
       correlationId,
     });
   }
@@ -103,16 +113,18 @@ router.get("/", optionalAuth, async (req: any, res: any) => {
   try {
     const params: any[] = [userId];
     let cursorClause = "";
-    if (useCursor) {
-      params.push(cursor);
-      cursorClause = `AND c.created_at < $2`;
-      params.push(limit);
+    let limitRef = "$2";
+    let offsetClause = "OFFSET $3";
+
+    if (cursor) {
+      params.push(cursor.createdAt, cursor.id, limit);
+      cursorClause = `AND (c.created_at < $2 OR (c.created_at = $2 AND c.id < $3))`;
+      limitRef = "$4";
+      offsetClause = "";
     } else {
       params.push(limit, offset);
     }
 
-    const limitRef = useCursor ? "$3" : "$2";
-    const offsetClause = useCursor ? "" : "OFFSET $3";
     const result = await pool.query(
       `SELECT c.id, c.title, c.type, c.genre, c.artist_id,
               c.subscription_required, c.created_at,
@@ -143,7 +155,10 @@ router.get("/", optionalAuth, async (req: any, res: any) => {
         audio: items.filter((item: any) => item.mediaType === "audio").length,
         video: items.filter((item: any) => item.mediaType === "video").length,
       },
-      nextCursor: last?.createdAt ? new Date(last.createdAt).toISOString() : null,
+      nextCursor:
+        last?.createdAt && last?.id
+          ? `${new Date(last.createdAt).toISOString()}|${last.id}`
+          : null,
       correlationId,
     });
   } catch {
