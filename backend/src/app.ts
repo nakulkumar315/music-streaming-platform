@@ -21,6 +21,7 @@ import { handleMediaWebhook } from "./controllers/media/WebhookController";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
 import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
+import { validateArtistPricingRequest } from "./modules/artist/artist-pricing.validation";
 import {
   artistAssetUploadRouter,
   artistPublicAssetRouter,
@@ -149,6 +150,11 @@ export function createApp(runtime: EnvValidationResult) {
     requireAuth,
     requireVerifiedArtist
   );
+
+  // Phase-1 Artist pricing remains a server-validated control-plane command.
+  // This boundary normalizes supported rupee values before the legacy route
+  // persists them and rejects UI-only fields that are not authoritative state.
+  app.patch("/api/v1/artist/pricing", validateArtistPricingRequest);
 
   app.use("/api/v1/artist", artistRoutes);
   app.use("/api/v1/admin", adminRoutes);
