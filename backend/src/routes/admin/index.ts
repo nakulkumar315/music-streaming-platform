@@ -12,6 +12,7 @@ import adminSubscriptionRoutes from "./subscriptions";
 import adminAuditRoutes from "./audit";
 import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
+import { adminArtistValidationRouter } from "../../modules/admin/admin-artist.validation";
 
 const router = Router();
 
@@ -20,7 +21,13 @@ router.use("/", adminAccountSecurityRoutes);
 
 router.use("/", requireAuth, requireRoles("ADMIN"), adminArtistApprovalsRoutes);
 router.use("/analytics", requireAuth, requireRoles("ADMIN"), adminAnalyticsRoutes);
-router.use("/artists", requireAuth, requireRoles("ADMIN"), adminArtistsRoutes);
+router.use(
+  "/artists",
+  requireAuth,
+  requireRoles("ADMIN"),
+  adminArtistValidationRouter,
+  adminArtistsRoutes
+);
 router.use(
   "/content",
   requireAuth,
