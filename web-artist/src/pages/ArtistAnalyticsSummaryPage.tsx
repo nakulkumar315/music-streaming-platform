@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   CartesianGrid,
@@ -123,8 +123,8 @@ export default function ArtistAnalyticsSummaryPage() {
         </div>
       </div>
 
-      {failure && (
-        <div className="mb-6 rounded-2xl border border-red-400/20 bg-red-500/10 p-5">
+      {failure ? (
+        <div className="rounded-2xl border border-red-400/20 bg-red-500/10 p-5">
           <div className="flex items-start gap-3">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-300" />
             <div className="min-w-0 flex-1">
@@ -148,111 +148,113 @@ export default function ArtistAnalyticsSummaryPage() {
             </button>
           </div>
         </div>
+      ) : (
+        <>
+          <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <StatCard
+              label="Subscribers"
+              value={query.isLoading ? "…" : count(stats?.subscribers ?? 0)}
+              detail="Active artist subscriptions"
+              icon={<Users size={20} />}
+            />
+            <StatCard
+              label="Trusted plays"
+              value={query.isLoading ? "…" : count(stats?.totalPlays ?? 0)}
+              detail="Qualified playback sessions"
+              icon={<PlayCircle size={20} />}
+            />
+            <StatCard
+              label="Gross captured revenue"
+              value={query.isLoading ? "…" : money(stats?.grossEarnings ?? 0)}
+              detail="Payment ledger; not payout estimate"
+              icon={<DollarSign size={20} />}
+            />
+          </div>
+
+          <div className="mb-6 rounded-2xl border border-white/10 bg-surface p-5">
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-semibold text-white">Trend</h2>
+                <p className="mt-1 text-sm text-[#8D7B77]">
+                  {metric === "plays" ? "Trusted playback counts" : "Gross captured revenue"} over {days} days.
+                </p>
+              </div>
+              <div className="flex rounded-xl border border-white/10 bg-white/5 p-1">
+                <button
+                  type="button"
+                  onClick={() => setMetric("plays")}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                    metric === "plays" ? "bg-primary text-white" : "text-[#B8A6A1]"
+                  }`}>
+                  Plays
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMetric("earnings")}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                    metric === "earnings" ? "bg-primary text-white" : "text-[#B8A6A1]"
+                  }`}>
+                  Gross revenue
+                </button>
+              </div>
+            </div>
+
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#8D7B77", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: "#8D7B77", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{
+                      background: "#171717",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: 12,
+                    }}
+                    formatter={(value: any) =>
+                      metric === "earnings" ? money(Number(value)) : count(Number(value))
+                    }
+                  />
+                  <Line type="monotone" dataKey="value" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-surface p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="font-semibold text-white">Content performance</h2>
+                <p className="mt-1 text-sm text-[#8D7B77]">Top content by trusted plays in this period.</p>
+              </div>
+              <Calendar className="text-primary" size={18} />
+            </div>
+
+            <div className="mt-5 space-y-3">
+              {!query.isLoading && content.length === 0 && (
+                <div className="rounded-xl border border-white/5 bg-white/[0.03] p-8 text-center">
+                  <Music className="mx-auto text-[#8D7B77]" size={24} />
+                  <p className="mt-2 text-sm text-[#8D7B77]">No trusted play data in this period.</p>
+                </div>
+              )}
+              {content.map((item) => (
+                <div
+                  key={item.contentId}
+                  className="flex items-center justify-between gap-4 rounded-xl border border-white/5 bg-white/[0.03] p-4">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-white">{item.title}</p>
+                    <p className="mt-1 text-xs text-[#8D7B77]">Content #{item.contentId}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-semibold text-primary">{count(item.plays)}</p>
+                    <p className="text-xs text-[#8D7B77]">plays</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
       )}
-
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatCard
-          label="Subscribers"
-          value={query.isLoading ? "…" : count(stats?.subscribers ?? 0)}
-          detail="Active artist subscriptions"
-          icon={<Users size={20} />}
-        />
-        <StatCard
-          label="Trusted plays"
-          value={query.isLoading ? "…" : count(stats?.totalPlays ?? 0)}
-          detail="Qualified playback sessions"
-          icon={<PlayCircle size={20} />}
-        />
-        <StatCard
-          label="Gross captured revenue"
-          value={query.isLoading ? "…" : money(stats?.grossEarnings ?? 0)}
-          detail="Payment ledger; not payout estimate"
-          icon={<DollarSign size={20} />}
-        />
-      </div>
-
-      <div className="mb-6 rounded-2xl border border-white/10 bg-surface p-5">
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="font-semibold text-white">Trend</h2>
-            <p className="mt-1 text-sm text-[#8D7B77]">
-              {metric === "plays" ? "Trusted playback counts" : "Gross captured revenue"} over {days} days.
-            </p>
-          </div>
-          <div className="flex rounded-xl border border-white/10 bg-white/5 p-1">
-            <button
-              type="button"
-              onClick={() => setMetric("plays")}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
-                metric === "plays" ? "bg-primary text-white" : "text-[#B8A6A1]"
-              }`}>
-              Plays
-            </button>
-            <button
-              type="button"
-              onClick={() => setMetric("earnings")}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
-                metric === "earnings" ? "bg-primary text-white" : "text-[#B8A6A1]"
-              }`}>
-              Gross revenue
-            </button>
-          </div>
-        </div>
-
-        <div className="h-72">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
-              <XAxis dataKey="date" tick={{ fill: "#8D7B77", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: "#8D7B77", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <Tooltip
-                contentStyle={{
-                  background: "#171717",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 12,
-                }}
-                formatter={(value: number) =>
-                  metric === "earnings" ? money(value) : count(value)
-                }
-              />
-              <Line type="monotone" dataKey="value" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-white/10 bg-surface p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="font-semibold text-white">Content performance</h2>
-            <p className="mt-1 text-sm text-[#8D7B77]">Top content by trusted plays in this period.</p>
-          </div>
-          <Calendar className="text-primary" size={18} />
-        </div>
-
-        <div className="mt-5 space-y-3">
-          {!query.isLoading && !failure && content.length === 0 && (
-            <div className="rounded-xl border border-white/5 bg-white/[0.03] p-8 text-center">
-              <Music className="mx-auto text-[#8D7B77]" size={24} />
-              <p className="mt-2 text-sm text-[#8D7B77]">No trusted play data in this period.</p>
-            </div>
-          )}
-          {content.map((item) => (
-            <div
-              key={item.contentId}
-              className="flex items-center justify-between gap-4 rounded-xl border border-white/5 bg-white/[0.03] p-4">
-              <div className="min-w-0">
-                <p className="truncate font-medium text-white">{item.title}</p>
-                <p className="mt-1 text-xs text-[#8D7B77]">Content #{item.contentId}</p>
-              </div>
-              <div className="text-right">
-                <p className="font-semibold text-primary">{count(item.plays)}</p>
-                <p className="text-xs text-[#8D7B77]">plays</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
     </div>
   );
 }
@@ -266,7 +268,7 @@ function StatCard({
   label: string;
   value: string;
   detail: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-surface p-5">
