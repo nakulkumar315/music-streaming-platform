@@ -162,6 +162,7 @@ export async function uploadAdminMedia(req: any, res: Response) {
       storageKey: thumbnailKey,
       body: fs.createReadStream(thumbnail.path),
       contentType: thumbnail.mimetype,
+      contentLength: thumbnail.size,
       metadata: { contentId: String(contentId), artistId: String(metadata.artistId) },
     });
     uploaded.push({ storageKey: thumbnailKey, providerAssetId: thumbnailUpload.providerAssetId });
@@ -170,6 +171,7 @@ export async function uploadAdminMedia(req: any, res: Response) {
       storageKey: mediaKey,
       body: fs.createReadStream(media.path),
       contentType: media.mimetype,
+      contentLength: media.size,
       metadata: { contentId: String(contentId), artistId: String(metadata.artistId) },
     });
     uploaded.push({ storageKey: mediaKey, providerAssetId: mediaUpload.providerAssetId });
