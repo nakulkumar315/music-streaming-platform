@@ -27,6 +27,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ErrorBoundary from './apps/fan/src/ui/ErrorBoundary';
 import { applyTheme, DEFAULT_THEME_ID } from './apps/fan/src/config/themeConfig';
 import { SENTRY_DSN, SENTRY_RELEASE } from './apps/fan/src/config/env';
+import { sanitizeSentryEvent } from './apps/fan/src/utils/sentrySanitizer';
 
 if (Platform.OS === 'web') {
   const savedTheme = localStorage.getItem('global-theme') || DEFAULT_THEME_ID;
@@ -39,6 +40,9 @@ if (SENTRY_DSN) {
     release: SENTRY_RELEASE ?? undefined,
     debug: __DEV__,
     sendDefaultPii: false,
+    beforeSend(event) {
+      return sanitizeSentryEvent(event);
+    },
   });
 }
 
