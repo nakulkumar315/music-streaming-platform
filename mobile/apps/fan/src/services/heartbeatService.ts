@@ -4,7 +4,27 @@ import logger from '../utils/logger';
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let currentContentId: string | null = null;
+let heartbeatSessionId: number | null = null;
 let heartbeatSequence = 0;
+
+/**
+ * Keep the sequence monotonic for the lifetime of one server playback session.
+ * Pausing stops the timer but deliberately keeps the lease alive, so restarting
+ * heartbeats for that same lease must continue from the previous sequence rather
+ * than replaying 1..N. A newly allocated server session gets its own sequence.
+ */
+function nextHeartbeatSequence(rawSessionId: unknown): number | null {
+  const sessionId = Number(rawSessionId);
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) return null;
+
+  if (heartbeatSessionId !== sessionId) {
+    heartbeatSessionId = sessionId;
+    heartbeatSequence = 0;
+  }
+
+  heartbeatSequence += 1;
+  return heartbeatSequence;
+}
 
 /**
  * Start sending heartbeats for the exact server playback lease currently owned
@@ -18,7 +38,6 @@ export function startHeartbeat(
 ) {
   stopHeartbeat();
   currentContentId = contentId;
-  heartbeatSequence = 0;
 
   const sendBeat = async () => {
     try {
@@ -28,9 +47,14 @@ export function startHeartbeat(
         return;
       }
 
+      const sequence = nextHeartbeatSequence(lease.sessionId);
+      if (!sequence) {
+        logger.warn('[Heartbeat] Invalid playback lease session id');
+        return;
+      }
+
       const currentPosition = getPosition ? getPosition() : 0;
       const duration = getDuration ? getDuration() : 0;
-      const sequence = ++heartbeatSequence;
 
       const response = await apiV1.post('/stream/heartbeat', {
         sessionId: lease.sessionId,
@@ -61,7 +85,11 @@ export function startHeartbeat(
   logger.log('[Heartbeat] Started for content:', contentId);
 }
 
-/** Stop sending heartbeats. Pausing does not terminate the server lease. */
+/**
+ * Stop only the heartbeat timer. Pausing does not terminate the server lease,
+ * therefore the per-session sequence is intentionally retained until a
+ * different server playback session is observed.
+ */
 export function stopHeartbeat() {
   if (heartbeatInterval) {
     clearInterval(heartbeatInterval);
@@ -71,7 +99,6 @@ export function stopHeartbeat() {
     logger.log('[Heartbeat] Stopped');
   }
   currentContentId = null;
-  heartbeatSequence = 0;
 }
 
 /** Check if heartbeat is currently active. */
