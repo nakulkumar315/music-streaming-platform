@@ -2,152 +2,146 @@ import { Request, Response } from "express";
 import { pool } from "../common/db";
 import { logger } from "../common/logger";
 
-// Amounts stored in paise, will convert to INR (divide by 100)
+function parseDateRange(req: Request) {
+  const startRaw = String(req.query.startDate || "").trim();
+  const endRaw = String(req.query.endDate || "").trim();
+  if (!startRaw && !endRaw) return { startDate: null, endDate: null };
+  if (!startRaw || !endRaw) throw new Error("startDate and endDate must be provided together");
 
+  const startDate = new Date(startRaw);
+  const endDate = new Date(endRaw);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    throw new Error("Invalid analytics date range");
+  }
+  if (startDate > endDate) throw new Error("startDate must not be after endDate");
+  return { startDate, endDate };
+}
+
+/**
+ * Admin analytics are read-only projections. Financial values are always
+ * derived from the canonical captured payment ledger; engagement analytics are
+ * never used as a revenue source of truth.
+ */
 export const getAdminDashboardMetrics = async (req: Request, res: Response) => {
+  const correlationId = (req as any)?.correlationId || "-";
+  let startDate: Date | null;
+  let endDate: Date | null;
   try {
-    // Parse optional date range from query params
-    const startDateStr = String(req.query.startDate || '');
-    const endDateStr = String(req.query.endDate || '');
-    const startDate = startDateStr && startDateStr !== 'undefined' && !isNaN(Date.parse(startDateStr)) ? new Date(startDateStr) : null;
-    const endDate = endDateStr && endDateStr !== 'undefined' && !isNaN(Date.parse(endDateStr)) ? new Date(endDateStr) : null;
-    
-    // Build date filter clauses
-    let paymentsDateFilter = "status = 'SUCCESS'";
-    let transactionsDateFilter = "UPPER(status) = 'CAPTURED' OR UPPER(status) = 'SUCCESS'";
-    const queryParams: any[] = [];
-    
-    if (startDate && endDate) {
-      paymentsDateFilter = "status = 'SUCCESS' AND created_at >= $1 AND created_at <= $2";
-      transactionsDateFilter = "(UPPER(status) = 'CAPTURED' OR UPPER(status) = 'SUCCESS') AND date >= $1 AND date <= $2";
-      queryParams.push(startDate.toISOString(), endDate.toISOString());
-    }
+    ({ startDate, endDate } = parseDateRange(req));
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_ANALYTICS_RANGE",
+      message: error instanceof Error ? error.message : "Invalid analytics date range",
+      correlationId,
+    });
+  }
 
-    // 1. Total Revenue from payments table - convert paise -> INR
+  try {
+    const datePredicate = startDate && endDate ? " AND created_at >= $1 AND created_at <= $2" : "";
+    const dateParams = startDate && endDate ? [startDate.toISOString(), endDate.toISOString()] : [];
+
     const revenueRow = await pool.query(
-      `SELECT SUM(amount)::numeric as total FROM payments WHERE ${paymentsDateFilter}`,
-      queryParams
+      `SELECT COALESCE(SUM(amount), 0)::numeric AS total
+         FROM payments
+        WHERE UPPER(status) IN ('SUCCESS', 'PAID', 'CAPTURED')${datePredicate}`,
+      dateParams
     );
-    const paymentsRevenue = Number(revenueRow.rows[0]?.total || 0) / 100;
-    
-    // Also get revenue from transactions table (for records that might not be in payments)
-    const transactionsRevenueRow = await pool.query(
-      `SELECT SUM(amount)::numeric as total FROM transactions WHERE ${transactionsDateFilter}`,
-      queryParams
-    );
-    const transactionsRevenue = Number(transactionsRevenueRow.rows[0]?.total || 0) / 100;
-    
-    // Use the higher of the two values for complete revenue picture
-    const totalRevenue = Math.max(paymentsRevenue, transactionsRevenue);
+    const totalRevenue = Number(revenueRow.rows[0]?.total || 0) / 100;
 
-    // 2. Active Subscribers - only PLATFORM subscriptions (fans who paid)
     const activeSubRow = await pool.query(
-      `SELECT COUNT(*)::int as count FROM subscriptions 
-       WHERE UPPER(type) = 'PLATFORM' AND (UPPER(status) = 'ACTIVE' OR UPPER(status) = 'GRACE')`
+      `SELECT COUNT(*)::int AS count
+         FROM subscriptions
+        WHERE UPPER(type) = 'PLATFORM'
+          AND UPPER(status) IN ('ACTIVE', 'GRACE')`
     );
     const activeSubscribers = Number(activeSubRow.rows[0]?.count || 0);
-    console.log(`[ANALYTICS-DEBUG] Active PLATFORM subscribers: ${activeSubscribers}`);
-    
-    // Debug: Check all subscription types and statuses
-    const debugTypes = await pool.query(`SELECT DISTINCT type, status, COUNT(*) as count FROM subscriptions GROUP BY type, status`);
-    console.log(`[ANALYTICS-DEBUG] All subscription types/statuses:`, debugTypes.rows);
 
-    // 3. Revenue per Artist
     let artistRevenueQuery = `
-      SELECT u.name as artist_name, SUM(p.amount)::numeric as amount
-       FROM payments p
-       JOIN subscriptions s ON p.subscription_id = s.id
-       JOIN users u ON s.artist_id = u.id
-       WHERE UPPER(p.status) IN ('SUCCESS', 'PAID', 'CAPTURED') AND s.type = 'ARTIST'`;
-    
-    const artistRevenueParams: any[] = [];
+      SELECT COALESCE(NULLIF(u.name, ''), split_part(u.email, '@', 1)) AS artist_name,
+             COALESCE(SUM(p.amount), 0)::numeric AS amount
+        FROM payments p
+        JOIN subscriptions s ON p.subscription_id = s.id
+        JOIN users u ON s.artist_id = u.id
+       WHERE UPPER(p.status) IN ('SUCCESS', 'PAID', 'CAPTURED')
+         AND UPPER(s.type) = 'ARTIST'`;
+    const artistRevenueParams: unknown[] = [];
     if (startDate && endDate) {
-      artistRevenueQuery += ` AND p.created_at >= $1 AND p.created_at <= $2`;
+      artistRevenueQuery += " AND p.created_at >= $1 AND p.created_at <= $2";
       artistRevenueParams.push(startDate.toISOString(), endDate.toISOString());
     }
-    artistRevenueQuery += ` GROUP BY u.name ORDER BY amount DESC LIMIT 5`;
-    
-    const artistRevenueRow = await pool.query(artistRevenueQuery, artistRevenueParams);
-    const revenuePerArtist = artistRevenueRow.rows.map(r => ({
-      name: r.artist_name,
-      revenue: Number(r.amount) / 100
-    }));
-    console.log(`[ANALYTICS-DEBUG] Revenue per artist query returned ${revenuePerArtist.length} rows`);
-    console.log(`[ANALYTICS-DEBUG] Artist revenue data:`, revenuePerArtist);
-    
-    // Debug: Check what payment statuses exist for ARTIST subscriptions
-    const debugPayments = await pool.query(`
-      SELECT DISTINCT p.status, s.type, COUNT(*) as count 
-      FROM payments p 
-      JOIN subscriptions s ON p.subscription_id = s.id 
-      WHERE s.type = 'ARTIST' 
-      GROUP BY p.status, s.type
-    `);
-    console.log(`[ANALYTICS-DEBUG] Payments for ARTIST subscriptions:`, debugPayments.rows);
+    artistRevenueQuery += " GROUP BY u.id, u.name, u.email ORDER BY amount DESC LIMIT 5";
 
-    // 4. Conversion Rate (Subscribers / Total Users)
-    // Count all FAN users (those who can subscribe to platform)
-    const usersCountRow = await pool.query("SELECT COUNT(*)::int as count FROM users WHERE role = 'FAN'");
+    const artistRevenueRow = await pool.query(artistRevenueQuery, artistRevenueParams);
+    const revenuePerArtist = artistRevenueRow.rows.map((row) => ({
+      name: row.artist_name,
+      revenue: Number(row.amount || 0) / 100,
+    }));
+
+    const usersCountRow = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM users WHERE UPPER(role) = 'FAN' AND COALESCE(is_deleted, false) = false"
+    );
     const totalUsers = Number(usersCountRow.rows[0]?.count || 0);
     const conversionRate = totalUsers > 0 ? (activeSubscribers / totalUsers) * 100 : 0;
-    console.log(`[ANALYTICS-DEBUG] Conversion calc: ${activeSubscribers} subscribers / ${totalUsers} users = ${conversionRate}%`);
 
-    // 5. Daily Revenue Trend
     let dailyRevenueQuery = `
-      SELECT 
-        DATE_TRUNC('day', created_at)::date as date, 
-        SUM(amount)::numeric as daily_total
-      FROM payments 
-      WHERE status = 'SUCCESS'`;
-    
-    const dailyRevenueParams: any[] = [];
+      SELECT DATE_TRUNC('day', created_at)::date AS date,
+             COALESCE(SUM(amount), 0)::numeric AS daily_total
+        FROM payments
+       WHERE UPPER(status) IN ('SUCCESS', 'PAID', 'CAPTURED')`;
+    const dailyRevenueParams: unknown[] = [];
     if (startDate && endDate) {
-      dailyRevenueQuery += ` AND created_at >= $1 AND created_at <= $2`;
+      dailyRevenueQuery += " AND created_at >= $1 AND created_at <= $2";
       dailyRevenueParams.push(startDate.toISOString(), endDate.toISOString());
     } else {
-      dailyRevenueQuery += ` AND created_at > now() - interval '30 days'`;
+      dailyRevenueQuery += " AND created_at > now() - interval '30 days'";
     }
-    dailyRevenueQuery += ` GROUP BY 1 ORDER BY 1 ASC`;
-    
+    dailyRevenueQuery += " GROUP BY 1 ORDER BY 1 ASC";
+
     const dailyRevenueRow = await pool.query(dailyRevenueQuery, dailyRevenueParams);
-    const dailyTrends = dailyRevenueRow.rows.map(r => ({
-      date: r.date,
-      amount: Number(r.daily_total) / 100
+    const dailyTrends = dailyRevenueRow.rows.map((row) => ({
+      date: row.date,
+      amount: Number(row.daily_total || 0) / 100,
     }));
 
-    // 6. Growth Metrics (MoM) - date range doesn't apply here
     const currentMonthRev = await pool.query(`
-      SELECT SUM(amount)::numeric as total FROM payments 
-      WHERE status = 'SUCCESS' AND created_at > DATE_TRUNC('month', now())
+      SELECT COALESCE(SUM(amount), 0)::numeric AS total
+        FROM payments
+       WHERE UPPER(status) IN ('SUCCESS', 'PAID', 'CAPTURED')
+         AND created_at >= DATE_TRUNC('month', now())
     `);
     const lastMonthRev = await pool.query(`
-      SELECT SUM(amount)::numeric as total FROM payments 
-      WHERE status = 'SUCCESS' 
-        AND created_at > DATE_TRUNC('month', now() - interval '1 month')
-        AND created_at < DATE_TRUNC('month', now())
+      SELECT COALESCE(SUM(amount), 0)::numeric AS total
+        FROM payments
+       WHERE UPPER(status) IN ('SUCCESS', 'PAID', 'CAPTURED')
+         AND created_at >= DATE_TRUNC('month', now() - interval '1 month')
+         AND created_at < DATE_TRUNC('month', now())
     `);
-    
+
     const curMonth = Number(currentMonthRev.rows[0]?.total || 0) / 100;
     const prevMonth = Number(lastMonthRev.rows[0]?.total || 0) / 100;
     const momGrowth = prevMonth > 0 ? ((curMonth - prevMonth) / prevMonth) * 100 : 0;
-
-    // 7. ARPU & Churn (Estimated)
     const arpu = activeSubscribers > 0 ? totalRevenue / activeSubscribers : 0;
-    
+
     const expiredCountRow = await pool.query(
-      "SELECT COUNT(*)::int as count FROM subscriptions WHERE status = 'EXPIRED' AND updated_at > now() - interval '30 days'"
+      `SELECT COUNT(*)::int AS count
+         FROM subscriptions
+        WHERE UPPER(status) = 'EXPIRED'
+          AND updated_at > now() - interval '30 days'`
     );
     const expiredLast30 = Number(expiredCountRow.rows[0]?.count || 0);
-    const churnRate = activeSubscribers > 0 ? (expiredLast30 / (activeSubscribers + expiredLast30)) * 100 : 0;
+    const churnRate =
+      activeSubscribers > 0
+        ? (expiredLast30 / (activeSubscribers + expiredLast30)) * 100
+        : 0;
 
-    // 8. Recent Subscriptions
     const recentSubRow = await pool.query(
-      `SELECT s.type, u.email as user_email, u2.name as artist_name, s.status, s.created_at
-       FROM subscriptions s
-       JOIN users u ON s.user_id = u.id
-       LEFT JOIN users u2 ON s.artist_id = u2.id
-       ORDER BY s.created_at DESC
-       LIMIT 10`
+      `SELECT s.type, u.email AS user_email, u2.name AS artist_name, s.status, s.created_at
+         FROM subscriptions s
+         JOIN users u ON s.user_id = u.id
+         LEFT JOIN users u2 ON s.artist_id = u2.id
+        ORDER BY s.created_at DESC
+        LIMIT 10`
     );
 
     return res.json({
@@ -155,29 +149,30 @@ export const getAdminDashboardMetrics = async (req: Request, res: Response) => {
       metrics: {
         totalRevenue,
         activeSubscribers,
-        conversionRate: conversionRate.toFixed(2) + "%",
+        conversionRate: `${conversionRate.toFixed(2)}%`,
         revenuePerArtist,
         dailyTrends,
         growth: {
           monthlyRevenue: curMonth,
           prevMonthlyRevenue: prevMonth,
-          momPercentage: momGrowth.toFixed(1) + "%"
+          momPercentage: `${momGrowth.toFixed(1)}%`,
         },
         unitEconomics: {
           arpu: Math.round(arpu),
-          churnRate: churnRate.toFixed(1) + "%"
+          churnRate: `${churnRate.toFixed(1)}%`,
         },
-        recentSubscriptions: recentSubRow.rows
+        recentSubscriptions: recentSubRow.rows,
       },
       currency: "INR",
-      _debug: {
-        paymentsRevenue,
-        transactionsRevenue,
-        dateRange: startDate && endDate ? { startDate, endDate } : null
-      }
+      correlationId,
     });
   } catch (error) {
-    logger.error({ error }, "Error fetching admin dashboard metrics");
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    logger.error({ error, correlationId }, "Error fetching admin dashboard metrics");
+    return res.status(500).json({
+      success: false,
+      code: "ADMIN_ANALYTICS_FAILED",
+      message: "Failed to fetch admin analytics",
+      correlationId,
+    });
   }
 };
