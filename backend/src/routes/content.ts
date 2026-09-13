@@ -20,10 +20,13 @@ async function contentIsFanVisible(contentId: number): Promise<boolean> {
       WHERE c.id = $1
         AND c.lifecycle_state = 'EARLY_ACCESS'
         AND c.status = 'READY'
-        AND c.is_approved = true
-        AND c.is_taken_down = false
-        AND u.is_deleted = false
+        AND c.is_approved = TRUE
+        AND c.is_taken_down = FALSE
+        AND UPPER(u.role) = 'ARTIST'
+        AND u.is_deleted = FALSE
         AND UPPER(u.status) = 'ACTIVE'
+        AND u.is_verified = TRUE
+        AND UPPER(u.artist_status::text) = 'APPROVED'
       LIMIT 1`,
     [contentId]
   );
