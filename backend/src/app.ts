@@ -1,7 +1,6 @@
 import "dotenv/config";
 import compression from "compression";
 import express from "express";
-import path from "path";
 import { Server } from "http";
 import { v4 as uuidv4 } from "uuid";
 
@@ -21,12 +20,12 @@ import contentRoutes from "./routes/content";
 import searchRoutes from "./routes/search";
 import mediaRoutes from "./routes/media";
 import { razorpayWebhook } from "./controllers/paymentController";
+import { handleMediaWebhook } from "./controllers/media/WebhookController";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
 import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
 import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
 import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
-import { MediaProviderFactory } from "./services/providers/MediaProviderFactory";
 import { NotificationService } from "./shared/notifications/notification.service";
 import { WinBackService } from "./shared/subscriptions/win-back.service";
 
@@ -126,24 +125,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Razorpay signature verification requires the exact raw request bytes. This
-// route must remain before express.json().
-app.post(
-  "/api/v1/payments/webhook",
-  express.raw({ type: "application/json" }),
-  (req, res) => razorpayWebhook(req as any, res)
-);
-
-app.use(compression());
-app.use(express.json());
-app.use(globalLimiter);
-app.use(httpLogger);
-
-// Legacy public uploads remain routable until the secure-media phase removes
-// direct delivery paths. Do not use this route for new protected media.
-app.use("/uploads", express.static(path.join(process.cwd(), "public", "uploads")));
-app.use("/media/stream", mediaStreamRoutes);
-
+// Correlation IDs must be available to raw-body webhooks as well as JSON routes.
 app.use((req: any, res, next) => {
   const incomingCorrelationId =
     (req.headers["x-correlation-id"] as string | undefined) ||
@@ -154,16 +136,32 @@ app.use((req: any, res, next) => {
   next();
 });
 
+// Signature verification requires the exact raw bytes. Keep provider webhooks
+// before express.json(); handlers parse only after successful verification.
+app.post(
+  "/api/v1/payments/webhook",
+  express.raw({ type: "application/json", limit: "2mb" }),
+  (req, res) => razorpayWebhook(req as any, res)
+);
+app.post(
+  "/api/v1/media/webhook",
+  express.raw({ type: "application/json", limit: "2mb" }),
+  (req, res) => handleMediaWebhook(req as any, res)
+);
+
+app.use(compression());
+app.use(express.json({ limit: "2mb" }));
+app.use(globalLimiter);
+app.use(httpLogger);
+
+// Protected media is delivered only through the canonical guarded stream route.
+// No public /uploads static route is mounted.
+app.use("/media/stream", mediaStreamRoutes);
+
 app.use("/api/v1/fan", fanRoutes);
-// Security-critical artist entry points are mounted before the historical
-// artist router so legacy handlers cannot bypass the canonical session model.
 app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
 app.use("/api/v1/artist/update-password", artistSecurityRoutes);
 
-// Pending/rejected artists may still access onboarding, appeal, account-state
-// and password-recovery surfaces. Business dashboard surfaces require the
-// current DB account to be an approved/verified ARTIST; the web UI is not a
-// security boundary.
 app.use(
   [
     "/api/v1/artist/dashboard",
@@ -179,6 +177,12 @@ app.use(
 app.use("/api/v1/artist", artistRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/auth", authRoutes);
+
+// The historical artist multipart upload route is intentionally unreachable.
+// Phase 1 binary upload is ADMIN-governed at /api/v1/admin/media/upload.
+app.post("/api/v1/content/upload", (_req, res) =>
+  res.status(404).json({ success: false, message: "Route not found" })
+);
 app.use("/api/v1/content", contentRoutes);
 app.use("/api/v1/search", searchRoutes);
 app.use("/api/v1/media", mediaRoutes);
@@ -313,18 +317,13 @@ async function bootstrap(): Promise<void> {
   const storageConfig = validateEnv();
   createStorageProvider();
   getDeliveryStrategyForProvider(storageConfig.storageProvider);
-  MediaProviderFactory.initialize();
 
-  // No route, worker or scheduler may start until the explicitly migrated
-  // schema matches the application contract.
   const schema = await assertDatabaseSchemaReady();
   logger.info(
     { schemaVersion: schema.version, database: schema.database, schema: schema.schema },
     "[Startup] Database schema verified"
   );
 
-  // Worker construction is an import side effect, so defer it until DB ready.
-  await import("./workers/upload.worker");
   const timers = startSubscriptionSchedulers();
   const server = await listen();
 
