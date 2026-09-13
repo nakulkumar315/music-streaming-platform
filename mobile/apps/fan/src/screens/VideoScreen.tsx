@@ -2464,7 +2464,7 @@ export default function VideoScreen() {
                             ),
                           }}
                           style={styles.artistAvatar}
-                          onError={(e) => {
+                          onError={(e: any) => {
                             // Agar image load nahi hoti toh default image dikhao
                             e.currentTarget.source = { uri: FALLBACK_ARTWORK };
                           }}

@@ -68,6 +68,13 @@ declare module 'lucide-react-native' {
   export const Volume2: LucideIcon;
   export const VolumeX: LucideIcon;
   export const Camera: LucideIcon;
+
+  export const Bell: LucideIcon;
+  export const Clock3: LucideIcon;
+  export const DollarSign: LucideIcon;
+  export const ExternalLink: LucideIcon;
+  export const Image: LucideIcon;
+  export const Palette: LucideIcon;
 }
 
 declare module '*.png' {

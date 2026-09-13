@@ -330,7 +330,6 @@ export default function SubscriptionFlowScreen({ navigation, route }: any) {
   const goToArtist = () => {
     navigation.navigate("Artist", {
       artistId: String(artistId),
-      unlocked: true,
       contentId,
     });
   };

@@ -34,6 +34,7 @@ import { radius } from '../theme-guest/radius';
 import { typography } from '../theme-guest/typography';
 
 import { benefits } from '../data/guestHome.static';
+// Live catalog discovery via backend contentApi
 import {
   loadGuestHomeData,
   type GuestHomeData,
