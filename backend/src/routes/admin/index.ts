@@ -14,6 +14,7 @@ import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
 import { adminArtistValidationRouter } from "../../modules/admin/admin-artist.validation";
 import adminGovernanceConfigRoutes from "../../modules/admin/admin-governance-config.routes";
+import adminArtistGovernanceRoutes from "../../modules/admin/admin-artist-governance.routes";
 
 const router = Router();
 
@@ -37,6 +38,7 @@ router.use(
   requireAuth,
   requireRoles("ADMIN"),
   adminArtistValidationRouter,
+  adminArtistGovernanceRoutes,
   adminArtistsRoutes
 );
 router.use(
