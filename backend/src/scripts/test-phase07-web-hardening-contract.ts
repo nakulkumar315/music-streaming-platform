@@ -11,6 +11,9 @@ function read(relativePath: string) {
 
 function main() {
   const adminAuth = read("backend/src/routes/admin/auth.ts");
+  const subscriptionConfigController = read(
+    "backend/src/controllers/subscriptionConfigController.ts"
+  );
   const adminApp = read("web-admin/src/App.tsx");
   const adminGate = read("web-admin/src/components/AdminSessionGate.tsx");
   const adminSession = read("web-admin/src/services/adminSession.ts");
@@ -18,6 +21,9 @@ function main() {
   const adminRuntime = read("web-admin/src/config/runtime.ts");
   const adminMain = read("web-admin/src/main.tsx");
   const adminLogin = read("web-admin/src/pages/AdminLoginPage.tsx");
+  const adminSubscriptionSettings = read(
+    "web-admin/src/pages/AdminSubscriptionSettingsPage.tsx"
+  );
   const artistSession = read("web-artist/src/services/artistSession.ts");
   const artistHttp = read("web-artist/src/services/http.ts");
   const artistRuntime = read("web-artist/src/config/runtime.ts");
@@ -76,6 +82,32 @@ function main() {
     false,
     "Generic admin 403 authorization failures must not become logout loops"
   );
+  assert.equal(
+    adminSubscriptionSettings.includes('localStorage.removeItem("adminToken"'),
+    false,
+    "Admin subscription settings must not implement its own token/logout path"
+  );
+  assert.equal(
+    adminSubscriptionSettings.includes("await load();"),
+    true,
+    "Admin subscription settings must refresh canonical server state after save"
+  );
+  assert.equal(
+    subscriptionConfigController.includes('message: "currency must be INR"'),
+    true,
+    "Subscription configuration must keep the canonical INR currency boundary"
+  );
+  assert.equal(
+    subscriptionConfigController.includes("Math.round(amount * 100)"),
+    true,
+    "Subscription configuration must reject values that cannot map cleanly to paise"
+  );
+  assert.equal(
+    subscriptionConfigController.includes('code: "INVALID_SUBSCRIPTION_CONFIG"'),
+    true,
+    "Invalid privileged pricing configuration must fail closed with an explicit code"
+  );
+
   assert.equal(
     artistHttp.includes("delete res.data.token"),
     true,
