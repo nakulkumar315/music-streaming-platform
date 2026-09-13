@@ -43,16 +43,16 @@ test('production guest experience has no committed mock catalog or diagnostics s
   assert.match(guestHome, /api|contentApi|searchApi/);
 });
 
-test('subscription success is gated by backend ACTIVE state with no local unlock hint', () => {
+test('subscription success is backend ACTIVE-gated and artist navigation strips local entitlement', () => {
   const flow = read('apps/fan/src/screens/SubscriptionFlowScreen.tsx');
   assert.match(flow, /subscriptionStatus === "ACTIVE"/);
   assert.match(flow, /apiV1\.get\(`\/subscriptions\/\$\{id\}`\)/);
   assert.match(flow, /Verified webhook state remains authoritative/);
   assert.doesNotMatch(flow, /set(?:Is)?Unlocked\s*\(/);
-  assert.doesNotMatch(flow, /unlocked\s*:\s*true/);
 
   const authoritativeArtist = read('apps/fan/src/navigation/AuthoritativeArtistScreen.tsx');
   assert.match(authoritativeArtist, /unlocked: _ignoredClientEntitlement/);
+  assert.match(authoritativeArtist, /params: safeParams/);
 });
 
 test('durable auth credentials use SecureStore with verified legacy migration', () => {
