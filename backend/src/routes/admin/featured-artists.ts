@@ -81,8 +81,10 @@ router.post("/", async (req: any, res: any) => {
     return res.status(400).json({ success: false, message: "artistId is required", correlationId });
   }
 
+  const client = await pool.connect();
   try {
-    const artistResult = await pool.query(
+    await client.query("BEGIN");
+    const artistResult = await client.query(
       `SELECT id, name, email, profile_image_url
          FROM users
         WHERE id = $1
@@ -91,11 +93,13 @@ router.post("/", async (req: any, res: any) => {
           AND UPPER(artist_status) = 'APPROVED'
           AND is_verified = TRUE
           AND is_deleted = FALSE
-        LIMIT 1`,
+        LIMIT 1
+        FOR UPDATE`,
       [artistId]
     );
     const artist = artistResult.rows[0];
     if (!artist) {
+      await client.query("ROLLBACK");
       return res.status(409).json({
         success: false,
         code: "FEATURED_ARTIST_NOT_ELIGIBLE",
@@ -104,14 +108,23 @@ router.post("/", async (req: any, res: any) => {
       });
     }
 
-    const result = await pool.query(
-      `INSERT INTO featured_artists (artist_id, name, avatar, is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, TRUE, now(), now())
-       ON CONFLICT (artist_id)
-       DO UPDATE SET is_active = TRUE, name = EXCLUDED.name, avatar = EXCLUDED.avatar, updated_at = now()
-       RETURNING id, artist_id, is_active, created_at, updated_at`,
+    let result = await client.query(
+      `UPDATE featured_artists
+          SET is_active = TRUE, name = $2, avatar = $3, updated_at = now()
+        WHERE artist_id = $1
+        RETURNING id, artist_id, is_active, created_at, updated_at`,
       [artistId, artist.name, artist.profile_image_url]
     );
+    if (!result.rowCount) {
+      result = await client.query(
+        `INSERT INTO featured_artists (artist_id, name, avatar, is_active, created_at, updated_at)
+         VALUES ($1, $2, $3, TRUE, now(), now())
+         RETURNING id, artist_id, is_active, created_at, updated_at`,
+        [artistId, artist.name, artist.profile_image_url]
+      );
+    }
+
+    await client.query("COMMIT");
     const row = result.rows[0];
     await invalidateFeatured();
     audit(req, "featured_artist.enabled", String(row.id), { artist_id: artistId });
@@ -129,10 +142,13 @@ router.post("/", async (req: any, res: any) => {
       correlationId,
     });
   } catch (error: any) {
+    await client.query("ROLLBACK").catch(() => undefined);
     if (error?.code === "23505") {
       return res.status(409).json({ success: false, message: "Artist is already featured", correlationId });
     }
     return res.status(500).json({ success: false, message: "Failed to feature artist", correlationId });
+  } finally {
+    client.release();
   }
 });
 
