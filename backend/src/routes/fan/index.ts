@@ -10,6 +10,7 @@ import streamRoutes from "../../modules/streaming/stream.routes";
 import subRoutes from "../../modules/subscription/sub.routes";
 import analyticsRoutes from "../../modules/analytics/analytics.routes";
 import libraryRoutes from "../../modules/library/library.routes";
+import playbackProgressRoutes from "../../modules/library/playback-progress.routes";
 
 const router = Router();
 const requireFan = requireRoles("FAN");
@@ -23,6 +24,7 @@ router.use("/user", requireAuth, requireFan, userRoutes);
 router.use("/subscriptions", requireAuth, requireFan, subRoutes);
 router.use("/subs", requireAuth, requireFan, subRoutes);
 router.use("/library", requireAuth, requireFan, libraryRoutes);
+router.use("/playback-progress", requireAuth, requireFan, playbackProgressRoutes);
 
 router.use("/artists", artistRoutes);
 router.use("/content", contentRoutes);
