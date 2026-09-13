@@ -7,6 +7,7 @@ import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import "./styles.css";
 import { applyTheme, DEFAULT_THEME_ID } from "./services/themeConfig";
+import { sanitizeSentryEvent } from "./services/sentrySanitizer";
 import { artistRuntimeConfig } from "./config/runtime";
 
 const savedTheme = localStorage.getItem("global-theme") || DEFAULT_THEME_ID;
@@ -18,6 +19,9 @@ if (artistRuntimeConfig.sentryDsn) {
     release: artistRuntimeConfig.sentryRelease ?? undefined,
     integrations: [Sentry.browserTracingIntegration()],
     tracesSampleRate: artistRuntimeConfig.production ? 0.1 : 1.0,
+    beforeSend(event) {
+      return sanitizeSentryEvent(event);
+    },
   });
 }
 
