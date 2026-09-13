@@ -16,6 +16,7 @@ import {
   X,
   FileSignature,
   RotateCcw,
+  UploadCloud,
 } from "lucide-react";
 import { useSidebar } from "./AdminLayout";
 import { http } from "../services/http";
@@ -51,16 +52,21 @@ export default function AdminNavbar() {
   const role = getPrivilegedRole();
 
   const navItems: NavItem[] = useMemo(() => {
+    const moderationItem: NavItem = {
+      label: "Content Moderation",
+      to: "/admin/moderation",
+      icon: <Shield size={20} />,
+    };
     const refundItem: NavItem = {
       label: "Refund Management",
       to: "/admin/refunds",
       icon: <RotateCcw size={20} />,
     };
 
-    // UX restriction only. The API enforces ADMIN/FINANCE authorization.
     if (role === "FINANCE") return [refundItem];
+    if (role === "MODERATOR") return [moderationItem];
 
-    const items: NavItem[] = [
+    return [
       {
         label: "Dashboard",
         to: "/admin/home",
@@ -84,10 +90,11 @@ export default function AdminNavbar() {
         icon: <Star size={20} />,
       },
       {
-        label: "Content Moderation",
-        to: "/admin/moderation",
-        icon: <Shield size={20} />,
+        label: "Upload Content",
+        to: "/admin/media-upload",
+        icon: <UploadCloud size={20} />,
       },
+      moderationItem,
       {
         label: "Agreement Settings",
         to: "/admin/agreement-settings",
@@ -99,6 +106,7 @@ export default function AdminNavbar() {
         to: "/admin/subscription-settings",
         icon: <CreditCard size={20} />,
       },
+      refundItem,
       {
         label: "Analytics",
         to: "/admin/analytics",
@@ -110,10 +118,10 @@ export default function AdminNavbar() {
         icon: <FileText size={20} />,
       },
     ];
-
-    if (role === "ADMIN") items.splice(7, 0, refundItem);
-    return items;
   }, [role]);
+
+  const portalLabel =
+    role === "FINANCE" ? "Finance Portal" : role === "MODERATOR" ? "Moderation Portal" : "Admin Panel";
 
   const onLogout = async () => {
     try {
@@ -156,9 +164,7 @@ export default function AdminNavbar() {
         <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
             <BrandLogo />
-            <span className="text-sm font-medium text-white/80">
-              {role === "FINANCE" ? "Finance Portal" : "Admin Panel"}
-            </span>
+            <span className="text-sm font-medium text-white/80">{portalLabel}</span>
           </div>
           <button
             type="button"
@@ -182,9 +188,7 @@ export default function AdminNavbar() {
             <div className="flex items-center justify-between p-4 border-b border-white/10">
               <div className="flex items-center gap-3">
                 <BrandLogo />
-                <span className="text-sm font-semibold text-white">
-                  {role === "FINANCE" ? "Finance Portal" : "Admin Panel"}
-                </span>
+                <span className="text-sm font-semibold text-white">{portalLabel}</span>
               </div>
               <button
                 type="button"
@@ -225,11 +229,7 @@ export default function AdminNavbar() {
             }`}
           >
             <BrandLogo />
-            {!isCollapsed && (
-              <span className="text-sm font-semibold text-white">
-                {role === "FINANCE" ? "Finance Portal" : "Admin Panel"}
-              </span>
-            )}
+            {!isCollapsed && <span className="text-sm font-semibold text-white">{portalLabel}</span>}
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 space-y-1">{navigation(false)}</div>
