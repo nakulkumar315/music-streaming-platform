@@ -2,6 +2,7 @@ import { Suspense, lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import ArtistShell from "./components/ArtistShell";
 import Skeleton from "./components/Skeleton";
+import { getArtistToken } from "./services/artistSession";
 
 const ArtistLandingPage = lazy(() => import("./pages/ArtistLandingPage"));
 const ArtistLoginPage = lazy(() => import("./pages/ArtistLoginPage"));
@@ -23,13 +24,21 @@ const PageFallback = () => (
   </div>
 );
 
+function ArtistLoginRoute() {
+  return getArtistToken() ? (
+    <Navigate to="/artist/dashboard" replace />
+  ) : (
+    <ArtistLoginPage />
+  );
+}
+
 export default function App() {
   return (
     <Suspense fallback={<PageFallback />}>
       <Routes>
         <Route path="/" element={<Navigate to="/artist/landing" replace />} />
         <Route path="/artist/landing" element={<ArtistLandingPage />} />
-        <Route path="/artist/login" element={<ArtistLoginPage />} />
+        <Route path="/artist/login" element={<ArtistLoginRoute />} />
         <Route path="/artist/signup" element={<ArtistSignupPage />} />
         <Route path="/artist/account-inactive" element={<ArtistAccountInactivePage />} />
         <Route path="/artist/under-review" element={<ArtistUnderReviewPage />} />
