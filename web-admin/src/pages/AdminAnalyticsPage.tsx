@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CartesianGrid,
@@ -87,7 +87,7 @@ export default function AdminAnalyticsPage() {
   const [summary, setSummary] = useState<GlobalSummary | null>(null);
   const [revenue, setRevenue] = useState<SeriesPoint[]>([]);
   const [topArtists, setTopArtists] = useState<TopArtist[]>([]);
-  const [metrics, setMetrics] = useState<MetricsResponse["metrics"]>(null);
+  const [metrics, setMetrics] = useState<MetricsResponse["metrics"] | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -261,7 +261,7 @@ export default function AdminAnalyticsPage() {
                   border: "1px solid rgba(255,255,255,0.1)",
                   borderRadius: 12,
                 }}
-                formatter={(value: number) => formatCurrency(value)}
+                formatter={(value: any) => formatCurrency(Number(value))}
               />
               <Line type="monotone" dataKey="revenue" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
             </LineChart>
@@ -321,7 +321,7 @@ function MetricCard({
   label: string;
   value: string;
   detail: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-surface p-5">
