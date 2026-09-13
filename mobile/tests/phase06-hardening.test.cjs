@@ -140,14 +140,50 @@ test('durable auth credentials use SecureStore with verified legacy migration', 
   assert.doesNotMatch(authStore, /AsyncStorage\.(?:getItem|setItem)\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
 });
 
-test('iOS native lock includes SecureStore and Metro is Sentry-aware', () => {
-  const podLock = read('ios/Podfile.lock');
-  assert.match(podLock, /ExpoSecureStore/);
+test('secure storage and native release configuration are declared without stale push capability', () => {
+  const app = JSON.parse(read('app.json'));
+  assert.ok(app.expo.plugins.includes('expo-secure-store'));
+  assert.equal(app.expo.plugins.includes('expo-notifications'), false);
+  assert.deepEqual(app.expo.ios.infoPlist.UIBackgroundModes, ['audio']);
+
+  const entitlements = read('ios/FanApp/FanApp.entitlements');
+  assert.doesNotMatch(entitlements, /aps-environment/);
 
   assert.equal(exists('metro.config.js'), true);
   const metro = read('metro.config.js');
   assert.match(metro, /getSentryExpoConfig/);
   assert.match(metro, /@sentry\/react-native\/metro/);
+});
+
+test('native permissions and remote controls fail closed to implemented capabilities', () => {
+  const manifest = read('android/app/src/main/AndroidManifest.xml');
+  for (const permission of [
+    'RECORD_AUDIO',
+    'SYSTEM_ALERT_WINDOW',
+    'READ_EXTERNAL_STORAGE',
+    'WRITE_EXTERNAL_STORAGE',
+  ]) {
+    assert.doesNotMatch(manifest, new RegExp(permission));
+  }
+
+  const infoPlist = read('ios/FanApp/Info.plist');
+  assert.doesNotMatch(infoPlist, /NSMicrophoneUsageDescription/);
+  assert.doesNotMatch(infoPlist, /NSCameraUsageDescription/);
+  assert.match(infoPlist, /NSPhotoLibraryUsageDescription/);
+  assert.match(infoPlist, /<string>audio<\/string>/);
+  assert.doesNotMatch(infoPlist, /<string>fetch<\/string>/);
+
+  const gradle = read('android/app/build.gradle');
+  const releaseBlock = gradle.match(/release\s*\{([\s\S]*?)\n\s*\}\n\s*\}/)?.[1] ?? '';
+  assert.ok(releaseBlock, 'release build block should exist');
+  assert.doesNotMatch(releaseBlock, /signingConfig\s+signingConfigs\.debug/);
+
+  const service = read('apps/fan/src/services/playbackService.ts');
+  assert.match(service, /TrackPlayer\.updateOptions/);
+  assert.doesNotMatch(service, /Capability\.SkipToNext/);
+  assert.doesNotMatch(service, /Capability\.SkipToPrevious/);
+  assert.doesNotMatch(service, /Event\.RemoteNext/);
+  assert.doesNotMatch(service, /Event\.RemotePrevious/);
 });
 
 test('mobile tests are executable rather than a typecheck alias', () => {
