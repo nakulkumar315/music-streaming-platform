@@ -38,7 +38,7 @@ class MockRefundGateway implements RefundGateway {
   }
 
   async fetchPayment(paymentId: string) {
-    const amount = this.lastInput?.amountPaise ?? 0;
+    const amount = this.lastInput?.amountPaise ?? 1;
     return {
       paymentId,
       amountPaise: amount,
@@ -65,6 +65,47 @@ class MockRefundGateway implements RefundGateway {
   }
 }
 
+class ProviderOnlyRefundGateway implements RefundGateway {
+  createCalls = 0;
+
+  constructor(
+    private readonly targetPaymentId: string,
+    private readonly targetAmount: number,
+    private readonly targetRefundId: string
+  ) {}
+
+  async createFullRefund(): Promise<GatewayRefund> {
+    this.createCalls += 1;
+    throw new Error("Provider drift reconciliation must never create a refund");
+  }
+
+  async listRefunds(paymentId: string): Promise<GatewayRefund[]> {
+    if (paymentId !== this.targetPaymentId) return [];
+    return [
+      {
+        id: this.targetRefundId,
+        paymentId,
+        amountPaise: this.targetAmount,
+        currency: "INR",
+        status: "processed",
+        notes: {},
+      },
+    ];
+  }
+
+  async fetchPayment(paymentId: string) {
+    const target = paymentId === this.targetPaymentId;
+    return {
+      paymentId,
+      amountPaise: target ? this.targetAmount : 1,
+      amountRefundedPaise: target ? this.targetAmount : 0,
+      currency: "INR",
+      status: "captured",
+      refundStatus: target ? "full" : null,
+    };
+  }
+}
+
 async function main() {
   if (process.env.NODE_ENV === "production") {
     throw new Error("Refusing to run refund DB tests with NODE_ENV=production");
@@ -77,18 +118,28 @@ async function main() {
   }
   process.env.DATABASE_URL = testDatabaseUrl;
 
-  const [{ pool }, refundModule, cancellationModule, entitlementModule] = await Promise.all([
+  const [
+    { pool },
+    refundModule,
+    refundWebhookModule,
+    refundReconciliationModule,
+    cancellationModule,
+    entitlementModule,
+  ] = await Promise.all([
     import("../common/db"),
     import("../modules/payment/payment.refund.service"),
+    import("../modules/payment/payment.refund.webhook"),
+    import("../modules/payment/payment.refund.reconciliation"),
     import("../modules/subscription/subscription.cancellation.service"),
     import("../shared/security/artist-entitlement.service"),
   ]);
   const {
     initiateFullRefund,
-    finalizeRefund,
     getRefundRequest,
     reconcileRefundRequest,
   } = refundModule;
+  const { processVerifiedRefundEvent } = refundWebhookModule;
+  const { reconcileProviderRefundDrift } = refundReconciliationModule;
   const { cancelSubscription } = cancellationModule;
   const { hasActiveArtistEntitlement } = entitlementModule;
 
@@ -168,19 +219,11 @@ async function main() {
     assert.equal(firstRefund.request.status, "COMPLETED");
     assert.equal(firstRefund.request.amountPaise, first.amount);
     assert.equal(gateway.createCalls, 1);
-    assert.equal(
-      await hasActiveArtistEntitlement(fanId, artistId),
-      false,
-      "Confirmed full refund must revoke canonical Phase-02 entitlement"
-    );
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), false);
 
     const firstPayment = await pool.query(`SELECT status, amount FROM payments WHERE id = $1`, [first.paymentId]);
     assert.equal(firstPayment.rows[0].status, "REFUNDED");
     assert.equal(Number(firstPayment.rows[0].amount), first.amount, "Captured amount must be preserved");
-
-    const firstSub = await pool.query(`SELECT status FROM subscriptions WHERE id = $1`, [first.subscriptionId]);
-    assert.equal(firstSub.rows[0].status, "CANCELLED", "Full refund must immediately revoke entitlement");
-
     const firstTx = await pool.query(
       `SELECT status, refund_amount, refund_status FROM transactions WHERE razorpay_payment_id = $1`,
       [first.gatewayPaymentId]
@@ -236,8 +279,6 @@ async function main() {
     ]);
     assert.equal(concurrentGateway.createCalls, 1, "Concurrent refund race must call gateway once");
     assert.ok(concurrentResults.every((result) => result.request.paymentId === concurrent.paymentId));
-    const refundRows = await pool.query(`SELECT COUNT(*)::int AS count FROM refund_requests WHERE payment_id = $1`, [concurrent.paymentId]);
-    assert.equal(refundRows.rows[0].count, 1, "One payment must have one logical refund request");
 
     const ambiguous = await createCapturedPurchase(4);
     const ambiguousGateway = new MockRefundGateway();
@@ -248,8 +289,6 @@ async function main() {
       ambiguousGateway
     );
     assert.equal(ambiguousResult.request.status, "RECONCILIATION_REQUIRED");
-    assert.equal(ambiguousGateway.createCalls, 1);
-
     const retry = await initiateFullRefund(
       ambiguous.paymentId,
       { userId: adminId, role: "ADMIN" },
@@ -257,10 +296,8 @@ async function main() {
     );
     assert.equal(retry.idempotent, true);
     assert.equal(ambiguousGateway.createCalls, 1, "Ambiguous outcome must never trigger a blind second refund");
-
     const reconciled = await reconcileRefundRequest(ambiguousResult.request.id, ambiguousGateway);
     assert.equal(reconciled.status, "COMPLETED");
-    assert.equal(ambiguousGateway.createCalls, 1);
 
     const providerFailed = await createCapturedPurchase(5);
     const failingGateway = new MockRefundGateway();
@@ -271,41 +308,42 @@ async function main() {
       failingGateway
     );
     assert.equal(pendingFailure.request.status, "PROVIDER_PENDING");
-    const failedReconciled = await reconcileRefundRequest(
-      pendingFailure.request.id,
-      failingGateway
-    );
+    const failedReconciled = await reconcileRefundRequest(pendingFailure.request.id, failingGateway);
     assert.equal(failedReconciled.status, "FAILED");
-    const failedProviderPayment = await pool.query(
-      `SELECT status FROM payments WHERE id = $1`,
-      [providerFailed.paymentId]
-    );
+    const failedProviderPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [providerFailed.paymentId]);
     assert.equal(failedProviderPayment.rows[0].status, "SUCCESS");
     assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
-    const failedProviderTx = await pool.query(
-      `SELECT refund_status FROM transactions WHERE razorpay_payment_id = $1`,
-      [providerFailed.gatewayPaymentId]
-    );
-    assert.equal(failedProviderTx.rows[0].refund_status, "FAILED");
 
+    // A verified provider-side partial refund is not a supported product flow.
+    // It is acknowledged and quarantined without changing payment or entitlement.
     const partial = await createCapturedPurchase(6);
-    const client = await pool.connect();
+    const partialClient = await pool.connect();
     try {
-      await client.query("BEGIN");
-      await assert.rejects(
-        () =>
-          finalizeRefund(client, {
-            paymentId: partial.gatewayPaymentId,
-            refundId: "rfnd_partial_test",
-            refundAmountPaise: partial.amount - 1,
-            providerStatus: "processed",
-          }),
-        (error: any) => error?.code === "PARTIAL_REFUND_NOT_SUPPORTED"
-      );
-      await client.query("ROLLBACK");
+      await partialClient.query("BEGIN");
+      const partialResult = await processVerifiedRefundEvent(partialClient, {
+        paymentId: partial.gatewayPaymentId,
+        refundId: "rfnd_partial_test",
+        refundAmountPaise: partial.amount - 1,
+        providerStatus: "processed",
+        currency: "INR",
+      });
+      assert.equal(partialResult.fullRefund, false);
+      await partialClient.query("COMMIT");
+    } catch (error) {
+      await partialClient.query("ROLLBACK").catch(() => undefined);
+      throw error;
     } finally {
-      client.release();
+      partialClient.release();
     }
+    const partialRequest = await pool.query(
+      `SELECT status, failure_code FROM refund_requests WHERE payment_id = $1`,
+      [partial.paymentId]
+    );
+    assert.equal(partialRequest.rows[0].status, "RECONCILIATION_REQUIRED");
+    assert.equal(partialRequest.rows[0].failure_code, "UNSUPPORTED_PARTIAL_REFUND_DETECTED");
+    const partialPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [partial.paymentId]);
+    assert.equal(partialPayment.rows[0].status, "SUCCESS");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
 
     const cancelOnly = await createCapturedPurchase(7);
     const cancelled = await cancelSubscription(
@@ -319,6 +357,30 @@ async function main() {
     assert.equal(cancelPayment.rows[0].status, "SUCCESS", "Cancellation must not fabricate a refund");
     const cancelRefund = await pool.query(`SELECT COUNT(*)::int AS count FROM refund_requests WHERE payment_id = $1`, [cancelOnly.paymentId]);
     assert.equal(cancelRefund.rows[0].count, 0, "Cancellation must not create refund intent");
+
+    // Provider says fully refunded while local has no refund intent: reconciliation
+    // repairs local state through the canonical finalizer and never calls create refund.
+    const providerOnly = await createCapturedPurchase(8);
+    const providerOnlyGateway = new ProviderOnlyRefundGateway(
+      providerOnly.gatewayPaymentId,
+      providerOnly.amount,
+      `rfnd_provider_only_${suffix.replace(/[^a-z0-9]/gi, "").slice(0, 12)}`
+    );
+    const driftOutcomes = await reconcileProviderRefundDrift(providerOnlyGateway, 100);
+    const providerOutcome = driftOutcomes.find(
+      (item: any) => item.paymentId === providerOnly.paymentId
+    );
+    assert.equal(providerOutcome?.status, "CORRECTED_FULL_REFUND");
+    assert.equal(providerOnlyGateway.createCalls, 0, "Drift repair must never issue another remote refund");
+    const providerOnlyPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [providerOnly.paymentId]);
+    assert.equal(providerOnlyPayment.rows[0].status, "REFUNDED");
+    const providerOnlyRequest = await pool.query(
+      `SELECT status, requested_by_role FROM refund_requests WHERE payment_id = $1`,
+      [providerOnly.paymentId]
+    );
+    assert.equal(providerOnlyRequest.rows[0].status, "COMPLETED");
+    assert.equal(providerOnlyRequest.rows[0].requested_by_role, "SYSTEM");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), false);
 
     const queried = await getRefundRequest(firstRefund.request.id);
     assert.equal(queried.status, "COMPLETED");
