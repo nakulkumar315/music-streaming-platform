@@ -25,13 +25,31 @@ test('release networking fails closed on Android and iOS', () => {
   assert.match(androidManifest, /android:usesCleartextTraffic="false"/);
 });
 
-test('playback remains server-authoritative and validates issued URLs', () => {
+test('playback remains server-authoritative and handles typed denial codes', () => {
   const stream = read('apps/fan/src/services/streamService.ts');
   assert.match(stream, /apiV1\.post<StreamAccessResponse>\('\/stream\/access'/);
   assert.match(stream, /data\?\.playbackUrl/);
   assert.match(stream, /validatePlaybackUrl\(normalized, kind\)/);
-  assert.doesNotMatch(stream, /fallback.*(?:media|stream|url)/i);
+  assert.doesNotMatch(stream, /allowPreview/);
   assert.doesNotMatch(stream, /AsyncStorage/);
+
+  for (const code of [
+    'SUBSCRIPTION_REQUIRED',
+    'SUBSCRIPTION_EXPIRED',
+    'SUBSCRIPTION_INACTIVE',
+    'CONTENT_TAKEN_DOWN',
+    'PLAYBACK_SESSION_LIMIT',
+    'PLAYBACK_ACCESS_EXPIRED',
+    'INVALID_PLAYBACK_TOKEN',
+  ]) {
+    assert.match(stream, new RegExp(code));
+  }
+
+  const provider = read('apps/fan/src/providers/MediaPlayerProvider.tsx');
+  assert.match(provider, /getPlaybackErrorPresentation/);
+  assert.match(provider, /presentation\.shouldStopPlayback/);
+  assert.match(provider, /Alert\.alert\(presentation\.title, presentation\.message\)/);
+  assert.doesNotMatch(provider, /Could not get playback URL\. Try again\./);
 });
 
 test('production guest experience has no committed mock catalog or diagnostics screen', () => {
