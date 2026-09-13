@@ -87,6 +87,8 @@ function testSourceContracts() {
   const streamRoutes = readBackend("modules/streaming/stream.routes.ts");
   const analyticsRoutes = readBackend("modules/analytics/analytics.routes.ts");
   const audit = readBackend("shared/audit/audit.service.ts");
+  const artistApproval = readBackend("modules/artist/artist-approval.service.ts");
+  const artistApprovalRoutes = readBackend("routes/admin/artist-approvals.ts");
   const jobs = readBackend("runtime/operational-job-claim.ts");
   const schedulers = readBackend("runtime/subscription-schedulers.ts");
   const schema = readBackend("common/db/schema-readiness.ts");
@@ -97,6 +99,7 @@ function testSourceContracts() {
     "mobile/apps/fan/src/services/heartbeatService.ts"
   );
   const adminAnalytics = readBackend("controllers/adminAnalyticsController.ts");
+  const adminAnalyticsRoutes = readBackend("routes/admin/analytics.ts");
 
   assert.match(sessions, /FOR UPDATE/);
   assert.match(sessions, /last_heartbeat_sequence/);
@@ -123,6 +126,10 @@ function testSourceContracts() {
   assert.match(audit, /static async logCritical/);
   assert.match(audit, /SENSITIVE_KEY/);
   assert.match(audit, /\[REDACTED\]/);
+  assert.match(artistApproval, /AuditService\.logCritical\([\s\S]*?client\s*\)/);
+  assert.match(artistApproval, /await client\.query\("COMMIT"\)/);
+  assert.doesNotMatch(artistApprovalRoutes, /AuditService\.log\(/);
+  assert.doesNotMatch(artistApprovalRoutes, /const safeQuery/);
 
   assert.match(jobs, /run_token/);
   assert.match(jobs, /ON CONFLICT \(job_name, window_key\)/);
@@ -140,6 +147,9 @@ function testSourceContracts() {
   assert.doesNotMatch(adminAnalytics, /Math\.max\(paymentsRevenue, transactionsRevenue\)/);
   assert.doesNotMatch(adminAnalytics, /ANALYTICS-DEBUG|_debug/);
   assert.match(adminAnalytics, /FROM payments/);
+  assert.doesNotMatch(adminAnalyticsRoutes, /Math\.max\(|transactionsRevenue|transactionRows/);
+  assert.doesNotMatch(adminAnalyticsRoutes, /_debug/);
+  assert.match(adminAnalyticsRoutes, /FROM payments/);
 }
 
 function run() {
