@@ -7,31 +7,28 @@ import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import "./styles.css";
 import { applyTheme, DEFAULT_THEME_ID } from "./services/themeConfig";
+import { artistRuntimeConfig } from "./config/runtime";
 
-// Initialize theme
 const savedTheme = localStorage.getItem("global-theme") || DEFAULT_THEME_ID;
 applyTheme(savedTheme);
 
-
-Sentry.init({
-  dsn: import.meta.env.VITE_SENTRY_DSN,
-  integrations: [
-    Sentry.browserTracingIntegration(),
-    Sentry.replayIntegration(),
-  ],
-  tracesSampleRate: 1.0,
-  replaysSessionSampleRate: 0.1,
-  replaysOnErrorSampleRate: 1.0,
-});
+if (artistRuntimeConfig.sentryDsn) {
+  Sentry.init({
+    dsn: artistRuntimeConfig.sentryDsn,
+    release: artistRuntimeConfig.sentryRelease ?? undefined,
+    integrations: [Sentry.browserTracingIntegration()],
+    tracesSampleRate: artistRuntimeConfig.production ? 0.1 : 1.0,
+  });
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 5 * 60 * 1000,
       refetchOnWindowFocus: false,
-      retry: 1
-    }
-  }
+      retry: 1,
+    },
+  },
 });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

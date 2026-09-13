@@ -28,23 +28,15 @@ router.post("/login", authLimiter, async (req, res) => {
     );
 
     if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Email and password required",
-      });
+      return res.status(400).json({ success: false, message: "Email and password required" });
     }
 
     const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      throw new Error("JWT_SECRET is not configured");
-    }
+    if (!secret) throw new Error("JWT_SECRET is not configured");
 
     client = await pool.connect();
     await client.query("BEGIN");
 
-    // Use the same user-row -> session-advisory lock order as consumer login
-    // and password rotation. A privileged login that started with an old
-    // password cannot create a session after a password change has committed.
     const userResult = await client.query(
       `SELECT id, email, password, role, status, is_deleted
          FROM users
@@ -56,32 +48,18 @@ router.post("/login", authLimiter, async (req, res) => {
 
     if (!user || !(await bcrypt.compare(password, user.password))) {
       await client.query("ROLLBACK");
-      return res.status(401).json({
-        success: false,
-        code: "INVALID_CREDENTIALS",
-        message: "Invalid email or password",
-      });
+      return res.status(401).json({ success: false, code: "INVALID_CREDENTIALS", message: "Invalid email or password" });
     }
 
     const role = String(user.role || "").toUpperCase();
     if (!PRIVILEGED_ROLES.has(role)) {
       await client.query("ROLLBACK");
-      // Do not reveal that valid consumer credentials were supplied to the
-      // wrong portal; public login failures remain indistinguishable.
-      return res.status(401).json({
-        success: false,
-        code: "INVALID_CREDENTIALS",
-        message: "Invalid email or password",
-      });
+      return res.status(401).json({ success: false, code: "INVALID_CREDENTIALS", message: "Invalid email or password" });
     }
 
     if (user.is_deleted === true || String(user.status || "").toUpperCase() !== "ACTIVE") {
       await client.query("ROLLBACK");
-      return res.status(403).json({
-        success: false,
-        code: "ACCOUNT_INACTIVE",
-        message: "Account is not available",
-      });
+      return res.status(403).json({ success: false, code: "ACCOUNT_INACTIVE", message: "Account is not available" });
     }
 
     const session = await SessionService.createSessionInTransaction(client, {
@@ -109,30 +87,35 @@ router.post("/login", authLimiter, async (req, res) => {
       correlationId: (req as any)?.correlationId || "-",
     });
 
-    return res.json({
-      success: true,
-      token,
-      user: { id: Number(user.id), email: user.email, role },
-    });
+    return res.json({ success: true, token, user: { id: Number(user.id), email: user.email, role } });
   } catch (error: any) {
     if (client) await client.query("ROLLBACK").catch(() => undefined);
 
     if (error?.code === "DEVICE_ID_REQUIRED" || error?.code === "INVALID_DEVICE_ID") {
-      return res.status(400).json({
-        success: false,
-        code: error.code,
-        message: "Unable to identify this browser session",
-      });
+      return res.status(400).json({ success: false, code: error.code, message: "Unable to identify this browser session" });
     }
 
     console.error("[ADMIN LOGIN] authentication failed");
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-    });
+    return res.status(500).json({ success: false, message: "Server error" });
   } finally {
     client?.release();
   }
+});
+
+router.get("/session", requireAuth, (req: any, res) => {
+  const role = String(req.user?.role || "").toUpperCase();
+  if (!PRIVILEGED_ROLES.has(role)) {
+    return res.status(403).json({ success: false, code: "FORBIDDEN", message: "Access forbidden" });
+  }
+  return res.json({
+    success: true,
+    user: {
+      id: Number(req.user.id),
+      email: String(req.user.email),
+      role,
+      status: String(req.user.status || "ACTIVE").toUpperCase(),
+    },
+  });
 });
 
 router.post("/logout", requireAuth, async (req: any, res) => {
@@ -141,11 +124,7 @@ router.post("/logout", requireAuth, async (req: any, res) => {
   const role = String(req.user?.role || "").toUpperCase();
 
   if (!userId || !sessionId || !PRIVILEGED_ROLES.has(role)) {
-    return res.status(403).json({
-      success: false,
-      code: "FORBIDDEN",
-      message: "Access forbidden",
-    });
+    return res.status(403).json({ success: false, code: "FORBIDDEN", message: "Access forbidden" });
   }
 
   await SessionService.revokeSession(userId, sessionId);

@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import AdminLayout from "./components/AdminLayout";
+import AdminSessionGate from "./components/AdminSessionGate";
 import Skeleton from "./components/Skeleton";
 import { getPrivilegedRole, type PrivilegedRole } from "./services/adminSession";
 
@@ -66,37 +67,39 @@ export default function App() {
         <Route path="/" element={<Navigate to="/admin/login" replace />} />
         <Route path="/admin/login" element={<AdminLoginPage />} />
 
-        <Route element={<AdminLayout />}>
-          <Route path="/admin/home" element={<PrivilegedHome />} />
-          <Route
-            path="/admin/refunds"
-            element={
-              <RequirePortalRole allowed={["ADMIN", "FINANCE"]}>
-                <AdminRefundsPage />
-              </RequirePortalRole>
-            }
-          />
-          <Route path="/admin/analytics" element={adminOnly(<AdminAnalyticsPage />)} />
-          <Route path="/admin/artists" element={adminOnly(<AdminArtistsPage />)} />
-          <Route path="/admin/artist-applications" element={adminOnly(<AdminArtistApplicationsPage />)} />
-          <Route path="/admin/artists/:id" element={adminOnly(<AdminArtistDetailPage />)} />
-          <Route path="/admin/media-upload" element={adminOnly(<AdminMediaUploadPage />)} />
-          <Route
-            path="/admin/moderation"
-            element={
-              <RequirePortalRole allowed={["ADMIN", "MODERATOR"]}>
-                <AdminContentApprovalQueuePage />
-              </RequirePortalRole>
-            }
-          />
-          <Route path="/admin/featured-artists" element={adminOnly(<AdminFeaturedArtistsPage />)} />
-          <Route path="/admin/agreement-settings" element={adminOnly(<AdminAgreementSettingsPage />)}>
-            <Route path="commission-plans" element={<AdminCommissionPlansPage />} />
-            <Route path="terms" element={<AdminTermsManagementPage />} />
-            <Route path="signed-agreements" element={<AdminSignedAgreementsPage />} />
+        <Route element={<AdminSessionGate />}>
+          <Route element={<AdminLayout />}>
+            <Route path="/admin/home" element={<PrivilegedHome />} />
+            <Route
+              path="/admin/refunds"
+              element={
+                <RequirePortalRole allowed={["ADMIN", "FINANCE"]}>
+                  <AdminRefundsPage />
+                </RequirePortalRole>
+              }
+            />
+            <Route path="/admin/analytics" element={adminOnly(<AdminAnalyticsPage />)} />
+            <Route path="/admin/artists" element={adminOnly(<AdminArtistsPage />)} />
+            <Route path="/admin/artist-applications" element={adminOnly(<AdminArtistApplicationsPage />)} />
+            <Route path="/admin/artists/:id" element={adminOnly(<AdminArtistDetailPage />)} />
+            <Route path="/admin/media-upload" element={adminOnly(<AdminMediaUploadPage />)} />
+            <Route
+              path="/admin/moderation"
+              element={
+                <RequirePortalRole allowed={["ADMIN", "MODERATOR"]}>
+                  <AdminContentApprovalQueuePage />
+                </RequirePortalRole>
+              }
+            />
+            <Route path="/admin/featured-artists" element={adminOnly(<AdminFeaturedArtistsPage />)} />
+            <Route path="/admin/agreement-settings" element={adminOnly(<AdminAgreementSettingsPage />)}>
+              <Route path="commission-plans" element={<AdminCommissionPlansPage />} />
+              <Route path="terms" element={<AdminTermsManagementPage />} />
+              <Route path="signed-agreements" element={<AdminSignedAgreementsPage />} />
+            </Route>
+            <Route path="/admin/subscription-settings" element={adminOnly(<AdminSubscriptionSettingsPage />)} />
+            <Route path="/admin/audit" element={adminOnly(<AdminAuditPage />)} />
           </Route>
-          <Route path="/admin/subscription-settings" element={adminOnly(<AdminSubscriptionSettingsPage />)} />
-          <Route path="/admin/audit" element={adminOnly(<AdminAuditPage />)} />
         </Route>
 
         <Route path="*" element={<Navigate to="/admin/login" replace />} />
