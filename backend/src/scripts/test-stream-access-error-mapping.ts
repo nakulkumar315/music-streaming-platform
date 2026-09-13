@@ -21,6 +21,12 @@ function testTakedownMapsTo410() {
 }
 
 function testTypedEntitlementDenialsArePreserved() {
+  const auth = mapStreamAccessError(
+    new MediaAccessDeniedException("Authentication required", "AUTHENTICATION_REQUIRED")
+  );
+  assert.equal(auth.status, 401);
+  assert.equal(auth.code, "AUTHENTICATION_REQUIRED");
+
   const required = mapStreamAccessError(
     new MediaAccessDeniedException("Subscription required", "SUBSCRIPTION_REQUIRED")
   );
@@ -36,7 +42,7 @@ function testTypedEntitlementDenialsArePreserved() {
   const limit = mapStreamAccessError(
     new MediaAccessDeniedException("Too many streams", "PLAYBACK_SESSION_LIMIT")
   );
-  assert.equal(limit.status, 403);
+  assert.equal(limit.status, 429);
   assert.equal(limit.code, "PLAYBACK_SESSION_LIMIT");
 }
 
