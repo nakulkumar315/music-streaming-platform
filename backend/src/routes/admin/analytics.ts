@@ -292,11 +292,11 @@ router.get(
             GROUP BY artist_id
          ) subs ON subs.artist_id = u.id
          LEFT JOIN (
-           SELECT c.artist_id, COUNT(p.id)::int AS total_plays
+           SELECT c.artist_id, COUNT(e.id)::int AS total_plays
              FROM content_items c
-             LEFT JOIN content_plays p
-               ON p.content_id = c.id
-              AND p.playback_session_id IS NOT NULL
+             LEFT JOIN analytics_events e
+               ON e.content_id = c.id
+              AND e.event_type = 'PLAY_STARTED'
             GROUP BY c.artist_id
          ) plays ON plays.artist_id = u.id
         WHERE UPPER(u.role) = 'ARTIST'
