@@ -10,6 +10,7 @@ const exists = (relativePath) => fs.existsSync(path.join(ROOT, relativePath));
 test('release networking fails closed on Android and iOS', () => {
   const app = JSON.parse(read('app.json'));
   assert.equal(app.expo.android.usesCleartextTraffic, false);
+  assert.equal(app.expo.android.allowBackup, false);
   assert.equal(
     app.expo.ios.infoPlist.NSAppTransportSecurity.NSAllowsArbitraryLoads,
     false
@@ -18,6 +19,10 @@ test('release networking fails closed on Android and iOS', () => {
   const env = read('apps/fan/src/config/env.ts');
   assert.match(env, /must use https:\/\/ outside local development/);
   assert.match(env, /APP_ENV === 'development' \|\| APP_ENV === 'test'/);
+
+  const androidManifest = read('android/app/src/main/AndroidManifest.xml');
+  assert.match(androidManifest, /android:allowBackup="false"/);
+  assert.match(androidManifest, /android:usesCleartextTraffic="false"/);
 });
 
 test('playback remains server-authoritative and validates issued URLs', () => {
@@ -61,8 +66,13 @@ test('durable auth credentials use SecureStore with verified legacy migration', 
   assert.match(storage, /SecureStore\.deleteItemAsync/);
   assert.match(storage, /verifiedCredential !== legacyCredential/);
   assert.match(storage, /clearLegacyCredentialCopies/);
+  assert.match(storage, /logoutPending === '1'/);
   assert.match(storage, /LOCAL_LOGOUT_TOMBSTONE_KEY/);
-  assert.match(storage, /return null;\n\s*}\n\s*return null;/);
+  assert.equal(
+    (storage.match(/removeItem\(LOCAL_LOGOUT_TOMBSTONE_KEY\)/g) || []).length,
+    1,
+    'logout intent must only be cleared by a fresh successful credential save'
+  );
 
   const api = read('apps/fan/src/services/api.ts');
   assert.match(api, /readAuthCredential/);
