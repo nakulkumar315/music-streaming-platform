@@ -81,25 +81,14 @@ function testHeartbeatPolicy() {
   assert.equal(late.reason, "TOO_LATE");
 }
 
-function testSourceContracts() {
+function testPlaybackAndAnalyticsContracts() {
   const sessions = readBackend("shared/security/playback-session.service.ts");
   const access = readBackend("modules/media/media-access.service.ts");
   const streamRoutes = readBackend("modules/streaming/stream.routes.ts");
   const analyticsRoutes = readBackend("modules/analytics/analytics.routes.ts");
-  const audit = readBackend("shared/audit/audit.service.ts");
-  const artistApproval = readBackend("modules/artist/artist-approval.service.ts");
-  const artistApprovalRoutes = readBackend("routes/admin/artist-approvals.ts");
-  const jobs = readBackend("runtime/operational-job-claim.ts");
-  const schedulers = readBackend("runtime/subscription-schedulers.ts");
-  const schema = readBackend("common/db/schema-readiness.ts");
-  const migration = readRepo(
-    "backend/db/migrations/20260913_0010_analytics_audit_operational_integrity.sql"
-  );
-  const mobileHeartbeat = readRepo(
-    "mobile/apps/fan/src/services/heartbeatService.ts"
-  );
-  const adminAnalytics = readBackend("controllers/adminAnalyticsController.ts");
-  const adminAnalyticsRoutes = readBackend("routes/admin/analytics.ts");
+  const artistAnalytics = readBackend("modules/artist/artist-analytics.routes.ts");
+  const app = readBackend("app.ts");
+  const mobileHeartbeat = readRepo("mobile/apps/fan/src/services/heartbeatService.ts");
 
   assert.match(sessions, /FOR UPDATE/);
   assert.match(sessions, /last_heartbeat_sequence/);
@@ -123,13 +112,73 @@ function testSourceContracts() {
   assert.match(analyticsRoutes, /CONTENT_VIEW_DEDUPE_WINDOW_MS/);
   assert.doesNotMatch(analyticsRoutes, /payments|transactions|earnings/i);
 
+  assert.match(artistAnalytics, /JOIN subscriptions s ON s\.id = p\.subscription_id/);
+  assert.match(artistAnalytics, /JOIN content_items c ON c\.id = p\.content_id/);
+  assert.match(artistAnalytics, /WHERE s\.artist_id = \$1/);
+  assert.match(artistAnalytics, /WHERE c\.artist_id = \$1/);
+  assert.doesNotMatch(artistAnalytics, /safeRows|safeScalar|\*\s*0\.9|\*\s*0\.1/);
+
+  const strictPricingMount = app.indexOf('app.use("/api/v1/artist", artistPricingRoutes)');
+  const strictAnalyticsMount = app.indexOf('app.use("/api/v1/artist", artistAnalyticsRoutes)');
+  const legacyArtistMount = app.indexOf('app.use("/api/v1/artist", artistRoutes)');
+  assert.ok(strictPricingMount >= 0 && strictPricingMount < legacyArtistMount);
+  assert.ok(strictAnalyticsMount >= 0 && strictAnalyticsMount < legacyArtistMount);
+}
+
+function testAuditDurabilityContracts() {
+  const audit = readBackend("shared/audit/audit.service.ts");
+  const artistApproval = readBackend("modules/artist/artist-approval.service.ts");
+  const artistApprovalRoutes = readBackend("routes/admin/artist-approvals.ts");
+  const artistPricing = readBackend("modules/artist/artist-pricing.routes.ts");
+  const adminGovernance = readBackend("modules/admin/admin-governance-config.routes.ts");
+  const adminArtistGovernance = readBackend("modules/admin/admin-artist-governance.routes.ts");
+  const adminAgreement = readBackend("modules/admin/admin-artist-agreement.routes.ts");
+  const adminIndex = readBackend("routes/admin/index.ts");
+  const accountState = readBackend("common/auth/account-state.service.ts");
+  const accountSecurity = readBackend("routes/admin/account-security.ts");
+  const password = readBackend("modules/user/password.controller.ts");
+
   assert.match(audit, /static async logCritical/);
   assert.match(audit, /SENSITIVE_KEY/);
   assert.match(audit, /\[REDACTED\]/);
+
   assert.match(artistApproval, /AuditService\.logCritical\([\s\S]*?client\s*\)/);
   assert.match(artistApproval, /await client\.query\("COMMIT"\)/);
   assert.doesNotMatch(artistApprovalRoutes, /AuditService\.log\(/);
   assert.doesNotMatch(artistApprovalRoutes, /const safeQuery/);
+
+  assert.match(artistPricing, /AuditService\.logCritical\([\s\S]*?client\s*\)/);
+  assert.match(adminGovernance, /AuditService\.logCritical/g);
+  assert.match(adminArtistGovernance, /AuditService\.logCritical/g);
+  assert.match(adminAgreement, /AuditService\.logCritical/g);
+
+  const configMount = adminIndex.indexOf("adminGovernanceConfigRoutes");
+  const agreementMount = adminIndex.indexOf("adminArtistAgreementRoutes");
+  const governanceMount = adminIndex.indexOf("adminArtistGovernanceRoutes");
+  const legacyMount = adminIndex.lastIndexOf("adminArtistsRoutes");
+  assert.ok(configMount >= 0 && configMount < legacyMount);
+  assert.ok(agreementMount >= 0 && agreementMount < legacyMount);
+  assert.ok(governanceMount >= 0 && governanceMount < legacyMount);
+
+  assert.match(accountState, /AuditService\.logCritical\([\s\S]*?client\s*\)/);
+  assert.match(accountState, /revokeArtistSessions/);
+  assert.match(accountState, /writeStateAudit/);
+  assert.doesNotMatch(accountSecurity, /AuditService\.log\(/);
+  assert.match(accountSecurity, /auditContext\(req/);
+
+  const passwordAudit = password.indexOf("await AuditService.logCritical");
+  const passwordCommit = password.indexOf('await client.query("COMMIT")');
+  assert.ok(passwordAudit >= 0 && passwordAudit < passwordCommit);
+  assert.doesNotMatch(password, /AuditService\.log\(/);
+}
+
+function testJobsAndSchemaContracts() {
+  const jobs = readBackend("runtime/operational-job-claim.ts");
+  const schedulers = readBackend("runtime/subscription-schedulers.ts");
+  const schema = readBackend("common/db/schema-readiness.ts");
+  const migration = readRepo(
+    "backend/db/migrations/20260913_0010_analytics_audit_operational_integrity.sql"
+  );
 
   assert.match(jobs, /run_token/);
   assert.match(jobs, /ON CONFLICT \(job_name, window_key\)/);
@@ -143,6 +192,13 @@ function testSourceContracts() {
   assert.match(migration, /CREATE TRIGGER audit_logs_append_only/);
   assert.match(migration, /analytics_events_user_event_key_unique/);
   assert.match(migration, /idx_content_plays_playback_session_unique/);
+}
+
+function testFinancialAndUiContracts() {
+  const adminAnalytics = readBackend("controllers/adminAnalyticsController.ts");
+  const adminAnalyticsRoutes = readBackend("routes/admin/analytics.ts");
+  const adminUi = readRepo("web-admin/src/pages/AdminAnalyticsPage.tsx");
+  const artistUi = readRepo("web-artist/src/pages/ArtistAnalyticsSummaryPage.tsx");
 
   assert.doesNotMatch(adminAnalytics, /Math\.max\(paymentsRevenue, transactionsRevenue\)/);
   assert.doesNotMatch(adminAnalytics, /ANALYTICS-DEBUG|_debug/);
@@ -150,11 +206,24 @@ function testSourceContracts() {
   assert.doesNotMatch(adminAnalyticsRoutes, /Math\.max\(|transactionsRevenue|transactionRows/);
   assert.doesNotMatch(adminAnalyticsRoutes, /_debug/);
   assert.match(adminAnalyticsRoutes, /FROM payments/);
+
+  assert.doesNotMatch(adminUi, /totalRevenue\s*\*\s*0\.[19]/);
+  assert.match(adminUi, /Payment ledger only/);
+  assert.match(adminUi, /Analytics unavailable/);
+  assert.match(adminUi, /status === 403/);
+
+  assert.doesNotMatch(artistUi, /\*\s*0\.9|\*\s*0\.1/);
+  assert.match(artistUi, /Gross captured revenue/);
+  assert.match(artistUi, /Analytics could not be loaded/);
+  assert.match(artistUi, /Payment ledger; not payout estimate/);
 }
 
 function run() {
   testHeartbeatPolicy();
-  testSourceContracts();
+  testPlaybackAndAnalyticsContracts();
+  testAuditDurabilityContracts();
+  testJobsAndSchemaContracts();
+  testFinancialAndUiContracts();
   console.log("Phase 08 operational integrity checks passed.");
 }
 
