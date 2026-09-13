@@ -11,9 +11,17 @@ function read(relativePath: string) {
 
 function main() {
   const adminAuth = read("backend/src/routes/admin/auth.ts");
+  const adminIndex = read("backend/src/routes/admin/index.ts");
   const subscriptionConfigController = read(
     "backend/src/controllers/subscriptionConfigController.ts"
   );
+  const artistPricingValidation = read(
+    "backend/src/modules/artist/artist-pricing.validation.ts"
+  );
+  const adminArtistValidation = read(
+    "backend/src/modules/admin/admin-artist.validation.ts"
+  );
+
   const adminApp = read("web-admin/src/App.tsx");
   const adminGate = read("web-admin/src/components/AdminSessionGate.tsx");
   const adminSession = read("web-admin/src/services/adminSession.ts");
@@ -24,8 +32,21 @@ function main() {
   const adminSubscriptionSettings = read(
     "web-admin/src/pages/AdminSubscriptionSettingsPage.tsx"
   );
+  const adminArtists = read("web-admin/src/pages/AdminArtistsPage.tsx");
+  const adminArtistDetail = read(
+    "web-admin/src/pages/AdminArtistDetailPage.tsx"
+  );
+  const adminCommissionPlans = read(
+    "web-admin/src/pages/AdminCommissionPlansPage.tsx"
+  );
+  const adminTerms = read("web-admin/src/pages/AdminTermsManagementPage.tsx");
+
   const artistApp = read("web-artist/src/App.tsx");
   const artistAccount = read("web-artist/src/pages/ArtistAccountPage.tsx");
+  const artistPricing = read("web-artist/src/pages/ArtistPricingPage.tsx");
+  const artistContentHistory = read(
+    "web-artist/src/pages/ArtistContentHistoryPage.tsx"
+  );
   const artistSession = read("web-artist/src/services/artistSession.ts");
   const artistHttp = read("web-artist/src/services/http.ts");
   const artistRuntime = read("web-artist/src/config/runtime.ts");
@@ -75,7 +96,9 @@ function main() {
     "Admin login page must not persist privileged bearer credentials directly"
   );
   assert.equal(
-    adminHttp.includes('failure.status === 403 && failure.code === "ACCOUNT_INACTIVE"'),
+    adminHttp.includes(
+      'failure.status === 403 && failure.code === "ACCOUNT_INACTIVE"'
+    ),
     true,
     "Admin inactive-account denial must terminate the browser session"
   );
@@ -111,12 +134,146 @@ function main() {
   );
 
   assert.equal(
+    adminIndex.includes("requireRoles(\"ADMIN\"),\n  adminArtistValidationRouter,\n  adminArtistsRoutes"),
+    true,
+    "Admin Artist validation must execute after authentication/RBAC and before legacy handlers"
+  );
+  assert.equal(
+    adminArtistValidation.includes("parsePositiveMoney") &&
+      adminArtistValidation.includes("Math.round(parsed * 100)"),
+    true,
+    "Admin Artist subscription price must be positive and map cleanly to paise"
+  );
+  assert.equal(
+    adminArtistValidation.includes('code: "INVALID_REVENUE_SHARE"') ||
+      adminArtistValidation.includes('"INVALID_REVENUE_SHARE"'),
+    true,
+    "Admin Artist revenue-share input must fail closed instead of silently clamping"
+  );
+  assert.equal(
+    adminArtistValidation.includes('parsed.protocol !== "http:"') &&
+      adminArtistValidation.includes('parsed.protocol !== "https:"'),
+    true,
+    "Admin Artist social links must reject non-http(s) schemes"
+  );
+  assert.equal(
+    adminArtistValidation.includes("reason.length < 3") &&
+      adminArtistValidation.includes("reason.length > 500"),
+    true,
+    "Artist deactivation requires a bounded auditable reason"
+  );
+
+  assert.equal(
+    adminArtists.includes("adminRuntimeConfig.apiBaseUrl"),
+    true,
+    "Admin Artists assets must use the centralized validated runtime origin"
+  );
+  assert.equal(
+    adminArtists.includes("import.meta.env.VITE_API_BASE_URL") ||
+      adminArtists.includes('"http://localhost:8000"'),
+    false,
+    "Admin Artists must not define a private localhost API fallback"
+  );
+  assert.equal(
+    adminArtists.includes("currency: \"INR\"") || adminArtists.includes('currency: "INR"'),
+    true,
+    "Admin Artists must display subscription pricing as INR"
+  );
+  assert.equal(
+    adminArtists.includes('localStorage.removeItem("adminToken"'),
+    false,
+    "Admin Artists must not turn authorization failures into page-level logout"
+  );
+  assert.equal(
+    adminArtists.includes("await artistsQuery.refetch()"),
+    true,
+    "Admin Artist agreement mutations must reconcile from canonical server state"
+  );
+
+  assert.equal(
+    adminArtistDetail.includes("adminRuntimeConfig.apiBaseUrl"),
+    true,
+    "Admin Artist detail must use centralized runtime URL resolution"
+  );
+  assert.equal(
+    adminArtistDetail.includes('currency: "INR"'),
+    true,
+    "Admin Artist detail must display pricing in INR"
+  );
+  assert.equal(
+    adminArtistDetail.includes('localStorage.removeItem("adminToken"'),
+    false,
+    "Admin Artist detail must not clear a valid token for generic authorization failures"
+  );
+  assert.equal(
+    adminArtistDetail.includes("/api/v1/admin/artists/revenue-share-config") &&
+      adminArtistDetail.includes("/api/v1/admin/artists/terms-versions"),
+    true,
+    "Admin Artist detail must call the canonical mounted future-revenue and terms endpoints"
+  );
+  assert.equal(
+    adminArtistDetail.includes("http.delete(`/api/v1/content/${item.id}`"),
+    false,
+    "Admin Artist detail must not expose destructive content deletion outside moderation governance"
+  );
+  assert.equal(
+    adminArtistDetail.includes("responseType: \"blob\"") &&
+      adminArtistDetail.includes("window.URL.revokeObjectURL"),
+    true,
+    "Agreement PDF download must stay authenticated and release object URLs"
+  );
+
+  assert.equal(
+    adminCommissionPlans.includes("busyAction"),
+    true,
+    "Commission configuration must block overlapping privileged mutations"
+  );
+  assert.equal(
+    adminCommissionPlans.includes("await fetchPlans()"),
+    true,
+    "Commission mutations must reconcile with canonical server state"
+  );
+  assert.equal(
+    adminCommissionPlans.includes("handleDuplicatePlan"),
+    false,
+    "Commission UI must not expose the legacy duplicate-same-unique-version action"
+  );
+  assert.equal(
+    adminCommissionPlans.includes("setError(errorMessage"),
+    true,
+    "Commission mutation failures must be visible instead of console-only"
+  );
+
+  assert.equal(
+    adminTerms.includes("busyAction"),
+    true,
+    "Terms management must block overlapping privileged mutations"
+  );
+  assert.equal(
+    adminTerms.includes('"/api/v1/admin/artists/terms-versions"'),
+    true,
+    "Terms management must use the canonical mounted endpoint"
+  );
+  assert.equal(
+    adminTerms.includes("await fetchTerms()"),
+    true,
+    "Terms mutations must reconcile with canonical server state"
+  );
+  assert.equal(
+    adminTerms.includes("setError(errorMessage"),
+    true,
+    "Terms failures must be visible instead of console-only"
+  );
+
+  assert.equal(
     artistHttp.includes("delete res.data.token"),
     true,
     "Artist bearer credentials must be consumed by the session boundary before page components receive the response"
   );
   assert.equal(
-    artistHttp.includes('failure.status === 403 && failure.code === "ACCOUNT_INACTIVE"'),
+    artistHttp.includes(
+      'failure.status === 403 && failure.code === "ACCOUNT_INACTIVE"'
+    ),
     true,
     "Artist 403 must only clear the session for the canonical inactive-account condition"
   );
@@ -154,17 +311,79 @@ function main() {
     "Artist profile updates must reconcile with canonical server state after save"
   );
 
+  assert.equal(
+    artistPricing.includes("Monthly subscription") &&
+      artistPricing.includes('currency: "INR"'),
+    true,
+    "Artist Pricing must present the approved monthly INR subscription model"
+  );
+  assert.equal(
+    artistPricing.includes("discountPercent") || artistPricing.includes("contentAccess"),
+    false,
+    "Artist Pricing must not expose unsupported legacy pricing/access controls"
+  );
+  assert.equal(
+    artistPricing.includes("await load();"),
+    true,
+    "Artist Pricing must reconcile canonical server state after save"
+  );
+  assert.equal(
+    artistPricingValidation.includes("discountPercent") &&
+      artistPricingValidation.includes("earlyAccessDays") &&
+      artistPricingValidation.includes("contentAccess"),
+    true,
+    "Artist Pricing backend must explicitly reject unsupported Phase-1 pricing fields"
+  );
+  assert.equal(
+    artistPricingValidation.includes('code: "INVALID_ARTIST_PRICING"'),
+    true,
+    "Malformed Artist pricing must fail closed with an explicit validation code"
+  );
+
+  assert.equal(
+    artistContentHistory.includes(
+      "Read-only Phase 1 view of content uploaded and governed by the platform team."
+    ),
+    true,
+    "Artist content history must remain read-only and aligned with the admin-governed upload workflow"
+  );
+  assert.equal(
+    artistContentHistory.includes("query.isError"),
+    true,
+    "Artist content history must expose a visible load-error state"
+  );
+
   for (const [label, runtime] of [
     ["admin", adminRuntime],
     ["artist", artistRuntime],
   ] as const) {
-    assert.equal(runtime.includes("VITE_API_BASE_URL is required in production"), true, `${label} production API URL must be required`);
-    assert.equal(runtime.includes("must not target localhost in production"), true, `${label} production API URL must reject localhost`);
-    assert.equal(runtime.includes("must use https:// in production"), true, `${label} production API URL must require HTTPS`);
+    assert.equal(
+      runtime.includes("VITE_API_BASE_URL is required in production"),
+      true,
+      `${label} production API URL must be required`
+    );
+    assert.equal(
+      runtime.includes("must not target localhost in production"),
+      true,
+      `${label} production API URL must reject localhost`
+    );
+    assert.equal(
+      runtime.includes("must use https:// in production"),
+      true,
+      `${label} production API URL must require HTTPS`
+    );
   }
 
-  assert.equal(adminMain.includes("replayIntegration"), false, "Admin Sentry must not enable session replay for privileged UI");
-  assert.equal(artistMain.includes("replayIntegration"), false, "Artist Sentry must not enable session replay for privileged UI");
+  assert.equal(
+    adminMain.includes("replayIntegration"),
+    false,
+    "Admin Sentry must not enable session replay for privileged UI"
+  );
+  assert.equal(
+    artistMain.includes("replayIntegration"),
+    false,
+    "Artist Sentry must not enable session replay for privileged UI"
+  );
 
   console.log("Phase 07 privileged web hardening contract checks passed.");
 }
