@@ -1,9 +1,7 @@
 /**
  * Canonical backend runtime configuration.
- *
- * Parse and validate environment input once. Production never falls back to
- * localhost, placeholder secrets, wildcard browser origins, local storage or
- * malformed numeric values.
+ * Parse and validate environment input once; downstream modules consume this
+ * contract instead of interpreting process.env independently.
  */
 
 const STORAGE_PROVIDERS = ["local", "firebase", "s3", "cloudinary"] as const;
@@ -12,35 +10,28 @@ const NODE_ENVS = ["development", "test", "production"] as const;
 export type StorageProviderType = (typeof STORAGE_PROVIDERS)[number];
 export type RuntimeNodeEnv = (typeof NODE_ENVS)[number];
 
-function envStr(key: string, defaultValue?: string): string {
-  const raw = process.env[key];
-  if ((raw === undefined || raw.trim() === "") && defaultValue !== undefined) return defaultValue;
-  if (raw === undefined || raw.trim() === "") {
-    throw new Error(`[env] Missing or empty required env: ${key}`);
-  }
-  return raw.trim();
-}
-
 function envOptional(key: string): string {
   return String(process.env[key] || "").trim();
 }
 
-function envInt(key: string, options: { defaultValue?: number; min?: number; max?: number } = {}): number {
-  const raw = process.env[key];
-  if ((raw === undefined || raw.trim() === "") && options.defaultValue !== undefined) {
-    return options.defaultValue;
-  }
-  if (raw === undefined || raw.trim() === "" || !/^-?\d+$/.test(raw.trim())) {
-    throw new Error(`[env] Invalid or missing integer env: ${key}`);
-  }
+function envStr(key: string, defaultValue?: string): string {
+  const raw = envOptional(key);
+  if (!raw && defaultValue !== undefined) return defaultValue;
+  if (!raw) throw new Error(`[env] Missing or empty required env: ${key}`);
+  return raw;
+}
+
+function envInt(
+  key: string,
+  options: { defaultValue?: number; min?: number; max?: number } = {}
+): number {
+  const raw = envOptional(key);
+  if (!raw && options.defaultValue !== undefined) return options.defaultValue;
+  if (!raw || !/^-?\d+$/.test(raw)) throw new Error(`[env] Invalid or missing integer env: ${key}`);
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) throw new Error(`[env] Invalid integer env: ${key}`);
-  if (options.min !== undefined && value < options.min) {
-    throw new Error(`[env] ${key} must be >= ${options.min}`);
-  }
-  if (options.max !== undefined && value > options.max) {
-    throw new Error(`[env] ${key} must be <= ${options.max}`);
-  }
+  if (options.min !== undefined && value < options.min) throw new Error(`[env] ${key} must be >= ${options.min}`);
+  if (options.max !== undefined && value > options.max) throw new Error(`[env] ${key} must be <= ${options.max}`);
   return value;
 }
 
@@ -52,7 +43,12 @@ function envBoolean(key: string, defaultValue: boolean): boolean {
   throw new Error(`[env] ${key} must be true or false`);
 }
 
-function parseUrl(key: string, raw: string, protocols: string[]): URL {
+function parseUrl(
+  key: string,
+  raw: string,
+  protocols: string[],
+  options: { allowCredentials?: boolean } = {}
+): URL {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -62,22 +58,15 @@ function parseUrl(key: string, raw: string, protocols: string[]): URL {
   if (!protocols.includes(parsed.protocol)) {
     throw new Error(`[env] ${key} must use ${protocols.join(" or ")}`);
   }
-  if (parsed.username || parsed.password) {
+  if (!options.allowCredentials && (parsed.username || parsed.password)) {
     throw new Error(`[env] ${key} must not embed credentials`);
   }
   return parsed;
 }
 
 function parseDatabaseUrl(key: string, raw: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`[env] ${key} must be a valid PostgreSQL URL`);
-  }
-  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    throw new Error(`[env] ${key} must use postgres:// or postgresql://`);
-  }
+  const parsed = parseUrl(key, raw, ["postgres:", "postgresql:"], { allowCredentials: true });
+  if (!parsed.hostname) throw new Error(`[env] ${key} must identify a database host`);
   return raw;
 }
 
@@ -100,10 +89,6 @@ function assertProductionSecret(key: string, value: string, nodeEnv: RuntimeNode
   if (PLACEHOLDER_SECRET.test(value)) throw new Error(`[env] ${key} contains a placeholder value`);
 }
 
-function normalizeBaseUrl(parsed: URL): string {
-  return parsed.toString().replace(/\/+$/, "");
-}
-
 function parseCorsOrigins(nodeEnv: RuntimeNodeEnv): string[] {
   const raw = envOptional("CORS_ALLOWED_ORIGINS");
   if (!raw) {
@@ -116,15 +101,16 @@ function parseCorsOrigins(nodeEnv: RuntimeNodeEnv): string[] {
   if (nodeEnv === "production" && values.includes("*")) {
     throw new Error("[env] CORS_ALLOWED_ORIGINS cannot contain * in production");
   }
-  for (const origin of values) {
-    if (origin === "*") continue;
+
+  return values.map((origin) => {
+    if (origin === "*") return origin;
     const parsed = parseUrl("CORS_ALLOWED_ORIGINS", origin, ["http:", "https:"]);
     if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
       throw new Error("[env] CORS_ALLOWED_ORIGINS entries must be origins without path/query/hash");
     }
     assertProductionPublicUrl("CORS_ALLOWED_ORIGINS", parsed, nodeEnv);
-  }
-  return values.map((origin) => origin.replace(/\/$/, ""));
+    return parsed.origin;
+  });
 }
 
 export interface EnvValidationResult {
@@ -198,9 +184,7 @@ export function validateEnv(): EnvValidationResult {
   assertProductionSecret("MEDIA_SIGNED_TOKEN_SECRET", mediaSignedTokenSecret, nodeEnv, 32);
 
   const configuredProvider = envOptional("STORAGE_PROVIDER");
-  if (!configuredProvider && nodeEnv === "production") {
-    throw new Error("[env] STORAGE_PROVIDER is required in production");
-  }
+  if (!configuredProvider && nodeEnv === "production") throw new Error("[env] STORAGE_PROVIDER is required in production");
   const rawProvider = (configuredProvider || "local").toLowerCase();
   if (!STORAGE_PROVIDERS.includes(rawProvider as StorageProviderType)) {
     throw new Error(`[env] STORAGE_PROVIDER must be one of: ${STORAGE_PROVIDERS.join(", ")}`);
@@ -210,26 +194,40 @@ export function validateEnv(): EnvValidationResult {
     throw new Error("[env] STORAGE_PROVIDER=local is development/test only and is forbidden in production");
   }
 
-  const appBaseRaw = nodeEnv === "production" ? envStr("APP_BASE_URL") : envStr("APP_BASE_URL", "http://localhost:8000");
+  const appBaseRaw = nodeEnv === "production"
+    ? envStr("APP_BASE_URL")
+    : envStr("APP_BASE_URL", "http://localhost:8000");
   const appBaseParsed = parseUrl("APP_BASE_URL", appBaseRaw, ["http:", "https:"]);
+  if (appBaseParsed.pathname !== "/" || appBaseParsed.search || appBaseParsed.hash) {
+    throw new Error("[env] APP_BASE_URL must be an origin without path/query/hash");
+  }
   assertProductionPublicUrl("APP_BASE_URL", appBaseParsed, nodeEnv);
-  const appBaseUrl = normalizeBaseUrl(appBaseParsed);
+  const appBaseUrl = appBaseParsed.origin;
 
   const corsAllowedOrigins = parseCorsOrigins(nodeEnv);
   const trustProxyHops = nodeEnv === "production"
-    ? envInt("TRUST_PROXY_HOPS", { min: 0, max: 5 })
+    ? envInt("TRUST_PROXY_HOPS", { min: 1, max: 5 })
     : envInt("TRUST_PROXY_HOPS", { defaultValue: 0, min: 0, max: 5 });
 
   const redisRaw = envOptional("REDIS_URL");
   let redisUrl: string | null = null;
   if (redisRaw && redisRaw.toLowerCase() !== "disabled") {
-    const parsed = parseUrl("REDIS_URL", redisRaw, ["redis:", "rediss:"]);
+    const parsed = parseUrl("REDIS_URL", redisRaw, ["redis:", "rediss:"], { allowCredentials: true });
+    if (nodeEnv === "production" && isLocalHostname(parsed.hostname)) {
+      throw new Error("[env] REDIS_URL must not target localhost in production");
+    }
     redisUrl = parsed.toString();
   }
 
   const sentryRaw = envOptional("SENTRY_DSN");
   let sentryDsn: string | null = null;
-  if (sentryRaw) sentryDsn = parseUrl("SENTRY_DSN", sentryRaw, ["http:", "https:"]).toString();
+  if (sentryRaw) {
+    const parsed = parseUrl("SENTRY_DSN", sentryRaw, ["http:", "https:"], { allowCredentials: true });
+    if (!parsed.hostname || !parsed.pathname || parsed.pathname === "/") {
+      throw new Error("[env] SENTRY_DSN must include a project path");
+    }
+    sentryDsn = parsed.toString();
+  }
   const sentryRelease = envOptional("SENTRY_RELEASE") || null;
 
   const localStorageRoot = envStr("LOCAL_STORAGE_ROOT", "./storage");
