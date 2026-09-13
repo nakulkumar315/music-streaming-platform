@@ -17,6 +17,7 @@ function main() {
   const adminHttp = read("web-admin/src/services/http.ts");
   const adminRuntime = read("web-admin/src/config/runtime.ts");
   const adminMain = read("web-admin/src/main.tsx");
+  const adminLogin = read("web-admin/src/pages/AdminLoginPage.tsx");
   const artistSession = read("web-artist/src/services/artistSession.ts");
   const artistHttp = read("web-artist/src/services/http.ts");
   const artistRuntime = read("web-artist/src/config/runtime.ts");
@@ -61,14 +62,24 @@ function main() {
   }
 
   assert.equal(
-    adminHttp.includes("failure.status === 401"),
-    true,
-    "Admin HTTP foundation must treat 401 as session loss"
+    adminLogin.includes('localStorage.setItem("adminToken"'),
+    false,
+    "Admin login page must not persist privileged bearer credentials directly"
   );
   assert.equal(
-    adminHttp.includes("failure.status === 403") && adminHttp.includes("clearAdminSession()"),
+    adminHttp.includes('failure.status === 403 && failure.code === "ACCOUNT_INACTIVE"'),
+    true,
+    "Admin inactive-account denial must terminate the browser session"
+  );
+  assert.equal(
+    adminHttp.includes("if (failure.status === 403)"),
     false,
-    "Admin HTTP foundation must not turn a valid 403 authorization failure into a logout loop"
+    "Generic admin 403 authorization failures must not become logout loops"
+  );
+  assert.equal(
+    artistHttp.includes("delete res.data.token"),
+    true,
+    "Artist bearer credentials must be consumed by the session boundary before page components receive the response"
   );
   assert.equal(
     artistHttp.includes('failure.status === 403 && failure.code === "ACCOUNT_INACTIVE"'),

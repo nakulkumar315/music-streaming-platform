@@ -90,7 +90,7 @@ http.interceptors.response.use(
     const path = requestPath(axios.isAxiosError(error) ? error.config?.url : "");
     const isLogin = path.includes("/api/v1/admin/login");
 
-    if (failure.status === 401) {
+    if (failure.status === 401 || (failure.status === 403 && failure.code === "ACCOUNT_INACTIVE")) {
       clearAdminSession();
       if (!isLogin && typeof window !== "undefined") {
         window.location.assign("/admin/login");

@@ -73,28 +73,36 @@ http.interceptors.request.use((config) => {
   return config;
 });
 
+/** Store server-issued credentials at the HTTP boundary and remove them from
+ * the response object before page components can accidentally persist/log them. */
+function consumeResponseToken(
+  res: { data?: Record<string, unknown> },
+  token: unknown
+) {
+  if (typeof token !== "string" || !token.trim()) return;
+  setArtistToken(token);
+  if (res.data) delete res.data.token;
+}
+
 http.interceptors.response.use(
   (res) => {
     const path = requestPath(res.config?.url);
-    const rotatedToken = res.data?.sessionRotated ? res.data?.token : null;
-    if (typeof rotatedToken === "string" && rotatedToken.trim()) {
-      setArtistToken(rotatedToken);
+    if (res.data?.sessionRotated) {
+      consumeResponseToken(res, res.data?.token);
     }
 
     if (path.includes("/api/v1/auth/login")) {
-      const token = res.data?.token;
       const role = String(res.data?.user?.role || "").toUpperCase();
       const status = String(res.data?.user?.status || "").toUpperCase();
-      if (typeof token === "string" && token.trim() && role === "ARTIST" && status === "ACTIVE") {
-        setArtistToken(token);
+      if (role === "ARTIST" && status === "ACTIVE") {
+        consumeResponseToken(res, res.data?.token);
       } else if (role && role !== "ARTIST") {
         clearArtistSession();
       }
     }
 
     if (path.includes("/api/v1/artist/onboard")) {
-      const token = res.data?.token;
-      if (typeof token === "string" && token.trim()) setArtistToken(token);
+      consumeResponseToken(res, res.data?.token);
     }
     return res;
   },
