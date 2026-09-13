@@ -57,8 +57,10 @@ async function deleteNativeSecureCredential() {
  * than continuing to use the plaintext token.
  *
  * A non-secret logout tombstone prevents a credential that could not be deleted
- * from being restored on the next launch. We retry deletion before any token is
- * returned and remain logged out if the OS secure store is unavailable.
+ * from being restored on a later launch. The tombstone deliberately remains
+ * until a fresh successful login writes a replacement credential. This keeps
+ * logout fail-closed even if a native secure-store delete reports success before
+ * its backing storage is durably updated.
  */
 export async function readAuthCredential(): Promise<string | null> {
   if (!isNativeMobile()) {
@@ -67,14 +69,16 @@ export async function readAuthCredential(): Promise<string | null> {
 
   const logoutPending = await AsyncStorage.getItem(LOCAL_LOGOUT_TOMBSTONE_KEY);
   if (logoutPending === '1') {
+    // Best-effort cleanup only. Never restore while logout intent is present.
     try {
       await deleteNativeSecureCredential();
-      await clearLegacyCredentialCopies();
-      await AsyncStorage.removeItem(LOCAL_LOGOUT_TOMBSTONE_KEY);
     } catch {
-      // Fail closed: a credential that was meant to be deleted must never be
-      // restored merely because native secure storage is temporarily failing.
-      return null;
+      // Intentionally ignored: the tombstone is the fail-closed control.
+    }
+    try {
+      await clearLegacyCredentialCopies();
+    } catch {
+      // The tombstone still prevents session restoration.
     }
     return null;
   }
@@ -130,6 +134,8 @@ export async function saveAuthCredential(credential: string): Promise<void> {
     SECURE_STORE_OPTIONS
   );
   await clearLegacyCredentialCopies();
+
+  // Only an explicit fresh authentication may clear prior logout intent.
   await AsyncStorage.removeItem(LOCAL_LOGOUT_TOMBSTONE_KEY);
 }
 
@@ -141,8 +147,8 @@ export async function clearAuthCredential(): Promise<void> {
     return;
   }
 
-  // Record logout intent before touching secure storage. If native deletion
-  // fails, readAuthCredential() will refuse to restore the stale credential.
+  // Persist logout intent before touching secure storage and keep it until a
+  // future successful login. This is stronger than trusting delete durability.
   await AsyncStorage.setItem(LOCAL_LOGOUT_TOMBSTONE_KEY, '1');
 
   let secureStoreError: unknown = null;
@@ -155,10 +161,7 @@ export async function clearAuthCredential(): Promise<void> {
   // Always remove legacy plaintext copies, even if secure deletion failed.
   await clearLegacyCredentialCopies();
 
-  if (!secureStoreError) {
-    await AsyncStorage.removeItem(LOCAL_LOGOUT_TOMBSTONE_KEY);
-    return;
+  if (secureStoreError) {
+    throw secureStoreError;
   }
-
-  throw secureStoreError;
 }
