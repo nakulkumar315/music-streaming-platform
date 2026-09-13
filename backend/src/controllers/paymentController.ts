@@ -345,14 +345,24 @@ export const razorpayWebhook = async (req: any, res: Response) => {
           break;
         }
 
-        case "refund.processed": {
+        case "refund.created":
+        case "refund.processed":
+        case "refund.failed": {
           const entity = payload?.payload?.refund?.entity;
           const paymentId = String(entity?.payment_id ?? "").trim();
           const refundId = String(entity?.id ?? "").trim();
           const refundAmountPaise = Number(entity?.amount);
+          const fallbackStatus =
+            eventType === "refund.processed"
+              ? "processed"
+              : eventType === "refund.failed"
+                ? "failed"
+                : "pending";
+          const providerStatus = String(entity?.status || fallbackStatus).toLowerCase();
 
           if (
             !paymentId ||
+            !refundId ||
             !Number.isSafeInteger(refundAmountPaise) ||
             refundAmountPaise <= 0
           ) {
@@ -365,8 +375,9 @@ export const razorpayWebhook = async (req: any, res: Response) => {
 
           const refund = await finalizeRefund(client, {
             paymentId,
-            refundId: refundId || undefined,
+            refundId,
             refundAmountPaise,
+            providerStatus,
           });
 
           if (refund.fullRefund) {
