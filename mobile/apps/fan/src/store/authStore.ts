@@ -89,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await clearAuthCredential();
     } catch (error) {
       // Session state must remain logged out even if the OS secure-store delete
-      // call fails. The next unauthorized response will attempt cleanup again.
+      // call fails. The persisted logout tombstone prevents token restoration.
       Sentry.captureException(error, {
         tags: { area: 'auth-storage', action: 'clear-local-session' },
       });
@@ -114,7 +114,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setToken = useCallback(async (next: string | null) => {
     if (next) {
-      await saveAuthCredential(next);
+      // Explicit auth-context token writes represent a newly authenticated
+      // session. Background token rotation bypasses this path and cannot clear
+      // a logout tombstone.
+      await saveAuthCredential(next, 'fresh-auth');
     } else {
       await clearAuthCredential();
     }
