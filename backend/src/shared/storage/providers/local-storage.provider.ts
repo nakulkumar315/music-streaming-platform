@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import type { IStorageProvider } from "../interfaces/storage-provider.interface";
 import type {
@@ -7,142 +8,138 @@ import type {
   UploadObjectResult,
   ObjectMetadata,
   OpenReadStreamParams,
-  OpenReadStreamResult
+  OpenReadStreamResult,
 } from "../interfaces/storage-types.interface";
 import { resolveSafePath, isSafeStorageKey } from "../utils/path-safety.util";
-import { StorageUploadFailedException, StoragePathTraversalException } from "../../exceptions/storage.exception";
+import {
+  StorageUploadFailedException,
+  StoragePathTraversalException,
+} from "../../exceptions/storage.exception";
 
 /**
- * Local disk storage provider. Section 25.1.
- * Path-safe, supports openReadStream for range-based streaming.
+ * Development/test local disk provider. It preserves the production upload
+ * memory-safety property by streaming bodies to disk instead of buffering them.
  */
 export class LocalStorageProvider implements IStorageProvider {
-  constructor(private readonly rootDir: string) {
-    if (!rootDir || !path.isAbsolute(path.resolve(rootDir))) {
-      // Allow relative paths; resolve at use time
-    }
-  }
+  constructor(private readonly rootDir: string) {}
 
   private getMetaPath(storageKey: string): string {
-    const absolutePath = this.getAbsolutePath(storageKey);
-    return `${absolutePath}.meta.json`;
+    return `${this.getAbsolutePath(storageKey)}.meta.json`;
   }
 
   private getAbsolutePath(storageKey: string): string {
     if (!isSafeStorageKey(storageKey)) {
       throw new StoragePathTraversalException();
     }
-    const root = path.resolve(this.rootDir);
-    return resolveSafePath(root, storageKey);
+    return resolveSafePath(path.resolve(this.rootDir), storageKey);
   }
 
   private ensureDirFor(filePath: string): void {
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
   }
 
   async upload(params: UploadObjectParams): Promise<UploadObjectResult> {
-    const { storageKey, body, contentType } = params;
-    const absolutePath = this.getAbsolutePath(storageKey);
+    const absolutePath = this.getAbsolutePath(params.storageKey);
     try {
       this.ensureDirFor(absolutePath);
-      const buffer = Buffer.isBuffer(body) ? body : await streamToBuffer(body as Readable);
-      fs.writeFileSync(absolutePath, buffer, { flag: "w" });
-
-      try {
-        const metaPath = this.getMetaPath(storageKey);
-        fs.writeFileSync(
-          metaPath,
-          JSON.stringify({ contentType: contentType || null }, null, 2),
-          { flag: "w" }
-        );
-      } catch {
-        // ignore meta write failures
+      if (Buffer.isBuffer(params.body)) {
+        await fs.promises.writeFile(absolutePath, params.body, { flag: "w" });
+      } else {
+        await pipeline(params.body as Readable, fs.createWriteStream(absolutePath, { flags: "w" }));
       }
-      return { storageKey, providerAssetId: storageKey, sizeBytes: buffer.length };
+
+      const stat = await fs.promises.stat(absolutePath);
+      await fs.promises
+        .writeFile(
+          this.getMetaPath(params.storageKey),
+          JSON.stringify({ contentType: params.contentType || null }, null, 2),
+          { flag: "w" }
+        )
+        .catch(() => undefined);
+
+      return {
+        storageKey: params.storageKey,
+        providerAssetId: params.storageKey,
+        sizeBytes: stat.size,
+      };
     } catch (err: any) {
+      await fs.promises.unlink(absolutePath).catch(() => undefined);
       throw new StorageUploadFailedException(
         err?.message || "Local upload failed",
-        storageKey
+        params.storageKey
       );
     }
   }
 
   async delete(storageKey: string): Promise<void> {
     const absolutePath = this.getAbsolutePath(storageKey);
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
-
-    const metaPath = this.getMetaPath(storageKey);
-    if (fs.existsSync(metaPath)) {
-      fs.unlinkSync(metaPath);
-    }
+    await fs.promises.unlink(absolutePath).catch((error: any) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+    await fs.promises.unlink(this.getMetaPath(storageKey)).catch(() => undefined);
   }
 
   async exists(storageKey: string): Promise<boolean> {
-    const absolutePath = this.getAbsolutePath(storageKey);
-    return fs.existsSync(absolutePath);
+    try {
+      await fs.promises.access(this.getAbsolutePath(storageKey), fs.constants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async getObjectMetadata(storageKey: string): Promise<ObjectMetadata | null> {
     const absolutePath = this.getAbsolutePath(storageKey);
-    if (!fs.existsSync(absolutePath)) return null;
-    const stat = fs.statSync(absolutePath);
-
-    let contentType: string | null = null;
+    let stat: fs.Stats;
     try {
-      const metaPath = this.getMetaPath(storageKey);
-      if (fs.existsSync(metaPath)) {
-        const raw = fs.readFileSync(metaPath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (parsed?.contentType && typeof parsed.contentType === "string") {
-          contentType = parsed.contentType;
-        }
-      }
-    } catch {
-      contentType = null;
+      stat = await fs.promises.stat(absolutePath);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
     }
+
+    let contentType: string | undefined;
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(this.getMetaPath(storageKey), "utf8"));
+      if (typeof parsed?.contentType === "string") contentType = parsed.contentType;
+    } catch {
+      contentType = undefined;
+    }
+
     return {
       storageKey,
       contentLength: stat.size,
       lastModified: stat.mtime,
-      contentType: contentType ?? undefined
+      contentType,
     };
   }
 
   async openReadStream(params: OpenReadStreamParams): Promise<OpenReadStreamResult> {
-    const { storageKey, start, end } = params;
-    const absolutePath = this.getAbsolutePath(storageKey);
-    if (!fs.existsSync(absolutePath)) {
-      const err = new Error("File not found");
-      (err as any).code = "ENOENT";
-      throw err;
+    const absolutePath = this.getAbsolutePath(params.storageKey);
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.stat(absolutePath);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        const notFound = new Error("File not found") as NodeJS.ErrnoException;
+        notFound.code = "ENOENT";
+        throw notFound;
+      }
+      throw error;
     }
-    const stat = fs.statSync(absolutePath);
-    const totalSize = stat.size;
+
     const options: { start?: number; end?: number } = {};
-    if (start !== undefined) options.start = start;
-    if (end !== undefined) options.end = end;
-    const stream = fs.createReadStream(absolutePath, options);
-    const contentLength = options.end !== undefined && options.start !== undefined
-      ? options.end - options.start + 1
-      : totalSize;
+    if (params.start !== undefined) options.start = params.start;
+    if (params.end !== undefined) options.end = params.end;
+    const contentLength =
+      options.start !== undefined && options.end !== undefined
+        ? options.end - options.start + 1
+        : stat.size;
+
     return {
-      stream,
+      stream: fs.createReadStream(absolutePath, options),
       contentLength,
-      acceptRanges: true
+      acceptRanges: true,
     };
   }
-}
-
-function streamToBuffer(stream: Readable): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
 }
