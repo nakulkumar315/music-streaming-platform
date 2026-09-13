@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -11,46 +9,31 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { http } from "../services/http";
-import ErrorBoundary from "../components/ErrorBoundary";
-import PageWrapper from "../components/PageWrapper";
 import {
+  Activity,
+  AlertCircle,
+  Calendar,
+  DollarSign,
+  Music,
+  RefreshCw,
   TrendingUp,
   Users,
-  DollarSign,
-  Calendar,
-  Clock,
-  ArrowUpRight,
-  ArrowDownRight,
-  RefreshCw,
-  Filter,
-  Download,
-  Music,
-  User,
-  Activity,
-  Zap,
-  Crown,
-  Award,
-  BarChart3,
-  PieChart,
-  LineChart as LineChartIcon,
 } from "lucide-react";
+import PageWrapper from "../components/PageWrapper";
+import { http } from "../services/http";
 
 type GlobalSummary = {
   success: boolean;
   totalRevenue: number;
-  platformFee: number;
-  artistPayouts: number;
   totalArtists: number;
   totalFans: number;
   totalActiveUsers: number;
   userGrowthRatePct: number;
+  currency: string;
 };
 
 type SeriesPoint = { date: string; value: number };
-
-type RevenueTrendsResponse = { success: boolean; data: SeriesPoint[] };
-
+type RevenueTrendsResponse = { success: boolean; data: SeriesPoint[]; currency: string };
 type TopArtist = {
   artistId: number;
   name: string | null;
@@ -58,507 +41,296 @@ type TopArtist = {
   subscribers: number;
   plays: number;
 };
-
 type TopArtistsResponse = { success: boolean; items: TopArtist[] };
+type MetricsResponse = {
+  success: boolean;
+  metrics?: {
+    activeSubscribers?: number;
+    conversionRate?: string;
+    revenuePerArtist?: Array<{ name: string | null; revenue: number }>;
+  };
+};
 
 function formatCurrency(amount: number) {
-  const n = Number(amount);
-  if (!Number.isFinite(n)) return "₹0.00";
-  return (
-    "₹" +
-    n.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })
-  );
+  const value = Number(amount);
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0);
 }
 
-function formatCompact(n: number) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return "0";
-  return v.toLocaleString();
+function formatNumber(value: number) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString("en-IN") : "0";
 }
 
-function StatCard({
-  title,
-  value,
-  icon: Icon,
-  trend,
-  trendValue,
-  color = "orange",
-  subtitle,
-}: {
-  title: string;
-  value: string;
-  icon: React.ElementType;
-  trend?: "up" | "down";
-  trendValue?: string;
-  color?: "orange" | "purple" | "green" | "blue";
-  subtitle?: string;
-}) {
-  const colorMap = {
-    orange: "from-primary to-secondary",
-    purple: "from-[#8B5CF6] to-[#6D28D9]",
-    green: "from-[#10B981] to-[#059669]",
-    blue: "from-[#3B82F6] to-[#2563EB]",
-  };
-
-  return (
-    <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-6 hover:border-white/10 transition-all duration-300">
-      <div className="absolute inset-0 bg-gradient-to-br from-white/[0.02] to-transparent" />
-
-      <div className="relative flex items-start justify-between">
-        <div className="flex-1">
-          <p className="text-sm font-medium text-[#8D7B77]">{title}</p>
-          <p className="mt-2 text-3xl font-bold text-white tracking-tight">
-            {value}
-          </p>
-
-          {subtitle && (
-            <p className="mt-1 text-sm text-[#8D7B77]">{subtitle}</p>
-          )}
-
-          {trend && trendValue && (
-            <div className="mt-3 flex items-center gap-1.5">
-              {trend === "up" ? (
-                <ArrowUpRight size={16} className="text-green-400" />
-              ) : (
-                <ArrowDownRight size={16} className="text-red-400" />
-              )}
-              <span
-                className={`text-sm font-medium ${
-                  trend === "up" ? "text-green-400" : "text-red-400"
-                }`}>
-                {trendValue}
-              </span>
-            </div>
-          )}
-        </div>
-
-        <div
-          className={`p-3 rounded-xl bg-gradient-to-br ${colorMap[color]} opacity-80 group-hover:opacity-100 transition-opacity`}>
-          <Icon size={20} className="text-white" />
-        </div>
-      </div>
-    </div>
-  );
+function inputDate(date: Date) {
+  return date.toISOString().slice(0, 10);
 }
 
-function formatDateForInput(date: Date): string {
-  return date.toISOString().split("T")[0];
-}
-
-function getDefaultDateRange() {
+function defaultRange() {
   const end = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - 30);
-  return { start, end };
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 29);
+  return { start: inputDate(start), end: inputDate(end) };
 }
 
 export default function AdminAnalyticsPage() {
   const navigate = useNavigate();
-
+  const initial = useMemo(defaultRange, []);
+  const [startDate, setStartDate] = useState(initial.start);
+  const [endDate, setEndDate] = useState(initial.end);
   const [loading, setLoading] = useState(true);
-  const [global, setGlobal] = useState<GlobalSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<GlobalSummary | null>(null);
   const [revenue, setRevenue] = useState<SeriesPoint[]>([]);
   const [topArtists, setTopArtists] = useState<TopArtist[]>([]);
-  const [subMetrics, setSubMetrics] = useState<any>(null);
+  const [metrics, setMetrics] = useState<MetricsResponse["metrics"]>(null);
 
-  const defaultRange = getDefaultDateRange();
-  const [startDate, setStartDate] = useState<string>(
-    formatDateForInput(defaultRange.start)
-  );
-  const [endDate, setEndDate] = useState<string>(
-    formatDateForInput(defaultRange.end)
-  );
-
-  const fetchData = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      const dateParams = `?startDate=${encodeURIComponent(
-        startDate
-      )}&endDate=${encodeURIComponent(endDate)}`;
+      const query = startDate && endDate
+        ? `?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
+        : "";
+      const [summaryResponse, revenueResponse, artistsResponse, metricsResponse] =
+        await Promise.all([
+          http.get<GlobalSummary>(`/api/v1/admin/analytics/global-summary${query}`),
+          http.get<RevenueTrendsResponse>(`/api/v1/admin/analytics/revenue-trends${query}`),
+          http.get<TopArtistsResponse>("/api/v1/admin/analytics/top-artists"),
+          http.get<MetricsResponse>("/api/v1/admin/analytics/metrics"),
+        ]);
 
-      const [g, r, a, m] = await Promise.all([
-        http.get<GlobalSummary>(
-          `/api/v1/admin/analytics/global-summary${dateParams}`
-        ),
-        http.get<RevenueTrendsResponse>(
-          `/api/v1/admin/analytics/revenue-trends${dateParams}`
-        ),
-        http.get<TopArtistsResponse>("/api/v1/admin/analytics/top-artists"),
-        http.get<any>("/api/v1/admin/analytics/metrics"),
-      ]);
-
-      setGlobal(g.data);
-      setRevenue((r.data?.data ?? []) as SeriesPoint[]);
-      setTopArtists((a.data?.items ?? []) as TopArtist[]);
-      setSubMetrics(m.data?.metrics);
-    } catch (e: any) {
-      const status = e?.response?.status;
-      if (status === 401 || status === 403) {
+      setSummary(summaryResponse.data);
+      setRevenue(Array.isArray(revenueResponse.data?.data) ? revenueResponse.data.data : []);
+      setTopArtists(Array.isArray(artistsResponse.data?.items) ? artistsResponse.data.items : []);
+      setMetrics(metricsResponse.data?.metrics ?? null);
+    } catch (requestError: any) {
+      const status = Number(requestError?.response?.status || 0);
+      if (status === 401) {
         localStorage.removeItem("adminToken");
         navigate("/admin/login", { replace: true });
         return;
       }
+      if (status === 403) {
+        setError("Your authenticated account is not authorized to view platform analytics.");
+      } else {
+        const correlation = requestError?.response?.data?.correlationId;
+        setError(
+          correlation
+            ? `Analytics could not be loaded. Reference: ${correlation}`
+            : "Analytics could not be loaded. Please retry."
+        );
+      }
     } finally {
       setLoading(false);
     }
-  }, [navigate, startDate, endDate]);
+  }, [endDate, navigate, startDate]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    void load();
+  }, [load]);
 
-  const totalRevenue = global?.totalRevenue ?? 0;
-  const platformFee = global?.platformFee ?? totalRevenue * 0.1;
-  const artistPayouts = global?.artistPayouts ?? totalRevenue * 0.9;
-
-  const revenueChartData = revenue.map((p) => ({
-    name: p.date.slice(5),
-    value: p.value,
+  const chartData = revenue.map((point) => ({
+    date: point.date.slice(5),
+    revenue: Number(point.value) || 0,
   }));
-
-  const stats = [
-    {
-      title: "Total Revenue",
-      value: loading ? "..." : formatCurrency(totalRevenue),
-      icon: DollarSign,
-      trend: "up" as const,
-      trendValue: "12.5%",
-      color: "orange" as const,
-      subtitle: `${formatCompact(global?.totalActiveUsers ?? 0)} active users`,
-    },
-    {
-      title: "Total Artists",
-      value: loading ? "..." : formatCompact(global?.totalArtists ?? 0),
-      icon: Users,
-      trend: "up" as const,
-      trendValue: "8.2%",
-      color: "purple" as const,
-    },
-    {
-      title: "Total Fans",
-      value: loading ? "..." : formatCompact(global?.totalFans ?? 0),
-      icon: Users,
-      trend: "up" as const,
-      trendValue: "5.7%",
-      color: "green" as const,
-    },
-    {
-      title: "Conversion Rate",
-      value: loading ? "..." : subMetrics?.conversionRate || "0%",
-      icon: TrendingUp,
-      trend: "up" as const,
-      trendValue: "3.1%",
-      color: "blue" as const,
-      subtitle: "Subscribers vs Total Fans",
-    },
-  ];
 
   return (
     <PageWrapper
       title="Analytics"
-      subtitle="Track your platform's performance metrics">
-      {/* Date Range Selector */}
-      <div className="flex flex-wrap items-center gap-3 mb-8">
-        <div className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white/5">
-          <Calendar size={16} className="text-[#8D7B77]" />
+      subtitle="Canonical platform revenue and trusted engagement metrics">
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-[#B8A6A1]">
+          <Calendar size={16} />
           <input
             type="date"
             value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-            className="bg-transparent text-white text-sm outline-none cursor-pointer"
+            onChange={(event) => setStartDate(event.target.value)}
+            className="bg-transparent text-white outline-none"
             style={{ colorScheme: "dark" }}
           />
-        </div>
-        <span className="text-[#8D7B77]">to</span>
-        <div className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white/5">
-          <Calendar size={16} className="text-[#8D7B77]" />
+        </label>
+        <span className="text-sm text-[#8D7B77]">to</span>
+        <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-[#B8A6A1]">
+          <Calendar size={16} />
           <input
             type="date"
             value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-            className="bg-transparent text-white text-sm outline-none cursor-pointer"
+            onChange={(event) => setEndDate(event.target.value)}
+            className="bg-transparent text-white outline-none"
             style={{ colorScheme: "dark" }}
           />
-        </div>
+        </label>
         <button
-          onClick={fetchData}
+          type="button"
+          onClick={() => void load()}
           disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-white text-sm font-medium hover:bg-secondary transition-all disabled:opacity-50">
+          className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
           <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-          Apply
+          Refresh
         </button>
         <button
+          type="button"
           onClick={() => {
-            const defaultRange = getDefaultDateRange();
-            setStartDate(formatDateForInput(defaultRange.start));
-            setEndDate(formatDateForInput(defaultRange.end));
+            const range = defaultRange();
+            setStartDate(range.start);
+            setEndDate(range.end);
           }}
-          className="px-4 py-2 rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white hover:bg-white/10 transition-all">
-          Reset
+          className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-[#B8A6A1] hover:text-white">
+          Last 30 days
         </button>
         <button
+          type="button"
           onClick={() => {
             setStartDate("");
             setEndDate("");
           }}
-          className="px-4 py-2 rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white hover:bg-white/10 transition-all">
-          All Time
+          className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-[#B8A6A1] hover:text-white">
+          All time
         </button>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        {stats.map((stat, index) => (
-          <StatCard key={index} {...stat} />
-        ))}
+      {error && (
+        <div className="mb-6 flex items-start justify-between gap-4 rounded-2xl border border-red-400/20 bg-red-500/10 p-5">
+          <div className="flex gap-3">
+            <AlertCircle className="mt-0.5 h-5 w-5 text-red-300" />
+            <div>
+              <p className="font-medium text-red-100">Analytics unavailable</p>
+              <p className="mt-1 text-sm text-red-200/80">{error}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="rounded-lg border border-red-300/20 px-3 py-1.5 text-sm text-red-100">
+            Retry
+          </button>
+        </div>
+      )}
+
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          label="Captured Revenue"
+          value={loading ? "…" : formatCurrency(summary?.totalRevenue ?? 0)}
+          detail="Payment ledger only"
+          icon={<DollarSign size={20} />}
+        />
+        <MetricCard
+          label="Artists"
+          value={loading ? "…" : formatNumber(summary?.totalArtists ?? 0)}
+          detail="Active platform accounts"
+          icon={<Music size={20} />}
+        />
+        <MetricCard
+          label="Fans"
+          value={loading ? "…" : formatNumber(summary?.totalFans ?? 0)}
+          detail={`${formatNumber(summary?.totalActiveUsers ?? 0)} active users`}
+          icon={<Users size={20} />}
+        />
+        <MetricCard
+          label="Conversion"
+          value={loading ? "…" : metrics?.conversionRate ?? "0%"}
+          detail="Active subscribers vs fans"
+          icon={<TrendingUp size={20} />}
+        />
       </div>
 
-      {/* Revenue Chart */}
-      <div className="grid grid-cols-1 gap-6 mb-6">
-        <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-primary/10">
-                <LineChartIcon size={20} className="text-primary" />
-              </div>
-              <div>
-                <h3 className="text-sm font-medium text-[#8D7B77]">
-                  Revenue Growth
-                </h3>
-                <p className="text-2xl font-bold text-white mt-0.5">
-                  {loading
-                    ? "..."
-                    : formatCurrency(
-                        revenue.reduce((acc, curr) => acc + curr.value, 0)
-                      )}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-sm text-[#8D7B77]">
-              <Clock size={14} />
-              <span>Last {revenue.length} days</span>
-            </div>
+      <div className="mb-6 rounded-2xl border border-white/10 bg-surface p-6">
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-white">Revenue trend</h3>
+            <p className="mt-1 text-sm text-[#8D7B77]">
+              Successful payment-ledger entries; analytics events do not affect financial totals.
+            </p>
           </div>
-
-          <div className="h-[280px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart
-                data={revenueChartData}
-                margin={{ top: 5, right: 5, left: -5, bottom: 5 }}>
-                <CartesianGrid
-                  stroke="rgba(255,255,255,0.03)"
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="name"
-                  tick={{ fill: "#8D7B77", fontSize: 11 }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <YAxis
-                  tick={{ fill: "#8D7B77", fontSize: 11 }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: "var(--color-surface)",
-                    border: "1px solid rgba(255,255,255,0.05)",
-                    borderRadius: "12px",
-                    padding: "12px",
-                  }}
-                  labelStyle={{ color: "#8D7B77" }}
-                  itemStyle={{ color: "#FFFFFF" }}
-                  formatter={(value: any) => formatCurrency(Number(value))}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  stroke="var(--color-primary)"
-                  strokeWidth={2.5}
-                  dot={{ r: 3, fill: "var(--color-primary)", strokeWidth: 0 }}
-                  activeDot={{ r: 6, fill: "var(--color-primary)", strokeWidth: 0 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="mt-4 flex items-center gap-6 text-sm">
-            <div>
-              <span className="text-[#8D7B77]">Artist Payouts: </span>
-              <span className="text-white font-medium">
-                {loading ? "..." : formatCurrency(artistPayouts)}
-              </span>
-            </div>
-            <div>
-              <span className="text-[#8D7B77]">Platform Fee: </span>
-              <span className="text-white font-medium">
-                {loading ? "..." : formatCurrency(platformFee)}
-              </span>
-            </div>
-          </div>
+          <Activity className="text-primary" size={20} />
+        </div>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+              <XAxis dataKey="date" tick={{ fill: "#8D7B77", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: "#8D7B77", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <Tooltip
+                contentStyle={{
+                  background: "#171717",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 12,
+                }}
+                formatter={(value: number) => formatCurrency(value)}
+              />
+              <Line type="monotone" dataKey="revenue" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
         </div>
       </div>
 
-      {/* Top Artists Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Top Performing Artists */}
-        <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-purple-500/10">
-                <Crown size={20} className="text-purple-400" />
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="rounded-2xl border border-white/10 bg-surface p-6">
+          <h3 className="font-semibold text-white">Popular artists</h3>
+          <p className="mt-1 text-sm text-[#8D7B77]">Trusted plays plus active subscribers.</p>
+          <div className="mt-5 space-y-3">
+            {!loading && topArtists.length === 0 && (
+              <p className="text-sm text-[#8D7B77]">No artist engagement data yet.</p>
+            )}
+            {topArtists.map((artist) => (
+              <div key={artist.artistId} className="flex items-center justify-between rounded-xl border border-white/5 bg-white/[0.03] p-4">
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-white">{artist.name || `Artist #${artist.artistId}`}</p>
+                  <p className="mt-1 text-xs text-[#8D7B77]">{formatNumber(artist.subscribers)} subscribers</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-semibold text-primary">{formatNumber(artist.plays)}</p>
+                  <p className="text-xs text-[#8D7B77]">plays</p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-sm font-medium text-[#8D7B77]">
-                  Top Performing Artists
-                </h3>
-                <p className="text-lg font-bold text-white mt-0.5">
-                  {loading
-                    ? "..."
-                    : `${subMetrics?.revenuePerArtist?.length || 0} artists`}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-sm text-[#8D7B77]">
-              <TrendingUp size={14} />
-              <span>By Revenue</span>
-            </div>
+            ))}
           </div>
-
-          {loading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/5">
-                  <div className="flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-full bg-white/5 animate-pulse" />
-                    <div className="h-4 w-32 bg-white/5 animate-pulse rounded" />
-                  </div>
-                  <div className="h-4 w-20 bg-white/5 animate-pulse rounded" />
-                </div>
-              ))}
-            </div>
-          ) : subMetrics?.revenuePerArtist?.length ? (
-            <div className="space-y-2">
-              {subMetrics.revenuePerArtist.map((a: any, i: number) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 transition-all">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className={`w-1.5 h-8 rounded-full ${
-                        i === 0
-                          ? "bg-primary"
-                          : i === 1
-                          ? "bg-purple-400"
-                          : "bg-blue-400"
-                      }`}
-                    />
-                    <span className="text-sm text-white truncate">
-                      {a.name}
-                    </span>
-                  </div>
-                  <span className="text-sm font-medium text-primary">
-                    {formatCurrency(a.revenue)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-8">
-              <p className="text-sm text-[#8D7B77]">
-                No revenue data available
-              </p>
-            </div>
-          )}
         </div>
 
-        {/* Popular Artists (Activity) */}
-        <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-blue-500/10">
-                <Activity size={20} className="text-blue-400" />
+        <div className="rounded-2xl border border-white/10 bg-surface p-6">
+          <h3 className="font-semibold text-white">Revenue by artist</h3>
+          <p className="mt-1 text-sm text-[#8D7B77]">Gross captured artist-subscription payments.</p>
+          <div className="mt-5 space-y-3">
+            {!loading && !(metrics?.revenuePerArtist?.length) && (
+              <p className="text-sm text-[#8D7B77]">No captured artist revenue in this view.</p>
+            )}
+            {metrics?.revenuePerArtist?.map((artist, index) => (
+              <div key={`${artist.name || "artist"}-${index}`} className="flex items-center justify-between rounded-xl border border-white/5 bg-white/[0.03] p-4">
+                <span className="truncate text-sm text-white">{artist.name || "Unnamed artist"}</span>
+                <span className="font-medium text-primary">{formatCurrency(artist.revenue)}</span>
               </div>
-              <div>
-                <h3 className="text-sm font-medium text-[#8D7B77]">
-                  Popular Artists
-                </h3>
-                <p className="text-lg font-bold text-white mt-0.5">
-                  {loading ? "..." : `${topArtists.length} artists`}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-sm text-[#8D7B77]">
-              <Music size={14} />
-              <span>Subscribers + Plays</span>
-            </div>
+            ))}
           </div>
-
-          {loading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/5">
-                  <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-white/5 animate-pulse" />
-                    <div>
-                      <div className="h-4 w-32 bg-white/5 animate-pulse rounded" />
-                      <div className="h-3 w-20 bg-white/5 animate-pulse rounded mt-1" />
-                    </div>
-                  </div>
-                  <div className="h-4 w-16 bg-white/5 animate-pulse rounded" />
-                </div>
-              ))}
-            </div>
-          ) : topArtists.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm text-[#8D7B77]">No data available</p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {topArtists.map((a) => (
-                <div
-                  key={a.artistId}
-                  className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 transition-all">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="h-10 w-10 rounded-full bg-black/30 border border-white/10 overflow-hidden shrink-0">
-                      {a.profileImageUrl ? (
-                        <img
-                          src={a.profileImageUrl}
-                          alt={a.name ?? String(a.artistId)}
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <div className="h-full w-full flex items-center justify-center text-[#8D7B77]">
-                          <User size={16} />
-                        </div>
-                      )}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-sm text-white truncate">
-                        {a.name ?? "Unnamed Artist"}
-                      </div>
-                      <div className="text-xs text-[#8D7B77]">
-                        {formatCompact(a.subscribers)} subscribers
-                      </div>
-                    </div>
-                  </div>
-                  <div className="text-sm text-blue-400">
-                    {formatCompact(a.plays)} plays
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </PageWrapper>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  detail,
+  icon,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-surface p-5">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-[#8D7B77]">{label}</p>
+        <div className="rounded-xl bg-primary/10 p-2 text-primary">{icon}</div>
+      </div>
+      <p className="mt-3 text-2xl font-bold text-white">{value}</p>
+      <p className="mt-1 text-xs text-[#8D7B77]">{detail}</p>
+    </div>
   );
 }
