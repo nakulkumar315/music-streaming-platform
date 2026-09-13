@@ -56,7 +56,12 @@ export async function requestPlaybackAccess(
   const userId = positiveInteger(input.userId);
   const correlationId = input.correlationId || "-";
   if (!contentId) throw new MediaNotFoundException(String(input.contentId));
-  if (!userId) throw new MediaAccessDeniedException("Authentication required");
+  if (!userId) {
+    throw new MediaAccessDeniedException(
+      "Authentication required",
+      "AUTHENTICATION_REQUIRED"
+    );
+  }
 
   const content = await getContentForAccess(contentId);
   if (!content) throw new MediaNotFoundException(contentId);
@@ -79,7 +84,10 @@ export async function requestPlaybackAccess(
 
   const visibility = normalizeVisibilityForPlayback(content.visibility || "PROTECTED");
   if (!visibility) {
-    throw new MediaAccessDeniedException("Content visibility is invalid");
+    throw new MediaAccessDeniedException(
+      "Content visibility is invalid",
+      "INVALID_VISIBILITY"
+    );
   }
 
   const entitlement = await checkMediaEntitlement(
@@ -89,7 +97,10 @@ export async function requestPlaybackAccess(
     Boolean(content.subscription_required)
   );
   if (!entitlement.allowed) {
-    throw new MediaAccessDeniedException(entitlement.reason || "Playback access denied");
+    throw new MediaAccessDeniedException(
+      entitlement.reason || "Playback access denied",
+      entitlement.code || "ACCESS_DENIED"
+    );
   }
 
   const requestedKind =
