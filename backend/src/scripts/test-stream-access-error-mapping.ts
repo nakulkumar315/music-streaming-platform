@@ -44,6 +44,12 @@ function testTypedEntitlementDenialsArePreserved() {
   );
   assert.equal(limit.status, 429);
   assert.equal(limit.code, "PLAYBACK_SESSION_LIMIT");
+
+  const leaseExpired = mapStreamAccessError(
+    new MediaAccessDeniedException("Playback session expired", "PLAYBACK_SESSION_EXPIRED")
+  );
+  assert.equal(leaseExpired.status, 409);
+  assert.equal(leaseExpired.code, "PLAYBACK_SESSION_EXPIRED");
 }
 
 function testPlaybackCredentialFailuresAreTyped() {
