@@ -7,13 +7,15 @@
  */
 
 import { pool } from "../../common/db";
-import { hasActiveArtistEntitlement } from "./artist-entitlement.service";
+import { getArtistEntitlementState } from "./artist-entitlement.service";
+import type { MediaAccessDeniedCode } from "../exceptions/media.exception";
 
 export type VisibilityType = "PUBLIC" | "PROTECTED" | "PRIVATE_INTERNAL";
 
 export interface MediaAccessCheckResult {
   allowed: boolean;
   reason?: string;
+  code?: MediaAccessDeniedCode;
   tier?: "FREE" | "ARTIST";
 }
 
@@ -64,25 +66,65 @@ export async function checkMediaEntitlement(
   subscriptionRequired: boolean
 ): Promise<MediaAccessCheckResult> {
   if (!userId) {
-    return { allowed: false, reason: "Authentication required", tier: "FREE" };
+    return {
+      allowed: false,
+      reason: "Authentication required",
+      code: "AUTHENTICATION_REQUIRED",
+      tier: "FREE",
+    };
   }
 
   if (visibility === "PRIVATE_INTERNAL") {
-    return { allowed: false, reason: "Content is internal only", tier: "FREE" };
+    return {
+      allowed: false,
+      reason: "Content is internal only",
+      code: "CONTENT_INTERNAL",
+      tier: "FREE",
+    };
   }
 
   if (subscriptionRequired) {
-    const entitled = await hasActiveArtistEntitlement(userId, artistId);
-    return entitled
-      ? { allowed: true, tier: "ARTIST" }
-      : { allowed: false, reason: "Active artist subscription required", tier: "FREE" };
+    const entitlementState = await getArtistEntitlementState(userId, artistId);
+    if (entitlementState === "ACTIVE") {
+      return { allowed: true, tier: "ARTIST" };
+    }
+
+    if (entitlementState === "EXPIRED") {
+      return {
+        allowed: false,
+        reason: "Artist subscription has expired",
+        code: "SUBSCRIPTION_EXPIRED",
+        tier: "FREE",
+      };
+    }
+
+    if (entitlementState === "INACTIVE") {
+      return {
+        allowed: false,
+        reason: "Artist subscription is not active",
+        code: "SUBSCRIPTION_INACTIVE",
+        tier: "FREE",
+      };
+    }
+
+    return {
+      allowed: false,
+      reason: "Active artist subscription required",
+      code: "SUBSCRIPTION_REQUIRED",
+      tier: "FREE",
+    };
   }
 
   if (visibility === "PUBLIC" || visibility === "PROTECTED") {
     return { allowed: true, tier: "FREE" };
   }
 
-  return { allowed: false, reason: "Unknown visibility", tier: "FREE" };
+  return {
+    allowed: false,
+    reason: "Unknown visibility",
+    code: "INVALID_VISIBILITY",
+    tier: "FREE",
+  };
 }
 
 export interface ContentForAccess {
