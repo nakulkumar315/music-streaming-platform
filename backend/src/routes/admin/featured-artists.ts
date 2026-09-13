@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "../../common/db";
 import { invalidateArtistCache, invalidateCachePattern } from "../../common/cache";
+import { canonicalPublicUrl } from "../../common/http/public-url";
 import { AuditService } from "../../shared/audit/audit.service";
 
 const router = Router();
@@ -8,14 +9,6 @@ const router = Router();
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-function absoluteUrl(req: any, value: unknown): string | null {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-  if (/^https?:\/\//i.test(raw)) return raw;
-  const base = `${req.protocol}://${req.get("host")}`;
-  return raw.startsWith("/") ? `${base}${raw}` : `${base}/${raw}`;
 }
 
 async function invalidateFeatured() {
@@ -48,7 +41,7 @@ router.get("/", async (req: any, res: any) => {
          FROM featured_artists fa
          JOIN users u ON u.id = fa.artist_id
         WHERE UPPER(u.role) = 'ARTIST'
-        ORDER BY fa.created_at DESC`
+        ORDER BY fa.created_at DESC, fa.id DESC`
     );
 
     return res.json({
@@ -57,7 +50,7 @@ router.get("/", async (req: any, res: any) => {
         id: Number(row.id),
         artistId: Number(row.artist_id),
         name: row.artist_name || String(row.email).split("@")[0],
-        avatar: absoluteUrl(req, row.profile_image_url),
+        avatar: canonicalPublicUrl(row.profile_image_url),
         isActive: Boolean(row.is_active),
         eligible:
           !Boolean(row.is_deleted) &&
@@ -70,7 +63,7 @@ router.get("/", async (req: any, res: any) => {
       correlationId,
     });
   } catch {
-    return res.status(500).json({ success: false, message: "Failed to fetch featured artists", correlationId });
+    return res.status(500).json({ success: false, code: "FEATURED_ARTISTS_FETCH_FAILED", message: "Failed to fetch featured artists", correlationId });
   }
 });
 
@@ -78,7 +71,7 @@ router.post("/", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const artistId = positiveInteger(req.body?.artistId);
   if (!artistId) {
-    return res.status(400).json({ success: false, message: "artistId is required", correlationId });
+    return res.status(400).json({ success: false, code: "INVALID_ARTIST_ID", message: "artistId is required", correlationId });
   }
 
   const client = await pool.connect();
@@ -135,7 +128,7 @@ router.post("/", async (req: any, res: any) => {
         id: Number(row.id),
         artistId,
         name: artist.name || String(artist.email).split("@")[0],
-        avatar: absoluteUrl(req, artist.profile_image_url),
+        avatar: canonicalPublicUrl(artist.profile_image_url),
         isActive: true,
         createdAt: row.created_at,
       },
@@ -144,9 +137,9 @@ router.post("/", async (req: any, res: any) => {
   } catch (error: any) {
     await client.query("ROLLBACK").catch(() => undefined);
     if (error?.code === "23505") {
-      return res.status(409).json({ success: false, message: "Artist is already featured", correlationId });
+      return res.status(409).json({ success: false, code: "FEATURED_ARTIST_EXISTS", message: "Artist is already featured", correlationId });
     }
-    return res.status(500).json({ success: false, message: "Failed to feature artist", correlationId });
+    return res.status(500).json({ success: false, code: "FEATURED_ARTIST_CREATE_FAILED", message: "Failed to feature artist", correlationId });
   } finally {
     client.release();
   }
@@ -156,7 +149,7 @@ router.patch("/:id", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const featuredId = positiveInteger(req.params?.id);
   if (!featuredId || typeof req.body?.isActive !== "boolean") {
-    return res.status(400).json({ success: false, message: "Valid id and isActive are required", correlationId });
+    return res.status(400).json({ success: false, code: "INVALID_FEATURED_ARTIST_UPDATE", message: "Valid id and isActive are required", correlationId });
   }
 
   try {
@@ -192,7 +185,7 @@ router.patch("/:id", async (req: any, res: any) => {
       [featuredId, req.body.isActive]
     );
     const row = result.rows[0];
-    if (!row) return res.status(404).json({ success: false, message: "Featured artist not found", correlationId });
+    if (!row) return res.status(404).json({ success: false, code: "FEATURED_ARTIST_NOT_FOUND", message: "Featured artist not found", correlationId });
 
     await invalidateFeatured();
     audit(req, req.body.isActive ? "featured_artist.enabled" : "featured_artist.disabled", String(featuredId), {
@@ -200,14 +193,14 @@ router.patch("/:id", async (req: any, res: any) => {
     });
     return res.json({ success: true, featured: row, correlationId });
   } catch {
-    return res.status(500).json({ success: false, message: "Failed to update featured artist", correlationId });
+    return res.status(500).json({ success: false, code: "FEATURED_ARTIST_UPDATE_FAILED", message: "Failed to update featured artist", correlationId });
   }
 });
 
 router.delete("/:id", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const featuredId = positiveInteger(req.params?.id);
-  if (!featuredId) return res.status(400).json({ success: false, message: "Invalid featured artist id", correlationId });
+  if (!featuredId) return res.status(400).json({ success: false, code: "INVALID_FEATURED_ARTIST_ID", message: "Invalid featured artist id", correlationId });
 
   try {
     const result = await pool.query(
@@ -215,13 +208,13 @@ router.delete("/:id", async (req: any, res: any) => {
       [featuredId]
     );
     const row = result.rows[0];
-    if (!row) return res.status(404).json({ success: false, message: "Featured artist not found", correlationId });
+    if (!row) return res.status(404).json({ success: false, code: "FEATURED_ARTIST_NOT_FOUND", message: "Featured artist not found", correlationId });
 
     await invalidateFeatured();
     audit(req, "featured_artist.removed", String(featuredId), { artist_id: Number(row.artist_id) });
     return res.json({ success: true, correlationId });
   } catch {
-    return res.status(500).json({ success: false, message: "Failed to remove featured artist", correlationId });
+    return res.status(500).json({ success: false, code: "FEATURED_ARTIST_DELETE_FAILED", message: "Failed to remove featured artist", correlationId });
   }
 });
 

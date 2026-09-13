@@ -2,6 +2,7 @@ import { Response } from "express";
 import Razorpay from "razorpay";
 import { pool } from "../common/db";
 import { logger } from "../common/logger";
+import { validateEnv } from "../config/env.validation";
 import { AuditService } from "../shared/audit/audit.service";
 import { NotificationService } from "../shared/notifications/notification.service";
 import {
@@ -17,19 +18,20 @@ import {
   verifyWebhookSignature,
 } from "../modules/payment/payment.security";
 
-const getRazorpayClient = () => {
-  const keyId = String(process.env.RAZORPAY_KEY_ID ?? "").trim();
-  const keySecret = String(process.env.RAZORPAY_KEY_SECRET ?? "").trim();
-
-  if (!keyId || !keySecret) {
-    throw new PaymentDomainError(
-      500,
-      "PAYMENT_CONFIGURATION_ERROR",
-      "Payment gateway is not configured"
-    );
+function paymentRuntime() {
+  const runtime = validateEnv();
+  if (!runtime.subscriptionEnabled) {
+    throw new PaymentDomainError(503, "PAYMENTS_DISABLED", "Subscription payments are currently disabled");
   }
+  return runtime;
+}
 
-  return new Razorpay({ key_id: keyId, key_secret: keySecret });
+const getRazorpayClient = () => {
+  const runtime = paymentRuntime();
+  return new Razorpay({
+    key_id: runtime.razorpayKeyId,
+    key_secret: runtime.razorpayKeySecret,
+  });
 };
 
 function sendDomainError(res: Response, error: unknown, fallback: string) {
@@ -67,6 +69,7 @@ export const createSubscriptionPurchase = async (req: any, res: Response) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
+    const runtime = paymentRuntime();
     const razorpay = getRazorpayClient();
     const purchase = await startArtistSubscriptionPurchase(
       userId,
@@ -117,7 +120,7 @@ export const createSubscriptionPurchase = async (req: any, res: Response) => {
         id: purchase.orderId,
         amount: purchase.amountPaise,
         currency: purchase.currency,
-        key_id: String(process.env.RAZORPAY_KEY_ID ?? ""),
+        key_id: runtime.razorpayKeyId,
       },
       reused: purchase.reused,
     });
@@ -244,8 +247,8 @@ export const razorpayWebhook = async (req: any, res: Response) => {
       });
     }
 
-    const secret = String(process.env.RAZORPAY_WEBHOOK_SECRET ?? "").trim();
-    if (!verifyWebhookSignature(rawBody, signature, secret)) {
+    const runtime = paymentRuntime();
+    if (!verifyWebhookSignature(rawBody, signature, runtime.razorpayWebhookSecret)) {
       logger.warn(
         {
           remoteIP: req.ip,
@@ -457,8 +460,9 @@ export const razorpayWebhook = async (req: any, res: Response) => {
       },
     });
 
-    if (error instanceof PaymentDomainError && error.statusCode === 400) {
-      return res.status(400).send(error.message);
+    if (error instanceof PaymentDomainError) {
+      if (error.statusCode === 400) return res.status(400).send(error.message);
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
     }
 
     return res.status(500).send("Internal Server Error");

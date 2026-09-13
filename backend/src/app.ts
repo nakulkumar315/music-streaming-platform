@@ -1,17 +1,14 @@
-import "dotenv/config";
 import compression from "compression";
-import express from "express";
-import { Server } from "http";
+import express, { type RequestHandler } from "express";
 import { v4 as uuidv4 } from "uuid";
 
-import { pool, poolRead } from "./common/db";
-import { assertDatabaseSchemaReady } from "./common/db/schema-readiness";
+import { pool } from "./common/db";
 import { redis } from "./common/redis";
 import { logger, httpLogger } from "./common/logger";
-import { initSentry, captureError } from "./common/sentry";
+import { captureError } from "./common/sentry";
 import { globalLimiter } from "./common/security/rateLimit";
 import { requireAuth, requireVerifiedArtist } from "./common/auth/requireAuth";
-import { validateEnv } from "./config/env.validation";
+import type { EnvValidationResult } from "./config/env.validation";
 import fanRoutes from "./routes/fan";
 import artistRoutes from "./routes/artist";
 import adminRoutes from "./routes/admin";
@@ -28,341 +25,186 @@ import {
   artistAssetUploadRouter,
   artistPublicAssetRouter,
 } from "./modules/artist/artist-assets.routes";
-import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
-import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
-import { NotificationService } from "./shared/notifications/notification.service";
-import { WinBackService } from "./shared/subscriptions/win-back.service";
 
-initSentry();
+function corsMiddleware(runtime: EnvValidationResult): RequestHandler {
+  const allowAll = runtime.corsAllowedOrigins.includes("*");
+  const allowed = new Set(runtime.corsAllowedOrigins);
 
-const app = express();
-const PORT = Number(process.env.PORT || 8000);
+  return (req: any, res: any, next: any) => {
+    const origin = String(req.headers.origin || "").replace(/\/$/, "");
+    const originAllowed = !origin || allowAll || allowed.has(origin);
 
-if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) {
-  throw new Error("PORT must be a valid TCP port");
+    if (origin && originAllowed) {
+      res.setHeader("Access-Control-Allow-Origin", allowAll ? "*" : origin);
+      if (!allowAll) res.append("Vary", "Origin");
+    }
+
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Auth-Token, X-Correlation-Id, Cache-Control, Pragma, Expires"
+    );
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+
+    if (req.method === "OPTIONS") {
+      if (!originAllowed) {
+        return res.status(403).json({ success: false, code: "CORS_ORIGIN_FORBIDDEN", message: "Origin is not allowed" });
+      }
+      return res.sendStatus(204);
+    }
+
+    return next();
+  };
 }
 
-app.set("trust proxy", 1);
+export function createApp(runtime: EnvValidationResult) {
+  const app = express();
+  app.set("trust proxy", runtime.trustProxyHops);
+  if (runtime.nodeEnv !== "production") app.set("etag", false);
 
-process.on("uncaughtException", (error) => {
-  logger.fatal({ error }, "[Process] Uncaught exception");
-  process.exit(1);
-});
+  app.use(corsMiddleware(runtime));
 
-process.on("unhandledRejection", (error) => {
-  logger.fatal({ error }, "[Process] Unhandled promise rejection");
-  process.exit(1);
-});
+  app.use((req: any, res, next) => {
+    const incomingCorrelationId =
+      (req.headers["x-correlation-id"] as string | undefined) ||
+      (req.headers["x-request-id"] as string | undefined);
+    const correlationId = incomingCorrelationId || uuidv4();
+    req.correlationId = correlationId;
+    res.setHeader("X-Correlation-Id", correlationId);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    next();
+  });
 
-app.get("/health", async (_req, res) => {
-  const startedAt = Date.now();
-  const checks: Record<string, unknown> = { db: "unknown", redis: "unknown" };
-
-  try {
-    await pool.query("SELECT 1");
-    checks.db = "ok";
-  } catch {
-    checks.db = "error";
-  }
-
-  const redisConfigured = Boolean(
-    process.env.REDIS_URL &&
-      process.env.REDIS_URL !== "" &&
-      process.env.REDIS_URL !== "disabled"
+  // Liveness reveals only process state. It intentionally does not query or
+  // identify internal dependencies.
+  app.get("/health", (_req, res) =>
+    res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
+  );
+  app.get("/health/live", (_req, res) =>
+    res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
   );
 
-  if (!redisConfigured) {
-    checks.redis = "disabled";
-  } else {
+  // Readiness checks only critical serving state. Redis is an optional cache;
+  // when configured but unavailable it is reported as degraded without making
+  // DB-backed request handling falsely unavailable.
+  app.get("/health/ready", async (_req, res) => {
+    let database: "ok" | "error" = "error";
+    let cache: "disabled" | "ok" | "degraded" = runtime.redisUrl ? "degraded" : "disabled";
+
     try {
-      checks.redis = (await redis.ping()) === "PONG" ? "ok" : "degraded";
+      await pool.query("SELECT 1");
+      database = "ok";
     } catch {
-      checks.redis = "error";
+      database = "error";
     }
-  }
 
-  const healthy = checks.db === "ok" && ["ok", "disabled"].includes(String(checks.redis));
-  return res.status(healthy ? 200 : 503).json({
-    status: healthy ? "ok" : "degraded",
-    uptime: Math.floor(process.uptime()),
-    responseTimeMs: Date.now() - startedAt,
-    checks,
+    if (runtime.redisUrl && redis) {
+      try {
+        cache = (await redis.ping()) === "PONG" ? "ok" : "degraded";
+      } catch {
+        cache = "degraded";
+      }
+    }
+
+    const ready = database === "ok";
+    return res.status(ready ? 200 : 503).json({
+      status: ready ? "ready" : "not_ready",
+      dependencies: { database, cache },
+    });
   });
-});
 
-app.get("/health/db", async (_req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    return res.json({ status: "ok" });
-  } catch {
-    return res.status(503).json({ status: "error" });
-  }
-});
-
-app.get("/health/redis", async (_req, res) => {
-  const redisConfigured = Boolean(
-    process.env.REDIS_URL &&
-      process.env.REDIS_URL !== "" &&
-      process.env.REDIS_URL !== "disabled"
+  // Provider signatures cover exact raw bytes. Webhooks intentionally bypass
+  // generic rate limiting; signature verification + idempotency are their abuse boundary.
+  app.post(
+    "/api/v1/payments/webhook",
+    express.raw({ type: "application/json", limit: "2mb" }),
+    (req, res) => razorpayWebhook(req as any, res)
   );
-  if (!redisConfigured) return res.json({ status: "disabled" });
-
-  try {
-    const pong = await redis.ping();
-    if (pong !== "PONG") throw new Error("Unexpected Redis PING response");
-    return res.json({ status: "ok" });
-  } catch {
-    return res.status(503).json({ status: "error" });
-  }
-});
-
-if (process.env.NODE_ENV !== "production") app.set("etag", false);
-
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Auth-Token, Cache-Control, Pragma, Expires"
+  app.post(
+    "/api/v1/media/webhook",
+    express.raw({ type: "application/json", limit: "2mb" }),
+    (req, res) => handleMediaWebhook(req as any, res)
   );
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
 
-app.use((req: any, res, next) => {
-  const incomingCorrelationId =
-    (req.headers["x-correlation-id"] as string | undefined) ||
-    (req.headers["x-request-id"] as string | undefined);
-  const correlationId = incomingCorrelationId || uuidv4();
-  req.correlationId = correlationId;
-  res.setHeader("X-Correlation-Id", correlationId);
-  next();
-});
+  app.use(compression());
+  app.use(express.json({ limit: "2mb" }));
+  app.use(globalLimiter);
+  app.use(httpLogger);
 
-// Provider signatures cover the exact raw bytes. These handlers must precede
-// express.json(), and they parse payloads only after successful verification.
-app.post(
-  "/api/v1/payments/webhook",
-  express.raw({ type: "application/json", limit: "2mb" }),
-  (req, res) => razorpayWebhook(req as any, res)
-);
-app.post(
-  "/api/v1/media/webhook",
-  express.raw({ type: "application/json", limit: "2mb" }),
-  (req, res) => handleMediaWebhook(req as any, res)
-);
+  app.use("/media/stream", mediaStreamRoutes);
 
-app.use(compression());
-app.use(express.json({ limit: "2mb" }));
-app.use(globalLimiter);
-app.use(httpLogger);
+  app.use("/api/v1/fan", fanRoutes);
+  app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
+  app.use("/api/v1/artist/update-password", artistSecurityRoutes);
+  app.use("/api/v1/artist/uploads", artistAssetUploadRouter);
+  app.use("/api/v1/artist/assets", artistPublicAssetRouter);
 
-// Protected media is delivered only through the canonical guarded stream route.
-// No generic public /uploads static route is mounted.
-app.use("/media/stream", mediaStreamRoutes);
+  app.use(
+    [
+      "/api/v1/artist/dashboard",
+      "/api/v1/artist/pricing",
+      "/api/v1/artist/analytics",
+      "/api/v1/artist/channel-preview",
+    ],
+    requireAuth,
+    requireVerifiedArtist
+  );
 
-app.use("/api/v1/fan", fanRoutes);
-app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
-app.use("/api/v1/artist/update-password", artistSecurityRoutes);
-app.use("/api/v1/artist/uploads", artistAssetUploadRouter);
-app.use("/api/v1/artist/assets", artistPublicAssetRouter);
+  app.use("/api/v1/artist", artistRoutes);
+  app.use("/api/v1/admin", adminRoutes);
+  app.use("/api/v1/auth", authRoutes);
+  app.use("/api/v1/content", contentRoutes);
+  app.use("/api/v1/search", searchRoutes);
+  app.use("/api/v1/media", mediaRoutes);
 
-app.use(
-  [
-    "/api/v1/artist/dashboard",
-    "/api/v1/artist/pricing",
-    "/api/v1/artist/analytics",
-    "/api/v1/artist/channel-preview",
-  ],
-  requireAuth,
-  requireVerifiedArtist
-);
+  app.use((req: any, _res: any, next: any) => {
+    const error: any = new Error("Route not found");
+    error.status = 404;
+    error.code = "ROUTE_NOT_FOUND";
+    error.requestPath = req.originalUrl || req.url;
+    next(error);
+  });
 
-app.use("/api/v1/artist", artistRoutes);
-app.use("/api/v1/admin", adminRoutes);
-app.use("/api/v1/auth", authRoutes);
-app.use("/api/v1/content", contentRoutes);
-app.use("/api/v1/search", searchRoutes);
-app.use("/api/v1/media", mediaRoutes);
+  app.use((error: any, req: any, res: any, next: any) => {
+    const correlationId = req?.correlationId || "-";
+    const rawStatus = Number(error?.status || error?.statusCode || 500);
+    const status = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 500;
+    const code = String(error?.code || (status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR"));
 
-app.use((req: any, _res: any, next: any) => {
-  const error: any = new Error(`Route not found: ${req.method} ${req.originalUrl || req.url}`);
-  error.status = 404;
-  next(error);
-});
+    logger.error(
+      {
+        correlationId,
+        method: req?.method,
+        path: req?.originalUrl || req?.url,
+        statusCode: status,
+        code,
+        message: error?.message || String(error),
+        stack: runtime.nodeEnv !== "production" ? error?.stack : undefined,
+      },
+      "[HTTP] Request failed"
+    );
 
-app.use((error: any, req: any, res: any, next: any) => {
-  const correlationId = req?.correlationId || "-";
-  const status = Number(error?.status || error?.statusCode || 500);
+    if (status >= 500) {
+      captureError(error, {
+        correlationId,
+        method: req?.method,
+        path: req?.originalUrl || req?.url,
+        statusCode: status,
+        code,
+      });
+    }
 
-  logger.error(
-    {
+    if (res.headersSent) return next(error);
+    return res.status(status).json({
+      success: false,
+      code,
+      message:
+        status >= 500 && runtime.nodeEnv === "production"
+          ? "Internal Server Error"
+          : error?.message || "Request failed",
       correlationId,
-      method: req?.method,
-      url: req?.originalUrl || req?.url,
-      statusCode: status,
-      message: error?.message || String(error),
-      stack: process.env.NODE_ENV !== "production" ? error?.stack : undefined,
-    },
-    `[ERROR] ${error?.message || String(error)}`
-  );
-
-  captureError(error, {
-    correlationId,
-    method: req?.method,
-    url: req?.originalUrl || req?.url,
-    statusCode: status,
+    });
   });
 
-  if (res.headersSent) return next(error);
-  return res.status(status).json({
-    success: false,
-    message:
-      status >= 500 && process.env.NODE_ENV === "production"
-        ? "Internal Server Error"
-        : error?.message || "Internal Server Error",
-    correlationId,
-  });
-});
-
-function startSubscriptionSchedulers(): NodeJS.Timeout[] {
-  const timers: NodeJS.Timeout[] = [];
-
-  const sweepExpiredSubscriptions = async () => {
-    try {
-      const result = await pool.query(`
-        UPDATE subscriptions
-        SET status = 'EXPIRED', updated_at = now()
-        WHERE status IN ('ACTIVE', 'GRACE', 'PAST_DUE')
-          AND next_billing_date IS NOT NULL
-          AND next_billing_date < now()
-        RETURNING id, user_id, type, artist_id
-      `);
-
-      for (const row of result.rows) {
-        WinBackService.processChurnedUser(
-          row.id,
-          row.user_id,
-          row.type,
-          row.artist_id
-        ).catch((error) =>
-          logger.error({ error, subscriptionId: row.id }, "[WinBack] Failed")
-        );
-      }
-    } catch (error) {
-      logger.error({ error }, "[Sweeper] Subscription expiry sweep failed");
-    }
-  };
-
-  const notifyExpiringSubscriptions = async () => {
-    try {
-      const result = await pool.query(`
-        SELECT s.user_id, s.artist_id, u.name AS artist_name
-        FROM subscriptions s
-        LEFT JOIN users u ON u.id = s.artist_id
-        WHERE s.type = 'ARTIST'
-          AND s.status = 'ACTIVE'
-          AND s.next_billing_date > now() + interval '47 hours'
-          AND s.next_billing_date <= now() + interval '48 hours'
-      `);
-
-      for (const row of result.rows) {
-        NotificationService.sendToUser({
-          userId: String(row.user_id),
-          title: "Subscription Expiring Soon! ⏳",
-          body: `Your subscription to ${row.artist_name || "your artist"} will expire in 2 days.`,
-          data: { type: "expiry_warning", artistId: row.artist_id },
-        }).catch((error) =>
-          logger.error({ error, userId: row.user_id }, "[Notifier] Expiry warning failed")
-        );
-      }
-    } catch (error) {
-      logger.error({ error }, "[Notifier] Expiry notification scan failed");
-    }
-  };
-
-  const sweepStaleSessions = async () => {
-    try {
-      await pool.query(`
-        DELETE FROM user_sessions
-        WHERE last_active_at < now() - interval '30 days'
-      `);
-    } catch (error) {
-      logger.error({ error }, "[Sweeper] Stale session cleanup failed");
-    }
-  };
-
-  void sweepExpiredSubscriptions();
-  void notifyExpiringSubscriptions();
-  void sweepStaleSessions();
-
-  timers.push(setInterval(() => void sweepExpiredSubscriptions(), 6 * 60 * 60 * 1000));
-  timers.push(setInterval(() => void notifyExpiringSubscriptions(), 60 * 60 * 1000));
-  timers.push(setInterval(() => void sweepStaleSessions(), 24 * 60 * 60 * 1000));
-  return timers;
+  return app;
 }
-
-function listen(): Promise<Server> {
-  return new Promise((resolve, reject) => {
-    const server = app.listen(PORT, () => resolve(server));
-    server.once("error", reject);
-  });
-}
-
-async function bootstrap(): Promise<void> {
-  logger.info({ pid: process.pid, port: PORT }, "[Startup] Booting backend");
-
-  const storageConfig = validateEnv();
-  createStorageProvider();
-  getDeliveryStrategyForProvider(storageConfig.storageProvider);
-
-  const schema = await assertDatabaseSchemaReady();
-  logger.info(
-    { schemaVersion: schema.version, database: schema.database, schema: schema.schema },
-    "[Startup] Database schema verified"
-  );
-
-  const timers = startSubscriptionSchedulers();
-  const server = await listen();
-
-  logger.info(
-    { port: PORT, storageProvider: storageConfig.storageProvider },
-    "[Startup] Server accepting traffic"
-  );
-
-  let shuttingDown = false;
-  const shutdown = async (signal: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    logger.info({ signal }, "[Shutdown] Graceful shutdown started");
-    timers.forEach((timer) => clearInterval(timer));
-
-    const forceExit = setTimeout(() => {
-      logger.error("[Shutdown] Graceful shutdown timed out");
-      process.exit(1);
-    }, 10_000);
-    forceExit.unref();
-
-    try {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await Promise.allSettled([pool.end(), poolRead.end(), redis.quit()]);
-      logger.info("[Shutdown] Resources closed");
-      process.exit(0);
-    } catch (error) {
-      logger.error({ error }, "[Shutdown] Failed to close resources");
-      process.exit(1);
-    }
-  };
-
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-}
-
-if (require.main === module) {
-  bootstrap().catch((error) => {
-    logger.fatal({ error }, "[Startup] Bootstrap failed");
-    process.exit(1);
-  });
-}
-
-export { app, bootstrap };

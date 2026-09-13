@@ -3,7 +3,7 @@
  *
  * Protected audio/video are uploaded as authenticated Cloudinary assets.
  * Artwork/public images are intentionally public. The adapter streams the
- * supplied body directly to Cloudinary and never introduces production test bypasses.
+ * supplied body directly to Cloudinary and never reads raw environment values.
  */
 
 import { v2 as cloudinary } from "cloudinary";
@@ -17,13 +17,13 @@ import type {
   OpenReadStreamResult,
   GetPublicObjectUrlParams,
 } from "../interfaces/storage-types.interface";
-import { StorageProviderNotConfiguredException } from "../../exceptions/storage.exception";
 import { normalizePublicId, isValidPublicId } from "../../utils/cloudinary.utils";
 
-function requiredEnv(key: string): string {
-  const value = String(process.env[key] || "").trim();
-  if (!value) throw new StorageProviderNotConfiguredException(`cloudinary (missing: ${key})`);
-  return value;
+export interface CloudinaryStorageProviderConfig {
+  cloudName: string;
+  apiKey: string;
+  apiSecret: string;
+  webhookUrl: string;
 }
 
 function providerIdFromStorageKey(storageKey: string): string {
@@ -52,7 +52,11 @@ function inferKind(contentType: string | undefined, storageKey: string): "audio"
   throw new Error("Unable to determine Cloudinary media type");
 }
 
-function optionsFor(kind: "audio" | "video" | "thumbnail", publicId: string) {
+function optionsFor(
+  kind: "audio" | "video" | "thumbnail",
+  publicId: string,
+  webhookUrl: string
+) {
   const isThumbnail = kind === "thumbnail";
   const options: Record<string, unknown> = {
     public_id: publicId,
@@ -74,12 +78,6 @@ function optionsFor(kind: "audio" | "video" | "thumbnail", publicId: string) {
       { streaming_profile: "auto", format: "m3u8" },
     ];
     options.eager_async = true;
-    const webhookUrl = String(process.env.CLOUDINARY_WEBHOOK_URL || "").trim();
-    if (!webhookUrl) {
-      throw new StorageProviderNotConfiguredException(
-        "cloudinary (CLOUDINARY_WEBHOOK_URL is required for video processing)"
-      );
-    }
     options.eager_notification_url = webhookUrl;
   }
 
@@ -87,11 +85,11 @@ function optionsFor(kind: "audio" | "video" | "thumbnail", publicId: string) {
 }
 
 export class CloudinaryStorageProvider implements IStorageProvider {
-  constructor() {
+  constructor(private readonly config: CloudinaryStorageProviderConfig) {
     cloudinary.config({
-      cloud_name: requiredEnv("CLOUDINARY_CLOUD_NAME"),
-      api_key: requiredEnv("CLOUDINARY_API_KEY"),
-      api_secret: requiredEnv("CLOUDINARY_API_SECRET"),
+      cloud_name: config.cloudName,
+      api_key: config.apiKey,
+      api_secret: config.apiSecret,
       secure: true,
       analytics: false,
       urlAnalytics: false,
@@ -101,7 +99,7 @@ export class CloudinaryStorageProvider implements IStorageProvider {
   async upload(params: UploadObjectParams): Promise<UploadObjectResult> {
     const publicId = providerIdFromStorageKey(params.storageKey);
     const kind = inferKind(params.contentType, params.storageKey);
-    const options = optionsFor(kind, publicId);
+    const options = optionsFor(kind, publicId, this.config.webhookUrl);
 
     return new Promise<UploadObjectResult>((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(options, (error: any, result: any) => {

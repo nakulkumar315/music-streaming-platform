@@ -1,97 +1,85 @@
 import rateLimit from "express-rate-limit";
+import crypto from "crypto";
 
-const getClientIp = (req: any) => {
-  const forwarded = (req.headers["x-forwarded-for"] as string | undefined) || "";
-  const ip = forwarded.split(",")[0]?.trim();
-  return (
-    ip ||
-    req.ip ||
-    req.connection?.remoteAddress ||
-    req.socket?.remoteAddress ||
-    "unknown"
-  );
-};
+function clientIp(req: any): string {
+  // Express derives req.ip from socket + the explicitly configured trust-proxy
+  // policy. Never parse X-Forwarded-For ourselves.
+  return String(req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown");
+}
 
-const isLocalOrPrivateIp = (ip: string) => {
-  const normalized = (ip || "").replace("::ffff:", "").trim();
-  if (!normalized) return false;
+function userOrIpKey(req: any, prefix: string): string {
+  const userId = Number(req.user?.id);
+  if (Number.isSafeInteger(userId) && userId > 0) return `${prefix}:user:${userId}`;
+  return `${prefix}:ip:${clientIp(req)}`;
+}
 
-  if (normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost") {
-    return true;
-  }
+function authKey(req: any): string {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  if (!email) return `auth:ip:${clientIp(req)}`;
+  const subject = crypto.createHash("sha256").update(email).digest("hex").slice(0, 16);
+  return `auth:ip:${clientIp(req)}:subject:${subject}`;
+}
 
-  // RFC1918 private ranges
-  if (normalized.startsWith("10.")) return true;
-  if (normalized.startsWith("192.168.")) return true;
-
-  const parts = normalized.split(".");
-  if (parts.length === 4) {
-    const first = Number(parts[0]);
-    const second = Number(parts[1]);
-    if (first === 172 && second >= 16 && second <= 31) return true;
-  }
-
-  return false;
-};
-
-const maroonRateLimitHandler = (req: any, res: any) => {
-  const ip = getClientIp(req);
-  console.warn(`[SECURITY_ALERT] Rate limit exceeded by IP: ${ip}`);
-
+const rateLimitHandler = (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
-
   return res.status(429).json({
     success: false,
+    code: "RATE_LIMITED",
     message: "Too many requests, please try again later.",
-    theme: {
-      primary: "#4b1927"
-    },
-    correlationId
+    correlationId,
   });
 };
 
 export const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 10000,
+  limit: 5000,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: any) => getClientIp(req),
-  // In local development, React (StrictMode), hot reload, and API-driven UIs can
-  // generate bursts of requests. Skip global limiting for local/private IPs to
-  // avoid noisy 429s during development.
-  skip: (req: any) => {
-    const ip = getClientIp(req);
-    return process.env.NODE_ENV !== "production" && isLocalOrPrivateIp(ip);
-  },
-  handler: maroonRateLimitHandler
+  keyGenerator: (req: any) => clientIp(req),
+  handler: rateLimitHandler,
 });
 
 export const authLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  limit: 5,
+  limit: 8,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: any) => {
-    const ip = getClientIp(req);
-    // Never collapse all users into a shared "unknown" bucket.
-    if (ip && ip !== "unknown") return ip;
-    return req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown";
-  },
-  // In local development, Expo/React Native frequently triggers repeated requests,
-  // and IP detection can be inconsistent. Skip auth limiting locally to avoid
-  // blocking valid logins during development.
-  skip: (req: any) => {
-    const ip = getClientIp(req);
-    return process.env.NODE_ENV !== "production" && isLocalOrPrivateIp(ip);
-  },
-  handler: maroonRateLimitHandler
+  keyGenerator: authKey,
+  handler: rateLimitHandler,
 });
 
 export const uploadLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  limit: 1000,
+  limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: any) => getClientIp(req),
-  handler: maroonRateLimitHandler
+  keyGenerator: (req: any) => userOrIpKey(req, "upload"),
+  handler: rateLimitHandler,
+});
+
+export const paymentLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => userOrIpKey(req, "payment"),
+  handler: rateLimitHandler,
+});
+
+export const playbackAccessLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => userOrIpKey(req, "playback-access"),
+  handler: rateLimitHandler,
+});
+
+export const playbackHeartbeatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => userOrIpKey(req, "playback-heartbeat"),
+  handler: rateLimitHandler,
 });

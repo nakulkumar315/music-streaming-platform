@@ -2,6 +2,10 @@ import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
 import { logger } from "../../common/logger";
+import {
+  playbackAccessLimiter,
+  playbackHeartbeatLimiter,
+} from "../../common/security/rateLimit";
 import { getMediaConfig } from "../../config/media.config";
 import { requestPlaybackAccess } from "../media/media-access.service";
 import { isContentEligibleForPlayback } from "../media/media-policy.service";
@@ -22,7 +26,7 @@ function positiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-router.post("/access", requireAuth, requireFan, async (req: any, res: any) => {
+router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const contentId = positiveInteger(req.body?.contentId);
   const userId = positiveInteger(req.user?.id);
@@ -52,22 +56,21 @@ router.post("/access", requireAuth, requireFan, async (req: any, res: any) => {
     });
 
     const mediaCfg = getMediaConfig();
-    const configuredBase = String(mediaCfg.appBaseUrl || "").replace(/\/+$/, "");
-    const requestBase = `${req.protocol}://${req.get("host")}`;
+    const configuredBase = new URL(mediaCfg.appBaseUrl);
     const streamRoute = String(mediaCfg.localPrivateStreamRoute || "/media/stream").replace(/\/+$/, "");
+    const playbackUrl = String(result.playbackUrl || "").trim();
 
-    let playbackUrl = String(result.playbackUrl || "");
-    if (configuredBase && playbackUrl.startsWith(configuredBase)) {
-      playbackUrl = `${requestBase}${playbackUrl.slice(configuredBase.length)}`;
-    }
-
+    let parsed: URL;
     try {
-      const parsed = new URL(playbackUrl);
-      if (parsed.pathname.startsWith(streamRoute)) {
-        playbackUrl = `${requestBase}${parsed.pathname}${parsed.search}`;
-      }
+      parsed = new URL(playbackUrl);
     } catch {
       throw new Error("Protected playback URL is invalid");
+    }
+
+    // Local/private delivery URLs must remain on the trusted configured public
+    // origin. Never rewrite them from Host/X-Forwarded-Host request headers.
+    if (parsed.pathname.startsWith(streamRoute) && parsed.origin !== configuredBase.origin) {
+      throw new Error("Protected playback URL origin does not match APP_BASE_URL");
     }
 
     return res.json({
@@ -101,13 +104,13 @@ router.post("/access", requireAuth, requireFan, async (req: any, res: any) => {
   }
 });
 
-router.post("/heartbeat", requireAuth, requireFan, async (req: any, res: any) => {
+router.post("/heartbeat", requireAuth, requireFan, playbackHeartbeatLimiter, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const userId = positiveInteger(req.user?.id);
   const sessionId = positiveInteger(req.body?.sessionId);
   const contentId = positiveInteger(req.body?.contentId);
 
-  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
   if (!sessionId || !contentId) {
     return res.status(400).json({
       success: false,
@@ -143,17 +146,22 @@ router.post("/heartbeat", requireAuth, requireFan, async (req: any, res: any) =>
     });
   } catch (error: any) {
     logger.error({ error, userId, sessionId, contentId, correlationId }, "[stream/heartbeat] failed");
-    return res.status(500).json({ success: false, message: "Heartbeat failed", correlationId });
+    return res.status(500).json({
+      success: false,
+      code: "PLAYBACK_HEARTBEAT_FAILED",
+      message: "Heartbeat failed",
+      correlationId,
+    });
   }
 });
 
-router.post("/terminate", requireAuth, requireFan, async (req: any, res: any) => {
+router.post("/terminate", requireAuth, requireFan, playbackHeartbeatLimiter, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const userId = positiveInteger(req.user?.id);
   const sessionId = positiveInteger(req.body?.sessionId);
   const contentId = positiveInteger(req.body?.contentId);
 
-  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
   if (!sessionId || !contentId) {
     return res.status(400).json({
       success: false,
@@ -168,7 +176,12 @@ router.post("/terminate", requireAuth, requireFan, async (req: any, res: any) =>
     return res.json({ success: true, terminated, correlationId });
   } catch (error: any) {
     logger.error({ error, userId, sessionId, contentId, correlationId }, "[stream/terminate] failed");
-    return res.status(500).json({ success: false, message: "Failed to terminate playback", correlationId });
+    return res.status(500).json({
+      success: false,
+      code: "PLAYBACK_TERMINATE_FAILED",
+      message: "Failed to terminate playback",
+      correlationId,
+    });
   }
 });
 
@@ -181,13 +194,13 @@ router.get("/thumbnail/:contentId", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const contentId = positiveInteger(req.params?.contentId);
   if (!contentId) {
-    return res.status(400).json({ success: false, message: "Invalid content id", correlationId });
+    return res.status(400).json({ success: false, code: "INVALID_CONTENT_ID", message: "Invalid content id", correlationId });
   }
 
   try {
     const row = await getContentForAccess(contentId);
     if (!row) {
-      return res.status(404).json({ success: false, message: "Thumbnail not found", correlationId });
+      return res.status(404).json({ success: false, code: "THUMBNAIL_NOT_FOUND", message: "Thumbnail not found", correlationId });
     }
 
     if (
@@ -198,12 +211,12 @@ router.get("/thumbnail/:contentId", async (req: any, res: any) => {
         isTakenDown: Boolean(row.is_taken_down),
       })
     ) {
-      return res.status(404).json({ success: false, message: "Thumbnail not available", correlationId });
+      return res.status(404).json({ success: false, code: "THUMBNAIL_NOT_AVAILABLE", message: "Thumbnail not available", correlationId });
     }
 
     const storageProvider = String(row.storage_provider || "").trim().toLowerCase();
     if (!storageProvider) {
-      return res.status(409).json({ success: false, message: "Thumbnail storage is not configured", correlationId });
+      return res.status(409).json({ success: false, code: "THUMBNAIL_STORAGE_MISSING", message: "Thumbnail storage is not configured", correlationId });
     }
 
     const identity = resolveMediaIdentity(row, "thumbnail");
@@ -220,7 +233,7 @@ router.get("/thumbnail/:contentId", async (req: any, res: any) => {
     }
 
     if (!storageKey || !storage.openReadStream) {
-      return res.status(404).json({ success: false, message: "Thumbnail mapping incomplete", correlationId });
+      return res.status(404).json({ success: false, code: "THUMBNAIL_MAPPING_INCOMPLETE", message: "Thumbnail mapping incomplete", correlationId });
     }
 
     const metadata = await storage.getObjectMetadata(storageKey, providerAssetId || undefined);
@@ -237,7 +250,7 @@ router.get("/thumbnail/:contentId", async (req: any, res: any) => {
     return read.stream.pipe(res);
   } catch (error: any) {
     logger.error({ error, contentId, correlationId }, "[stream/thumbnail] failed");
-    return res.status(502).json({ success: false, message: "Failed to load thumbnail", correlationId });
+    return res.status(502).json({ success: false, code: "THUMBNAIL_LOAD_FAILED", message: "Failed to load thumbnail", correlationId });
   }
 });
 
