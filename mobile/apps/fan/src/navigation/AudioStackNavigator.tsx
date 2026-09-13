@@ -2,7 +2,7 @@ import React, {} from 'react';
 
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-import ArtistScreen from '../screens/ArtistScreen';
+import AuthoritativeArtistScreen from './AuthoritativeArtistScreen';
 import ArtistSubscriptionScreen from '../screens/ArtistSubscriptionScreen';
 import AudioScreen from '../screens/AudioScreen';
 import ContentPlayerScreen from '../screens/ContentPlayerScreen';
@@ -16,7 +16,6 @@ export type AudioStackParamList = {
   AudioIndex: undefined;
   Artist: {
     artistId?: string;
-    unlocked?: boolean;
     contentId?: string;
   };
   ArtistSubscription: {
@@ -63,7 +62,7 @@ export default function AudioStackNavigator() {
   return (
     <Stack.Navigator id="fan-audio" screenOptions={{ headerShown: false }}>
       <Stack.Screen name="AudioIndex" component={AudioScreen} />
-      <Stack.Screen name="Artist" component={ArtistScreen} options={{ animation: 'slide_from_right' }} />
+      <Stack.Screen name="Artist" component={AuthoritativeArtistScreen} options={{ animation: 'slide_from_right' }} />
       <Stack.Screen name="ArtistSubscription" component={ArtistSubscriptionScreen} />
       <Stack.Screen name="ContentPlayer" component={ContentPlayerScreen} />
       <Stack.Screen name="SubscriptionFlow" component={SubscriptionFlowScreen} />
