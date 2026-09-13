@@ -11,6 +11,11 @@ let resumeAfterTemporaryDuck = false;
  *
  * Handles remote media controls from notification, lock screen and control
  * center. Product/player state remains authoritative in the foreground app.
+ *
+ * Next/previous are intentionally not exposed here. The application queue is
+ * currently owned by React state and is not synchronized into TrackPlayer's
+ * native queue, so advertising those actions while JS is suspended would be
+ * misleading and unreliable.
  */
 export default async function playbackService() {
   logger.log('[PlaybackService] Starting background playback service');
@@ -31,22 +36,6 @@ export default async function playbackService() {
       resumeAfterTemporaryDuck = false;
     } catch (error) {
       logger.error('[PlaybackService] RemotePause error:', error);
-    }
-  });
-
-  TrackPlayer.addEventListener(Event.RemoteNext, async () => {
-    try {
-      await TrackPlayer.skipToNext();
-    } catch (error) {
-      logger.error('[PlaybackService] RemoteNext error:', error);
-    }
-  });
-
-  TrackPlayer.addEventListener(Event.RemotePrevious, async () => {
-    try {
-      await TrackPlayer.skipToPrevious();
-    } catch (error) {
-      logger.error('[PlaybackService] RemotePrevious error:', error);
     }
   });
 
