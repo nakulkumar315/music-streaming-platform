@@ -1,1454 +1,219 @@
 import { Router } from "express";
-
-import { requireAuth } from "../common/auth/requireAuth";
-
 import { pool } from "../common/db";
-
-import { uploadLimiter } from "../common/security/rateLimit";
-
-import multer from "multer";
-
-import path from "path";
-
-import fs from "fs";
-
-import { getStorageService } from "../shared/storage/services/storage.service";
-
-import { getStorageConfig } from "../config/storage.config";
-
-import { getMediaConfig } from "../config/media.config";
-
-import { generateStorageKey } from "../shared/storage/utils/storage-key.util";
-
-import { validateFileForUpload } from "../shared/storage/utils/file-validation.util";
-
-import { getExtensionFromMime } from "../shared/storage/utils/file-metadata.util";
-
-import { createPlaybackToken } from "../shared/security/signed-media-token.service";
-
-import { invalidateContentCache } from "../common/cache";
-
-import { AuditService } from "../shared/audit/audit.service";
-
-import { uploadQueue } from "../common/queue";
+import { requireAuth, requireVerifiedArtist } from "../common/auth/requireAuth";
+import { requireRoles } from "../common/auth/requireRoles";
 
 const router = Router();
-
-const requireArtist = (req: any, res: any, next: any) => {
-  const role = (req.user?.role || "").toUpperCase();
-
-  if (role !== "ARTIST") {
-    return res.status(403).json({
-      success: false,
-
-      message: "Forbidden",
-    });
-  }
-
-  return next();
-};
-
-const requireArtistOrAdmin = (req: any, res: any, next: any) => {
-  const role = (req.user?.role || "").toUpperCase();
-
-  if (role !== "ARTIST" && role !== "ADMIN") {
-    return res.status(403).json({
-      success: false,
-
-      message: "Forbidden",
-    });
-  }
-
-  return next();
-};
-
-const ensureUploadsDir = () => {
-  const dir = path.join(process.cwd(), "public", "uploads");
-
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  return dir;
-};
-
-const toAbsoluteUrl = (req: any, value: any) => {
-  const raw = (value ?? "").toString().trim();
-
-  if (!raw) return null;
-
-  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
-
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
-
-  if (raw.startsWith("/")) return `${baseUrl}${raw}`;
-
-  return `${baseUrl}/${raw}`;
-};
-
-const REPORT_THRESHOLD = 5;
-
-const mediaConfig = () => getMediaConfig();
-
-const maxAudioBytes = () => mediaConfig().maxUploadAudioBytes;
-
-const maxVideoBytes = () => mediaConfig().maxUploadVideoBytes;
-
-const maxImageBytes = () => mediaConfig().maxUploadImageBytes;
-
-const diskStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, ensureUploadsDir());
-  },
-
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-
-    cb(null, file.fieldname + "-" + uniqueSuffix);
-  },
-});
-
-const upload = multer({
-  storage: diskStorage,
-
-  limits: {
-    fileSize: Math.max(
-      maxAudioBytes(),
-      maxVideoBytes(),
-      maxImageBytes(),
-      1024 * 1024 * 250
-    ),
-  },
-});
-
-router.post(
-  "/upload",
-
-  uploadLimiter,
-
-  requireAuth,
-
-  requireArtist,
-
-  upload.fields([
-    { name: "thumbnail", maxCount: 1 },
-
-    { name: "audio", maxCount: 1 },
-
-    { name: "video", maxCount: 1 },
-  ]),
-
-  async (req: any, res: any) => {
-    const correlationId = req?.correlationId || "-";
-    const startTime = Date.now();
-    console.log(`[UPLOAD] START correlationId=${correlationId}`);
-
-    const artistId = req.user?.id;
-
-    const storage = getStorageService();
-
-    const config = getStorageConfig();
-
-    const mediaCfg = getMediaConfig();
-
-    try {
-      const flaggedCheckStart = Date.now();
-      const flaggedCount = await pool
-
-        .query(
-          "SELECT COUNT(*)::int as c FROM public.content_items WHERE artist_id = $1 AND UPPER(COALESCE(status, '')) = 'FLAGGED'",
-
-          [artistId]
-        )
-
-        .then((r) => Number(r.rows?.[0]?.c ?? 0))
-
-        .catch(() => 0);
-      console.log(`[UPLOAD] flaggedCount check took ${Date.now() - flaggedCheckStart}ms`);
-
-      if (flaggedCount >= 3) {
-        return res.status(403).json({
-          success: false,
-
-          message:
-            "Uploads temporarily restricted due to flagged content. Please contact support.",
-
-          correlationId,
-        });
-      }
-
-      const bodyParseStart = Date.now();
-      const { title, genre, type, isSubscriberOnly } = req.body as {
-        title?: string;
-
-        genre?: string;
-
-        type?: string;
-
-        isSubscriberOnly?: string | boolean;
-      };
-      console.log(`[UPLOAD] body parse took ${Date.now() - bodyParseStart}ms`);
-
-      const isSubOnly =
-        isSubscriberOnly === "true" || isSubscriberOnly === true;
-
-      const trimmedTitle = (title || "").trim();
-
-      const trimmedGenre = (genre || "").trim();
-
-      if (!trimmedTitle) {
-        console.log(`[UPLOAD] 400: title is required`);
-        return res.status(400).json({
-          success: false,
-
-          message: "title is required",
-
-          correlationId,
-        });
-      }
-
-      if (!trimmedGenre) {
-        console.log(`[UPLOAD] 400: genre is required`);
-        return res.status(400).json({
-          success: false,
-
-          message: "genre is required",
-
-          correlationId,
-        });
-      }
-
-      const files = (req.files || {}) as Record<string, any[]>;
-
-      const thumb = (files.thumbnail?.[0] as any) ?? null;
-
-      const audio = (files.audio?.[0] as any) ?? null;
-
-      const video = (files.video?.[0] as any) ?? null;
-
-      if (!thumb || !audio) {
-        console.log(`[UPLOAD] 400: missing files - thumb: ${!!thumb}, audio: ${!!audio}, video: ${!!video}`);
-        return res.status(400).json({
-          success: false,
-
-          message: "thumbnail and audio files are required (video is optional)",
-
-          correlationId,
-        });
-      }
-
-      const thumbMime = thumb.mimetype || "application/octet-stream";
-
-      const audioMime = audio.mimetype || "application/octet-stream";
-
-      const videoMime = video.mimetype || "application/octet-stream";
-
-      const vThumb = validateFileForUpload({
-        originalFilename: thumb.originalname || "thumb",
-
-        mimeType: thumbMime,
-
-        sizeBytes: thumb.size ?? 0,
-
-        claimedMediaType: "image",
-
-        maxSizeBytes: mediaCfg.maxUploadImageBytes,
-      });
-
-      if (!vThumb.ok) {
-        console.log(`[UPLOAD] 400: invalid thumbnail - ${vThumb.error}`);
-        return res.status(400).json({
-          success: false,
-          message: vThumb.error || "Invalid thumbnail",
-          correlationId,
-        });
-      }
-
-      const vAudio = validateFileForUpload({
-        originalFilename: audio.originalname || "audio",
-
-        mimeType: audioMime,
-
-        sizeBytes: audio.size ?? 0,
-
-        claimedMediaType: "audio",
-
-        maxSizeBytes: mediaCfg.maxUploadAudioBytes,
-      });
-
-      if (!vAudio.ok) {
-        console.log(`[UPLOAD] 400: invalid audio - ${vAudio.error}`);
-        return res.status(400).json({
-          success: false,
-          message: vAudio.error || "Invalid audio",
-          correlationId,
-        });
-      }
-
-      const extThumb =
-        vThumb.extension || getExtensionFromMime(thumbMime) || "jpg";
-
-      const extAudio =
-        vAudio.extension || getExtensionFromMime(audioMime) || "mp3";
-
-      let videoKey: string | null = null;
-
-      if (video) {
-        const vVideo = validateFileForUpload({
-          originalFilename: video.originalname || "video",
-
-          mimeType: videoMime,
-
-          sizeBytes: video.size ?? 0,
-
-          claimedMediaType: "video",
-
-          maxSizeBytes: mediaCfg.maxUploadVideoBytes,
-        });
-
-        if (!vVideo.ok) {
-          return res.status(400).json({
-            success: false,
-            message: vVideo.error || "Invalid video",
-            correlationId,
-          });
-        }
-
-        const extVideo =
-          vVideo.extension || getExtensionFromMime(videoMime) || "mp4";
-
-        videoKey = generateStorageKey(artistId, "video", extVideo);
-      }
-
-      let thumbnailKey = generateStorageKey(artistId, "thumbnails", extThumb);
-
-      let audioKey = generateStorageKey(artistId, "audio", extAudio);
-
-      if (trimmedTitle === "FINAL_E2E_TEST_SUCCESS") {
-        thumbnailKey = `E2E_MOCK/${thumbnailKey}`;
-
-        audioKey = `E2E_MOCK/${audioKey}`;
-
-        if (videoKey) videoKey = `E2E_MOCK/${videoKey}`;
-      } else if (trimmedTitle === "FINAL_E2E_TEST_FAILURE") {
-        thumbnailKey = `E2E_MOCK_FAILURE/${thumbnailKey}`;
-
-        audioKey = `E2E_MOCK_FAILURE/${audioKey}`;
-
-        if (videoKey) videoKey = `E2E_MOCK_FAILURE/${videoKey}`;
-      }
-
-      const normalizedType = videoKey ? "AUDIO_VIDEO" : "AUDIO";
-
-      const now = new Date().toISOString();
-
-      const dbInsertStart = Date.now();
-      let insert;
-
-      try {
-        insert = await pool.query(
-          `INSERT INTO public.content_items (
-
-          title, type, artist_id, genre, lifecycle_state, is_approved,
-
-          storage_provider, storage_key, thumbnail_storage_key, video_storage_key, visibility, status,
-
-          mime_type, file_size_bytes, original_file_name, uploaded_at, subscription_required
-
-        ) VALUES ($1, $2, $3, $4, 'PUBLISHED', true, $5, $6, $7, $8, 'PROTECTED', 'PROCESSING', $9, $10, $11, $12, $13)
-
-        RETURNING id, title, type, artist_id, storage_key, thumbnail_storage_key, storage_provider, visibility, status, created_at, subscription_required`,
-
-          [
-            trimmedTitle,
-
-            normalizedType,
-
-            artistId,
-
-            trimmedGenre || null,
-
-            config.provider,
-
-            audioKey,
-
-            thumbnailKey,
-
-            videoKey,
-
-            audioMime,
-
-            audio.size ?? null,
-
-            audio.originalname || null,
-
-            now,
-
-            isSubOnly,
-          ]
-        );
-        console.log(`[UPLOAD] DB insert took ${Date.now() - dbInsertStart}ms`);
-      } catch (dbErr: any) {
-        // DB failed, wipe the local disk temp files immediately!
-
-        fs.promises.unlink(thumb.path).catch((e) => e);
-
-        fs.promises.unlink(audio.path).catch((e) => e);
-
-        fs.promises.unlink(video.path).catch((e) => e);
-
-        throw dbErr;
-      }
-
-      const row = insert.rows[0];
-
-      // Dispatch to BullMQ for background uploading!
-
-      const jobData: any = {
-        contentId: row.id,
-
-        thumbnail: { path: thumb.path, mime: thumbMime, key: thumbnailKey },
-
-        audio: { path: audio.path, mime: audioMime, key: audioKey },
-      };
-
-      if (video && videoKey) {
-        jobData.video = { path: video.path, mime: videoMime, key: videoKey };
-      }
-
-      // Check if uploadQueue is available (requires Redis)
-      if (!uploadQueue) {
-        // Synchronous upload when Redis is not available
-        console.log(`[UPLOAD] Redis not available, doing synchronous upload`);
-        const storage = getStorageService();
-
-        try {
-          // Upload Thumbnail
-          const uploadedThumbnail = await storage.upload({
-            storageKey: thumbnailKey,
-            body: fs.createReadStream(thumb.path),
-            contentType: thumbMime,
-          });
-
-          // Upload Audio
-          const uploadedAudio = await storage.upload({
-            storageKey: audioKey,
-            body: fs.createReadStream(audio.path),
-            contentType: audioMime,
-          });
-
-          // Upload Video if present
-          let uploadedVideo = null;
-          if (video && videoKey) {
-            uploadedVideo = await storage.upload({
-              storageKey: videoKey,
-              body: fs.createReadStream(video.path),
-              contentType: videoMime,
-            });
-          }
-
-          // Update Database
-          await pool.query(
-            `UPDATE content_items
-             SET 
-                provider_asset_id = $1,
-                audio_provider_asset_id = $2,
-                video_provider_asset_id = $3,
-                thumbnail_provider_asset_id = $4,
-                thumbnail_url = $5,
-                audio_url = $6,
-                video_url = $7,
-                file_key = $8,
-                status = 'PUBLISHED'
-             WHERE id = $9`,
-            [
-              uploadedAudio.providerAssetId || uploadedVideo?.providerAssetId || null,
-              uploadedAudio.providerAssetId || null,
-              uploadedVideo?.providerAssetId || null,
-              uploadedThumbnail.providerAssetId || null,
-              uploadedThumbnail.providerUrl || null,
-              null,
-              null,
-              uploadedAudio.providerUrl || uploadedVideo?.providerUrl || null,
-              row.id,
-            ]
-          );
-
-          // Cleanup Local Files
-          fs.promises.unlink(thumb.path).catch((e) => e);
-          fs.promises.unlink(audio.path).catch((e) => e);
-          if (video) fs.promises.unlink(video.path).catch((e) => e);
-
-          console.log(`[UPLOAD] Synchronous upload completed for contentId=${row.id}`);
-        } catch (syncErr: any) {
-          console.error(`[UPLOAD] Synchronous upload failed:`, syncErr);
-          // Cleanup on failure
-          fs.promises.unlink(thumb.path).catch((e) => e);
-          fs.promises.unlink(audio.path).catch((e) => e);
-          if (video) fs.promises.unlink(video.path).catch((e) => e);
-          throw syncErr;
-        }
-      } else {
-        // Use BullMQ for background upload when Redis is available
-        await uploadQueue.add("upload", jobData, {
-          attempts: 3,
-
-          backoff: {
-            type: "fixed",
-
-            delay: 5000,
-          },
-        });
-      }
-
-      const cacheInvalidateStart = Date.now();
-      await invalidateContentCache();
-      console.log(`[UPLOAD] cache invalidate took ${Date.now() - cacheInvalidateStart}ms`);
-
-      const auditLogStart = Date.now();
-      AuditService.log({
-        action: "content.uploaded",
-
-        entity: "content",
-
-        entityId: String(row.id),
-
-        performedBy: artistId,
-
-        role: "artist",
-
-        status: "success",
-
-        correlationId,
-
-        metadata: { title: trimmedTitle, artist_id: artistId },
-      });
-      console.log(`[UPLOAD] audit log took ${Date.now() - auditLogStart}ms`);
-
-      const responseStart = Date.now();
-      return res.json({
-        success: true,
-
-        item: {
-          id: row.id,
-
-          title: row.title,
-
-          type: row.type,
-
-          artistId: row.artist_id,
-
-          storageProvider: row.storage_provider,
-
-          storageKey: row.storage_key,
-
-          thumbnailStorageKey: row.thumbnail_storage_key,
-
-          visibility: row.visibility,
-
-          status: row.status ?? "PUBLISHED",
-
-          createdAt: row.created_at,
-        },
-
-        correlationId,
-      });
-    } catch (err: any) {
-      console.error("[content/upload] error", correlationId, err?.message, `total time: ${Date.now() - startTime}ms`);
-
-      return res.status(500).json({
-        success: false,
-
-        message: "Failed to upload content",
-
-        correlationId,
-      });
-    }
-  }
-);
-
-router.post("/report", requireAuth, async (req: any, res: any) => {
+const requireFan = requireRoles("FAN");
+const REPORT_REASON_MAX = 80;
+
+function positiveInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function contentIsFanVisible(contentId: number): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1
+       FROM content_items c
+       JOIN users u ON u.id = c.artist_id
+      WHERE c.id = $1
+        AND c.lifecycle_state = 'EARLY_ACCESS'
+        AND c.status = 'READY'
+        AND c.is_approved = TRUE
+        AND c.is_taken_down = FALSE
+        AND UPPER(u.role) = 'ARTIST'
+        AND u.is_deleted = FALSE
+        AND UPPER(u.status) = 'ACTIVE'
+        AND u.is_verified = TRUE
+        AND UPPER(u.artist_status::text) = 'APPROVED'
+      LIMIT 1`,
+    [contentId]
+  );
+  return result.rowCount === 1;
+}
+
+/**
+ * Fans may report currently visible content. Report volume is a moderation
+ * signal only; it must never overwrite the technical media status.
+ */
+router.post("/report", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
+  const userId = positiveInteger(req.user?.id);
+  const contentId = positiveInteger(req.body?.contentId);
+  const reason = String(req.body?.reason || "").trim();
 
-  const userId = Number(req.user?.id);
-
-  if (!Number.isFinite(userId) || userId <= 0) {
-    return res
-      .status(401)
-      .json({ success: false, message: "Unauthorized", correlationId });
+  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
+  if (!contentId) {
+    return res.status(400).json({ success: false, message: "contentId is required", correlationId });
   }
-
-  const { contentId, reason } = req.body as {
-    contentId?: any;
-    reason?: string;
-  };
-
-  const cid = Number(contentId);
-
-  const trimmedReason = (reason || "").trim();
-
-  if (!Number.isFinite(cid) || cid <= 0) {
+  if (!reason || reason.length > REPORT_REASON_MAX) {
     return res.status(400).json({
       success: false,
-      message: "contentId is required",
+      message: `reason is required and must be at most ${REPORT_REASON_MAX} characters`,
       correlationId,
     });
   }
 
-  if (!trimmedReason) {
-    return res
-      .status(400)
-      .json({ success: false, message: "reason is required", correlationId });
-  }
-
   try {
-    const inserted = await pool.query(
-      `INSERT INTO public.reports (reason, content_id, user_id)
-
-       VALUES ($1, $2, $3)
-
-       ON CONFLICT (content_id, user_id) DO NOTHING
-
-       RETURNING id`,
-
-      [trimmedReason, cid, userId]
-    );
-
-    if (!inserted.rows?.length) {
-      const row = await pool
-
-        .query(
-          "SELECT report_count, status FROM public.content_items WHERE id = $1 LIMIT 1",
-          [cid]
-        )
-
-        .then((r) => r.rows?.[0] ?? null)
-
-        .catch(() => null);
-
-      return res.status(200).json({
-        success: true,
-
-        duplicate: true,
-
-        reportCount: Number(row?.report_count ?? 0),
-
-        status: (row?.status ?? "APPROVED").toString(),
-
-        correlationId,
-      });
+    if (!(await contentIsFanVisible(contentId))) {
+      return res.status(404).json({ success: false, message: "Content not found", correlationId });
     }
 
-    const updated = await pool.query(
-      `UPDATE public.content_items
-
-       SET report_count = COALESCE(report_count, 0) + 1
-
-       WHERE id = $1
-
-       RETURNING report_count, status`,
-
-      [cid]
-    );
-
-    const reportCount = Number(updated.rows?.[0]?.report_count ?? 0);
-
-    let status = (updated.rows?.[0]?.status ?? "APPROVED").toString();
-
-    if (reportCount >= REPORT_THRESHOLD && status.toUpperCase() !== "FLAGGED") {
-      const flagged = await pool.query(
-        `UPDATE public.content_items
-
-         SET status = 'FLAGGED'
-
-         WHERE id = $1
-
-         RETURNING status`,
-
-        [cid]
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query(
+        `INSERT INTO reports (reason, content_id, user_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (content_id, user_id) DO NOTHING
+         RETURNING id`,
+        [reason, contentId, userId]
       );
 
-      status = (flagged.rows?.[0]?.status ?? status).toString();
+      if (inserted.rowCount === 1) {
+        await client.query(
+          `UPDATE content_items
+              SET report_count = report_count + 1
+            WHERE id = $1`,
+          [contentId]
+        );
+      }
+
+      const current = await client.query(
+        `SELECT report_count, is_taken_down
+           FROM content_items
+          WHERE id = $1
+          LIMIT 1`,
+        [contentId]
+      );
+      await client.query("COMMIT");
+
+      return res.json({
+        success: true,
+        duplicate: inserted.rowCount !== 1,
+        reportCount: Number(current.rows[0]?.report_count ?? 0),
+        isTakenDown: current.rows[0]?.is_taken_down === true,
+        correlationId,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-
-    return res.json({
-      success: true,
-      duplicate: false,
-      reportCount,
-      status,
-      correlationId,
-    });
-  } catch (err: any) {
-    console.error("[content/report] error", correlationId, err?.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to submit report",
-      correlationId,
-    });
+  } catch {
+    return res.status(500).json({ success: false, message: "Failed to submit report", correlationId });
   }
 });
 
-router.post("/reaction", requireAuth, async (req: any, res: any) => {
+router.post("/reaction", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
+  const userId = positiveInteger(req.user?.id);
+  const contentId = positiveInteger(req.body?.contentId);
+  const reaction = req.body?.reaction == null ? null : String(req.body.reaction).toLowerCase();
 
-  const userId = Number(req.user?.id);
-
-  if (!Number.isFinite(userId) || userId <= 0) {
-    return res
-      .status(401)
-      .json({ success: false, message: "Unauthorized", correlationId });
+  if (!userId) return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
+  if (!contentId) {
+    return res.status(400).json({ success: false, message: "contentId is required", correlationId });
   }
-
-  const { contentId, reaction } = req.body as {
-    contentId?: any;
-    reaction?: string | null;
-  };
-
-  const cid = Number(contentId);
-
-  if (!Number.isFinite(cid) || cid <= 0) {
-    return res.status(400).json({
-      success: false,
-      message: "contentId is required",
-      correlationId,
-    });
+  if (reaction !== null && reaction !== "like" && reaction !== "dislike") {
+    return res.status(400).json({ success: false, message: "Invalid reaction", correlationId });
   }
 
   try {
-    if (reaction === "like" || reaction === "dislike") {
+    if (!(await contentIsFanVisible(contentId))) {
+      return res.status(404).json({ success: false, message: "Content not found", correlationId });
+    }
+
+    if (reaction) {
       await pool.query(
-        `INSERT INTO public.content_reactions (content_id, user_id, reaction)
-
+        `INSERT INTO content_reactions (content_id, user_id, reaction)
          VALUES ($1, $2, $3)
-
-         ON CONFLICT (content_id, user_id) DO UPDATE SET reaction = EXCLUDED.reaction`,
-
-        [cid, userId, reaction]
+         ON CONFLICT (content_id, user_id)
+         DO UPDATE SET reaction = EXCLUDED.reaction`,
+        [contentId, userId, reaction]
       );
     } else {
       await pool.query(
-        `DELETE FROM public.content_reactions WHERE content_id = $1 AND user_id = $2`,
-
-        [cid, userId]
+        `DELETE FROM content_reactions
+          WHERE content_id = $1 AND user_id = $2`,
+        [contentId, userId]
       );
     }
 
     return res.json({ success: true, correlationId });
-  } catch (err: any) {
-    console.error("[content/reaction] error", correlationId, err?.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to set reaction",
-      correlationId,
-    });
-  }
-});
-
-router.get("/mine", requireAuth, requireArtist, async (req: any, res: any) => {
-  const correlationId = req?.correlationId || "-";
-
-  try {
-    const artistId = req.user?.id;
-
-    const mediaCfg = getMediaConfig();
-
-    const streamRoute = (
-      mediaCfg.localPrivateStreamRoute || "media/stream"
-    ).replace(/^\//, "");
-
-    const baseUrlFull = `${req.protocol}://${req.get("host")}`;
-
-    const issueStreamUrl = (contentId: number, kind: "audio" | "video") => {
-      const token = createPlaybackToken(
-        contentId,
-        artistId,
-        mediaCfg.mediaUrlTtlSeconds
-      );
-
-      return `${baseUrlFull}/${streamRoute}/${contentId}?token=${encodeURIComponent(
-        token
-      )}&kind=${encodeURIComponent(kind)}`;
-    };
-
-    const rows = await pool.query(
-      `SELECT id, title, type, thumbnail_url, audio_url, video_url, media_url, lifecycle_state, is_approved, created_at, storage_key, video_storage_key
-
-       FROM public.content_items
-
-       WHERE artist_id = $1
-
-       ORDER BY created_at DESC
-
-       LIMIT 100`,
-
-      [artistId]
-    );
-
-    const items = (rows.rows ?? []).map((r: any) => {
-      const typeRaw = (r.type ?? "").toString().toLowerCase();
-
-      const hasAudio = Boolean(r.storage_key || r.audio_url || r.media_url);
-
-      const hasVideo = Boolean(r.video_storage_key || r.video_url);
-
-      const hasNewAudioStorage = Boolean(r.storage_key);
-
-      const hasNewVideoStorage = Boolean(
-        r.video_storage_key || (typeRaw === "video" && r.storage_key)
-      );
-
-      const legacyAudioUrlRaw = r.audio_url ?? r.media_url;
-
-      const legacyVideoUrlRaw = r.video_url ?? r.media_url;
-
-      const streamAudioUrl = hasNewAudioStorage
-        ? issueStreamUrl(r.id, "audio")
-        : null;
-
-      const streamVideoUrl = hasNewVideoStorage
-        ? issueStreamUrl(r.id, "video")
-        : null;
-
-      const finalAudioUrl = hasAudio
-        ? streamAudioUrl || toAbsoluteUrl(req, legacyAudioUrlRaw)
-        : null;
-
-      const finalVideoUrl = hasVideo
-        ? streamVideoUrl || toAbsoluteUrl(req, legacyVideoUrlRaw)
-        : null;
-
-      const finalMediaUrl = typeRaw === "video" ? finalVideoUrl : finalAudioUrl;
-
-      return {
-        id: r.id,
-
-        title: r.title,
-
-        type: r.type,
-
-        thumbnailUrl: r.thumbnail_url
-          ? toAbsoluteUrl(req, r.thumbnail_url)
-          : null,
-
-        audioUrl: finalAudioUrl,
-
-        videoUrl: finalVideoUrl,
-
-        mediaUrl: finalMediaUrl,
-
-        lifecycleState: r.lifecycle_state,
-
-        isApproved: r.is_approved,
-
-        createdAt: r.created_at,
-      };
-    });
-
-    return res.json({ success: true, items, correlationId });
   } catch {
-    return res.status(500).json({
-      success: false,
-
-      message: "Failed to fetch artist content",
-
-      correlationId,
-    });
+    return res.status(500).json({ success: false, message: "Failed to set reaction", correlationId });
   }
 });
 
-router.post(
-  "/upload-metadata",
-  uploadLimiter,
+/**
+ * Phase-1 artist content is read-only. The response intentionally exposes no
+ * storage/provider identifiers and no playable media URLs.
+ */
+router.get(
+  "/mine",
   requireAuth,
-  requireArtist,
+  requireVerifiedArtist,
   async (req: any, res: any) => {
     const correlationId = req?.correlationId || "-";
+    const artistId = positiveInteger(req.user?.id);
+    if (!artistId) {
+      return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
+    }
 
     try {
-      const artistId = req.user?.id;
-
-      const flaggedCount = await pool
-
-        .query(
-          "SELECT COUNT(*)::int as c FROM public.content_items WHERE artist_id = $1 AND UPPER(COALESCE(status, '')) = 'FLAGGED'",
-
-          [artistId]
-        )
-
-        .then((r) => Number(r.rows?.[0]?.c ?? 0))
-
-        .catch(() => 0);
-
-      if (flaggedCount >= 3) {
-        return res.status(403).json({
-          success: false,
-
-          message:
-            "Uploads temporarily restricted due to flagged content. Please contact support.",
-
-          correlationId,
-        });
-      }
-
-      const { title, type, thumbnailUrl, isSubscriberOnly } = req.body as {
-        title?: string;
-
-        type?: string;
-
-        thumbnailUrl?: string | null;
-
-        isSubscriberOnly?: string | boolean;
-      };
-
-      const isSubOnly =
-        isSubscriberOnly === "true" || isSubscriberOnly === true;
-
-      const trimmedTitle = (title || "").trim();
-
-      const normalizedType = (type || "").trim().toUpperCase();
-
-      if (
-        !trimmedTitle ||
-        (normalizedType !== "AUDIO" && normalizedType !== "VIDEO")
-      ) {
-        return res.status(400).json({
-          success: false,
-
-          message: "title and type (Audio/Video) are required",
-
-          correlationId,
-        });
-      }
-
-      const insert = await pool.query(
-        `INSERT INTO public.content_items (title, type, artist_id, thumbnail_url, lifecycle_state, is_approved, published_at, status, subscription_required)
-
-       VALUES ($1, $2, $3, $4, 'PUBLISHED', true, now(), 'APPROVED', $5)
-
-       RETURNING id, title, type, artist_id, thumbnail_url, lifecycle_state, is_approved, created_at, subscription_required`,
-
-        [
-          trimmedTitle,
-          normalizedType,
-          artistId,
-          thumbnailUrl ?? null,
-          isSubOnly,
-        ]
+      const result = await pool.query(
+        `SELECT c.id,
+                c.title,
+                c.type,
+                c.genre,
+                c.lifecycle_state,
+                c.status,
+                c.is_approved,
+                c.is_taken_down,
+                c.rejection_reason,
+                c.subscription_required,
+                c.created_at,
+                c.published_at,
+                (c.thumbnail_storage_key IS NOT NULL) AS has_artwork,
+                (c.storage_key IS NOT NULL) AS has_audio,
+                (c.video_storage_key IS NOT NULL) AS has_video,
+                COUNT(p.id)::int AS total_plays
+           FROM content_items c
+           LEFT JOIN content_plays p ON p.content_id = c.id
+          WHERE c.artist_id = $1
+          GROUP BY c.id
+          ORDER BY c.created_at DESC
+          LIMIT 500`,
+        [artistId]
       );
 
-      await invalidateContentCache();
-
-      return res.json({
-        success: true,
-
-        item: {
-          id: insert.rows[0].id,
-
-          title: insert.rows[0].title,
-
-          type: insert.rows[0].type,
-
-          artistId: insert.rows[0].artist_id,
-
-          thumbnailUrl: insert.rows[0].thumbnail_url,
-
-          lifecycleState: insert.rows[0].lifecycle_state,
-
-          isApproved: insert.rows[0].is_approved,
-
-          createdAt: insert.rows[0].created_at,
-        },
-
-        correlationId,
-      });
-    } catch {
-      return res.status(500).json({
-        success: false,
-
-        message: "Failed to upload content",
-
-        correlationId,
-      });
-    }
-  }
-);
-
-router.get(
-  "/history",
-  requireAuth,
-  requireArtistOrAdmin,
-  async (req: any, res: any) => {
-    const correlationId = req?.correlationId || "-";
-
-    try {
-      const mediaCfg = getMediaConfig();
-
-      const streamRoute = (
-        mediaCfg.localPrivateStreamRoute || "media/stream"
-      ).replace(/^\//, "");
-
-      const baseUrl = `${req.protocol}://${req.get("host")}`;
-
-      const issueStreamUrl = (
-        contentId: number,
-        userId: number,
-        kind: "audio" | "video"
-      ) => {
-        const token = createPlaybackToken(
-          contentId,
-          userId,
-          mediaCfg.mediaUrlTtlSeconds
-        );
-
-        return `${baseUrl}/${streamRoute}/${contentId}?token=${encodeURIComponent(
-          token
-        )}&kind=${encodeURIComponent(kind)}`;
-      };
-
-      const role = (req.user?.role || "").toUpperCase();
-
-      if (role === "ADMIN") {
-        const artistIdRaw = (req.query?.artistId as string | undefined) ?? "";
-
-        const artistId = Number(artistIdRaw);
-
-        if (!artistIdRaw || Number.isNaN(artistId) || artistId <= 0) {
-          return res.status(400).json({
-            success: false,
-
-            message: "artistId query param is required for admin",
-
-            correlationId,
-          });
-        }
-
-        let rows: any;
-
-        try {
-          rows = await pool.query(
-            `SELECT 
-
-            c.id,
-
-            c.title,
-
-            c.type,
-
-            c.thumbnail_url,
-
-            c.media_url,
-
-            c.audio_url,
-
-            c.video_url,
-
-            c.storage_provider,
-
-            c.storage_key,
-
-            c.video_storage_key,
-
-            c.lifecycle_state,
-
-            c.is_approved,
-
-            c.rejection_reason,
-
-            c.created_at,
-
-            COUNT(p.id)::int as total_plays
-
-           FROM public.content_items c
-
-           LEFT JOIN public.content_plays p ON p.content_id = c.id
-
-           WHERE c.artist_id = $1
-
-           GROUP BY c.id
-
-           ORDER BY c.created_at DESC
-
-           LIMIT 500`,
-
-            [artistId]
-          );
-        } catch (err: any) {
-          // Fallback to minimal query if anything fails
-
-          rows = await pool.query(
-            `SELECT 
-
-            c.id,
-
-            c.title,
-
-            c.type,
-
-            c.thumbnail_url,
-
-            c.media_url,
-
-            c.audio_url,
-
-            c.video_url,
-
-            c.storage_provider,
-
-            c.storage_key,
-
-            c.video_storage_key,
-
-            c.lifecycle_state,
-
-            c.created_at
-
-           FROM public.content_items c
-
-           WHERE c.artist_id = $1
-
-           ORDER BY c.created_at DESC
-
-           LIMIT 500`,
-
-            [artistId]
-          );
-        }
-
-        const items = (rows.rows ?? []).map((r: any) => {
-          const lifecycle = (r.lifecycle_state ?? "DRAFT").toString();
-
-          const approved = Boolean(r.is_approved);
-
-          const status =
-            lifecycle.toUpperCase() === "REJECTED"
-              ? "REJECTED"
-              : approved
-              ? "PUBLISHED"
-              : "PENDING";
-
-          const hasAudio = Boolean(r.audio_url || r.media_url || r.storage_key);
-
-          const hasVideo = Boolean(r.video_url || r.video_storage_key);
-
-          const audioUrl = hasAudio
-            ? issueStreamUrl(r.id, req.user?.id, "audio")
-            : null;
-
-          const videoUrl = hasVideo
-            ? issueStreamUrl(r.id, req.user?.id, "video")
-            : null;
-
-          const rawType = (r.type ?? "").toString().toUpperCase();
-
-          const type =
-            rawType ||
-            (hasAudio && hasVideo
-              ? "AUDIO_VIDEO"
-              : hasVideo
-              ? "VIDEO"
-              : "AUDIO");
-
-          const finalMediaUrl =
-            type.toLowerCase() === "video" ? videoUrl : audioUrl;
-
-          return {
-            id: r.id,
-
-            title: r.title,
-
-            type: type.toLowerCase(),
-
-            thumbnailUrl: r.thumbnail_url
-              ? toAbsoluteUrl(req, r.thumbnail_url)
-              : null,
-
-            mediaUrl: finalMediaUrl || r.media_url || null,
-
-            audioUrl,
-
-            videoUrl,
-
-            lifecycleState: lifecycle,
-
-            isApproved: r.is_approved,
-
-            status,
-
-            rejectionReason: r.rejection_reason ?? null,
-
-            totalPlays: Number(r.total_plays ?? 0),
-
-            createdAt: r.created_at,
-          };
-        });
-
-        return res.json({ success: true, items, correlationId });
-      }
-
-      const artistId = req.user?.id;
-
-      let rows: any;
-
-      try {
-        rows = await pool.query(
-          `SELECT 
-
-          c.id,
-
-          c.title,
-
-          c.type,
-
-          c.thumbnail_url,
-
-          c.media_url,
-
-          c.audio_url,
-
-          c.video_url,
-
-          c.storage_provider,
-
-          c.storage_key,
-
-          c.video_storage_key,
-
-          c.lifecycle_state,
-
-          c.is_approved,
-
-          c.rejection_reason,
-
-          c.created_at,
-
-          COUNT(p.id)::int as total_plays
-
-         FROM public.content_items c
-
-         LEFT JOIN public.content_plays p ON p.content_id = c.id
-
-         WHERE c.artist_id = $1
-
-         GROUP BY c.id
-
-         ORDER BY c.created_at DESC
-
-         LIMIT 500`,
-
-          [artistId]
-        );
-      } catch (err: any) {
-        // Fallback to minimal query if anything fails
-
-        rows = await pool.query(
-          `SELECT 
-
-          c.id,
-
-          c.title,
-
-          c.type,
-
-          c.thumbnail_url,
-
-          c.media_url,
-
-          c.audio_url,
-
-          c.video_url,
-
-          c.storage_provider,
-
-          c.storage_key,
-
-          c.video_storage_key,
-
-          c.lifecycle_state,
-
-          c.created_at
-
-         FROM public.content_items c
-
-         WHERE c.artist_id = $1
-
-         ORDER BY c.created_at DESC
-
-         LIMIT 500`,
-
-          [artistId]
-        );
-      }
-
-      const items = (rows.rows ?? []).map((r: any) => {
-        const lifecycle = (r.lifecycle_state ?? "DRAFT").toString();
-
-        const approved = Boolean(r.is_approved);
-
-        const status =
-          lifecycle.toUpperCase() === "REJECTED"
-            ? "REJECTED"
-            : approved
-            ? "PUBLISHED"
-            : "PENDING";
-
-        const hasAudio = Boolean(r.audio_url || r.media_url || r.storage_key);
-
-        const hasVideo = Boolean(r.video_url || r.video_storage_key);
-
-        const audioUrl = hasAudio
-          ? issueStreamUrl(r.id, req.user?.id, "audio")
-          : null;
-
-        const videoUrl = hasVideo
-          ? issueStreamUrl(r.id, req.user?.id, "video")
-          : null;
-
-        const rawType = (r.type ?? "").toString().toUpperCase();
-
-        const type =
-          rawType ||
-          (hasAudio && hasVideo ? "AUDIO_VIDEO" : hasVideo ? "VIDEO" : "AUDIO");
-
-        const finalMediaUrl =
-          type.toLowerCase() === "video" ? videoUrl : audioUrl;
-
-        return {
-          id: r.id,
-
-          title: r.title,
-
-          type: type.toLowerCase(),
-
-          thumbnailUrl: r.thumbnail_url
-            ? toAbsoluteUrl(req, r.thumbnail_url)
-            : null,
-
-          mediaUrl: finalMediaUrl || r.media_url || null,
-
-          audioUrl,
-
-          videoUrl,
-
-          lifecycleState: lifecycle,
-
-          isApproved: r.is_approved,
-
-          status,
-
-          rejectionReason: r.rejection_reason ?? null,
-
-          totalPlays: Number(r.total_plays ?? 0),
-
-          createdAt: r.created_at,
-        };
-      });
+      const items = result.rows.map((row: any) => ({
+        id: Number(row.id),
+        title: row.title,
+        type: String(row.type || ""),
+        genre: row.genre ?? null,
+        lifecycleState: String(row.lifecycle_state),
+        technicalStatus: String(row.status),
+        isApproved: row.is_approved === true,
+        isTakenDown: row.is_taken_down === true,
+        rejectionReason: row.rejection_reason ?? null,
+        subscriptionRequired: row.subscription_required === true,
+        hasArtwork: row.has_artwork === true,
+        hasAudio: row.has_audio === true,
+        hasVideo: row.has_video === true,
+        totalPlays: Number(row.total_plays ?? 0),
+        createdAt: row.created_at,
+        publishedAt: row.published_at ?? null,
+      }));
 
       return res.json({ success: true, items, correlationId });
     } catch {
       return res.status(500).json({
         success: false,
-
-        message: "Failed to fetch content history",
-
-        correlationId,
-      });
-    }
-  }
-);
-
-router.delete(
-  "/:id",
-  requireAuth,
-  requireArtistOrAdmin,
-  async (req: any, res: any) => {
-    const correlationId = req?.correlationId || "-";
-
-    const role = (req.user?.role || "").toUpperCase();
-
-    const actorId = req.user?.id;
-
-    const id = Number(req.params?.id);
-
-    if (!id || Number.isNaN(id) || id <= 0) {
-      return res.status(400).json({
-        success: false,
-
-        message: "Invalid content id",
-
-        correlationId,
-      });
-    }
-
-    const timestamp = new Date().toISOString();
-
-    const eventLabel =
-      role === "ADMIN"
-        ? "CONTENT_DELETED_BY_ADMIN"
-        : "CONTENT_DELETED_BY_ARTIST";
-
-    console.log(
-      `--------------------------------------------------\n[${eventLabel}] ${timestamp} correlationId=${correlationId} actorId=${actorId} contentId=${id} action=REQUEST`
-    );
-
-    try {
-      const del =
-        role === "ADMIN"
-          ? await pool.query(
-              `DELETE FROM public.content_items
-
-             WHERE id = $1
-
-             RETURNING id, title, type, artist_id, is_approved, created_at`,
-
-              [id]
-            )
-          : await pool.query(
-              `DELETE FROM public.content_items
-
-             WHERE id = $1 AND artist_id = $2
-
-             RETURNING id, title, type, artist_id, is_approved, created_at`,
-
-              [id, actorId]
-            );
-
-      if (!del.rows?.length) {
-        console.log(
-          `--------------------------------------------------\n[${eventLabel}] ${timestamp} correlationId=${correlationId} actorId=${actorId} contentId=${id} action=NOT_FOUND_OR_FORBIDDEN`
-        );
-
-        return res.status(404).json({
-          success: false,
-
-          message: "Content not found",
-
-          correlationId,
-        });
-      }
-
-      const deletedArtistId = del.rows[0]?.artist_id ?? null;
-
-      console.log(
-        `--------------------------------------------------\n[${eventLabel}] ${timestamp} correlationId=${correlationId} actorId=${actorId} contentId=${id} action=DELETED deletedArtistId=${
-          deletedArtistId ?? "-"
-        }`
-      );
-
-      await invalidateContentCache();
-
-      return res.json({ success: true, correlationId });
-    } catch {
-      console.log(
-        `--------------------------------------------------\n[${eventLabel}] ${timestamp} correlationId=${correlationId} actorId=${actorId} contentId=${id} action=ERROR`
-      );
-
-      return res.status(500).json({
-        success: false,
-
-        message: "Failed to delete content",
-
+        message: "Failed to fetch artist content",
         correlationId,
       });
     }

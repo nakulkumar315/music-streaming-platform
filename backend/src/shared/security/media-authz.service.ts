@@ -36,11 +36,6 @@ const VALID_QUALITIES: VideoQuality[] = [
   "Auto",
 ];
 
-/**
- * Quality is currently a delivery preference, not a billing entitlement.
- * Phase-1 has artist subscriptions only; platform-quality gating was scope
- * drift. Invalid values normalize to Auto instead of changing authorization.
- */
 export async function validateQualityAccess(
   _userId: number | null,
   requestedQuality?: string
@@ -62,13 +57,6 @@ export async function validateQualityAccess(
   return { authorized: true, quality, maxAllowedQuality: "1080p" };
 }
 
-/**
- * Server-owned entitlement decision.
- *
- * subscription_required=true always requires an active artist subscription,
- * even if visibility was accidentally configured PUBLIC. This prevents a
- * metadata mistake from exposing paid content.
- */
 export async function checkMediaEntitlement(
   userId: number | null,
   artistId: number,
@@ -112,6 +100,7 @@ export interface ContentForAccess {
   status: string;
   lifecycle_state: string;
   is_approved: boolean;
+  is_taken_down: boolean;
   subscription_required: boolean;
   mime_type: string | null;
   file_size_bytes: number | null;
@@ -123,36 +112,46 @@ export interface ContentForAccess {
   thumbnail_url: string | null;
 }
 
-/** Load the exact current content authorization/delivery record. */
+/**
+ * Load the exact current content authorization/delivery record. Artist account
+ * governance is part of the access boundary, not merely a catalog filter.
+ */
 export async function getContentForAccess(
   contentId: number
 ): Promise<ContentForAccess | null> {
   const result = await pool.query<ContentForAccess>(
-    `SELECT id,
-            artist_id,
-            storage_provider,
-            storage_key,
-            video_storage_key,
-            thumbnail_storage_key,
-            provider_asset_id,
-            audio_provider_asset_id,
-            video_provider_asset_id,
-            thumbnail_provider_asset_id,
-            COALESCE(visibility, 'PROTECTED') AS visibility,
-            COALESCE(status, lifecycle_state, 'DRAFT') AS status,
-            COALESCE(lifecycle_state, 'DRAFT') AS lifecycle_state,
-            COALESCE(is_approved, false) AS is_approved,
-            COALESCE(subscription_required, true) AS subscription_required,
-            mime_type,
-            file_size_bytes,
-            media_url,
-            audio_url,
-            video_url,
-            type,
-            file_key,
-            thumbnail_url
-       FROM content_items
-      WHERE id = $1
+    `SELECT c.id,
+            c.artist_id,
+            c.storage_provider,
+            c.storage_key,
+            c.video_storage_key,
+            c.thumbnail_storage_key,
+            c.provider_asset_id,
+            c.audio_provider_asset_id,
+            c.video_provider_asset_id,
+            c.thumbnail_provider_asset_id,
+            c.visibility,
+            c.status,
+            c.lifecycle_state,
+            c.is_approved,
+            c.is_taken_down,
+            c.subscription_required,
+            c.mime_type,
+            c.file_size_bytes,
+            c.media_url,
+            c.audio_url,
+            c.video_url,
+            c.type,
+            c.file_key,
+            c.thumbnail_url
+       FROM content_items c
+       JOIN users a ON a.id = c.artist_id
+      WHERE c.id = $1
+        AND UPPER(a.role) = 'ARTIST'
+        AND a.is_deleted = FALSE
+        AND UPPER(a.status) = 'ACTIVE'
+        AND a.is_verified = TRUE
+        AND UPPER(a.artist_status::text) = 'APPROVED'
       LIMIT 1`,
     [contentId]
   );

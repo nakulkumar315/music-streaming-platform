@@ -18,6 +18,10 @@ function toAbsoluteUrl(req: any, value: unknown) {
   return raw.startsWith("/") ? `${baseUrl}${raw}` : `${baseUrl}/${raw}`;
 }
 
+function artworkUrl(req: any, contentId: number) {
+  return `${req.protocol}://${req.get("host")}/api/v1/fan/stream/thumbnail/${contentId}`;
+}
+
 function artistVisibilityWhere(alias = "u") {
   return `UPPER(${alias}.role) = 'ARTIST'
     AND ${alias}.is_deleted = false
@@ -26,7 +30,6 @@ function artistVisibilityWhere(alias = "u") {
     AND UPPER(${alias}.artist_status::text) = 'APPROVED'`;
 }
 
-/** Only approved, active artists may be surfaced to fans. */
 router.get("/featured", async (req, res) => {
   const limit = pageNumber(req.query.limit, 10, 50);
   const offset = pageNumber(req.query.offset, 0, 10_000);
@@ -181,7 +184,7 @@ router.get("/:artistId/content", optionalAuth, async (req: any, res) => {
     }
 
     const result = await pool.query(
-      `SELECT c.id, c.title, c.type, c.thumbnail_url, c.created_at,
+      `SELECT c.id, c.title, c.type, c.genre, c.created_at,
               c.subscription_required,
               (SELECT COUNT(*)::int FROM content_plays p WHERE p.content_id = c.id) AS view_count,
               (SELECT COUNT(*)::int FROM content_reactions r WHERE r.content_id = c.id AND r.reaction = 'like') AS like_count,
@@ -194,15 +197,17 @@ router.get("/:artistId/content", optionalAuth, async (req: any, res) => {
                    WHERE s.user_id = $1
                      AND s.type = 'ARTIST'
                      AND s.artist_id = c.artist_id
-                     AND UPPER(s.status) = 'ACTIVE'
+                     AND s.status = 'ACTIVE'
+                     AND s.next_billing_date IS NOT NULL
                      AND s.next_billing_date > now()
                 )
               END AS has_subscription
          FROM content_items c
         WHERE c.artist_id = $2
-          AND c.is_approved = true
-          AND UPPER(c.status) IN ('APPROVED', 'PUBLISHED', 'READY')
-          AND UPPER(c.lifecycle_state) IN ('EARLY_ACCESS', 'PUBLISHED', 'READY')
+          AND c.lifecycle_state = 'EARLY_ACCESS'
+          AND c.is_approved = TRUE
+          AND c.is_taken_down = FALSE
+          AND c.status = 'READY'
           ${cursorClause}
         ORDER BY c.created_at DESC
         ${pageClause}`,
@@ -212,18 +217,26 @@ router.get("/:artistId/content", optionalAuth, async (req: any, res) => {
     const content = result.rows.map((row: any) => {
       const subscriptionRequired = row.subscription_required === true;
       const isLocked = subscriptionRequired && row.has_subscription !== true;
-      const type = String(row.type || "").toLowerCase();
+      const type = String(row.type || "AUDIO").toUpperCase();
+      const art = artworkUrl(req, Number(row.id));
       return {
         id: Number(row.id),
         title: row.title ?? "Untitled",
         type,
-        mediaType: type.includes("video") ? "video" : "audio",
-        artwork: row.thumbnail_url ? toAbsoluteUrl(req, row.thumbnail_url) : null,
-        thumbnailUrl: row.thumbnail_url ? toAbsoluteUrl(req, row.thumbnail_url) : null,
+        genre: row.genre ?? null,
+        mediaType: type === "VIDEO" ? "video" : "audio",
+        artwork: art,
+        thumbnailUrl: art,
         mediaUrl: null,
+        fileUrl: null,
+        audioUrl: null,
+        videoUrl: null,
         useStreamAccess: !isLocked,
+        playbackEndpoint: "/api/v1/fan/stream/access",
         subscriptionRequired,
         isLocked,
+        lifecycleState: "EARLY_ACCESS",
+        technicalStatus: "READY",
         createdAt: row.created_at,
         viewCount: Number(row.view_count ?? 0),
         likeCount: Number(row.like_count ?? 0),

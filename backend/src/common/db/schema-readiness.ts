@@ -1,6 +1,6 @@
 import { pool } from "./index";
 
-export const LATEST_SCHEMA_VERSION = "20260913_0006_refund_intent_integrity";
+export const LATEST_SCHEMA_VERSION = "20260913_0008_user_media_assets";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -18,8 +18,30 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "artist_id",
     "lifecycle_state",
     "is_approved",
+    "is_taken_down",
+    "status",
+    "visibility",
     "subscription_required",
+    "storage_provider",
+    "storage_key",
+    "video_storage_key",
+    "thumbnail_storage_key",
     "provider_asset_id",
+    "audio_provider_asset_id",
+    "video_provider_asset_id",
+    "thumbnail_provider_asset_id",
+  ],
+  user_media_assets: [
+    "id",
+    "user_id",
+    "kind",
+    "storage_provider",
+    "storage_key",
+    "provider_asset_id",
+    "mime_type",
+    "size_bytes",
+    "created_at",
+    "updated_at",
   ],
   user_sessions: ["id", "user_id", "device_id", "last_active_at"],
   subscriptions: [
@@ -101,6 +123,18 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
 
 const REQUIRED_CONSTRAINTS = [
   "fk_content_artist",
+  "content_items_lifecycle_state_valid",
+  "content_items_technical_status_valid",
+  "content_items_approval_state_valid",
+  "content_items_visibility_valid",
+  "content_items_type_valid",
+  "content_items_storage_provider_valid",
+  "content_items_media_key_valid",
+  "fk_user_media_assets_user",
+  "user_media_assets_user_kind_unique",
+  "user_media_assets_kind_valid",
+  "user_media_assets_provider_valid",
+  "user_media_assets_size_positive",
   "fk_sessions_user",
   "fk_subscriptions_user",
   "fk_subscriptions_artist",
@@ -131,11 +165,7 @@ export type SchemaReadinessResult = {
   schema: string;
 };
 
-/**
- * Verifies, but never mutates, the database schema before the HTTP listener is
- * opened. Missing financial/refund schema is therefore a deployment failure,
- * not a runtime refund inconsistency.
- */
+/** Verify, but never mutate, the database schema before opening the listener. */
 export async function assertDatabaseSchemaReady(): Promise<SchemaReadinessResult> {
   const client = await pool.connect();
   try {

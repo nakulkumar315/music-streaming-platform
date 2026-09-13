@@ -1,6 +1,6 @@
 /**
- * Storage provider factory. Section 9.
- * Fail-fast if provider is misconfigured; no implicit fallback.
+ * Canonical storage provider factory.
+ * Fails fast on invalid provider configuration and never silently falls back.
  */
 
 import type { IStorageProvider } from "../interfaces/storage-provider.interface";
@@ -20,13 +20,31 @@ export function createStorageProvider(): IStorageProvider {
   const provider = config.provider;
 
   if (provider === "local") {
-    console.error("[Storage] ERROR: Local provider is deprecated. Please use Cloudinary.");
-    throw new StorageProviderNotConfiguredException("local - use cloudinary instead");
+    if (String(process.env.NODE_ENV || "development").toLowerCase() === "production") {
+      throw new StorageProviderNotConfiguredException(
+        "local (development/test only; production requires a managed private provider)"
+      );
+    }
+    instance = new LocalStorageProvider(config.local.root);
+    return instance;
   }
 
   if (provider === "firebase") {
-    console.error("[Storage] ERROR: Firebase provider is deprecated. Please use Cloudinary.");
-    throw new StorageProviderNotConfiguredException("firebase - use cloudinary instead");
+    if (
+      !config.firebase.projectId ||
+      !config.firebase.clientEmail ||
+      !config.firebase.privateKey ||
+      !config.firebase.storageBucket
+    ) {
+      throw new StorageProviderNotConfiguredException("firebase");
+    }
+    instance = new FirebaseStorageProvider({
+      projectId: config.firebase.projectId,
+      clientEmail: config.firebase.clientEmail,
+      privateKey: config.firebase.privateKey,
+      storageBucket: config.firebase.storageBucket,
+    });
+    return instance;
   }
 
   if (provider === "s3") {
@@ -37,9 +55,8 @@ export function createStorageProvider(): IStorageProvider {
       accessKeyId: config.s3.accessKeyId,
       secretAccessKey: config.s3.secretAccessKey,
       region: config.s3.region,
-      bucket: config.s3.bucket
+      bucket: config.s3.bucket,
     });
-    console.log("[Storage] Provider: s3");
     return instance;
   }
 
@@ -55,17 +72,17 @@ export function getStorageProvider(): IStorageProvider {
   return createStorageProvider();
 }
 
-/**
- * Get a storage provider by name for per-row storage handling.
- * This allows reading content from different providers based on row's storage_provider column.
- */
+/** Resolve the provider recorded on a row without changing the active provider. */
 export function getStorageProviderByName(provider: StorageProviderName): IStorageProvider {
   const config = getStorageConfig();
-  
+
   if (provider === "local") {
+    if (String(process.env.NODE_ENV || "development").toLowerCase() === "production") {
+      throw new StorageProviderNotConfiguredException("local (development/test only)");
+    }
     return new LocalStorageProvider(config.local.root);
   }
-  
+
   if (provider === "firebase") {
     if (
       !config.firebase.projectId ||
@@ -79,10 +96,10 @@ export function getStorageProviderByName(provider: StorageProviderName): IStorag
       projectId: config.firebase.projectId,
       clientEmail: config.firebase.clientEmail,
       privateKey: config.firebase.privateKey,
-      storageBucket: config.firebase.storageBucket
+      storageBucket: config.firebase.storageBucket,
     });
   }
-  
+
   if (provider === "s3") {
     if (!config.s3.bucket || !config.s3.region) {
       throw new StorageProviderNotConfiguredException("s3");
@@ -91,13 +108,13 @@ export function getStorageProviderByName(provider: StorageProviderName): IStorag
       accessKeyId: config.s3.accessKeyId,
       secretAccessKey: config.s3.secretAccessKey,
       region: config.s3.region,
-      bucket: config.s3.bucket
+      bucket: config.s3.bucket,
     });
   }
-  
+
   if (provider === "cloudinary") {
     return new CloudinaryStorageProvider();
   }
-  
+
   throw new StorageProviderNotConfiguredException(provider);
 }

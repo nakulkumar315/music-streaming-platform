@@ -3,8 +3,7 @@
  * Controllers and business logic use this, never provider SDKs directly.
  */
 
-import { getStorageProvider, getStorageProviderByName } from "../factory/storage-provider.factory";
-import type { StorageProviderName } from "../interfaces/storage-types.interface";
+import { getStorageProvider } from "../factory/storage-provider.factory";
 import type { IStorageProvider } from "../interfaces/storage-provider.interface";
 import type {
   UploadObjectParams,
@@ -23,16 +22,19 @@ export class StorageService {
     return this.provider.upload(params);
   }
 
-  async delete(storageKey: string): Promise<void> {
-    return this.provider.delete(storageKey);
+  async delete(storageKey: string, providerAssetId?: string): Promise<void> {
+    return this.provider.delete(storageKey, providerAssetId);
   }
 
-  async exists(storageKey: string): Promise<boolean> {
-    return this.provider.exists(storageKey);
+  async exists(storageKey: string, providerAssetId?: string): Promise<boolean> {
+    return this.provider.exists(storageKey, providerAssetId);
   }
 
-  async getObjectMetadata(storageKey: string): Promise<ObjectMetadata | null> {
-    return this.provider.getObjectMetadata(storageKey);
+  async getObjectMetadata(
+    storageKey: string,
+    providerAssetId?: string
+  ): Promise<ObjectMetadata | null> {
+    return this.provider.getObjectMetadata(storageKey, providerAssetId);
   }
 
   async openReadStream(params: OpenReadStreamParams): Promise<OpenReadStreamResult> {

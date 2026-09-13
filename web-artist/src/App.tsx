@@ -15,7 +15,6 @@ const ArtistAccountPage = lazy(() => import("./pages/ArtistAccountPage"));
 const ArtistPricingPage = lazy(() => import("./pages/ArtistPricingPage"));
 const ArtistAnalyticsSummaryPage = lazy(() => import("./pages/ArtistAnalyticsSummaryPage"));
 const ArtistContentHistoryPage = lazy(() => import("./pages/ArtistContentHistoryPage"));
-const ArtistContentUploadPage = lazy(() => import("./pages/ArtistContentUploadPage"));
 
 const PageFallback = () => (
   <div className="p-8 grow">
@@ -41,7 +40,6 @@ export default function App() {
           <Route path="/artist/account" element={<ArtistAccountPage />} />
           <Route path="/artist/pricing" element={<ArtistPricingPage />} />
           <Route path="/artist/analytics-summary" element={<ArtistAnalyticsSummaryPage />} />
-          <Route path="/artist/content-upload" element={<ArtistContentUploadPage />} />
           <Route path="/artist/content-history" element={<ArtistContentHistoryPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/artist/login" replace />} />

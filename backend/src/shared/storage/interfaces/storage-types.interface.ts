@@ -10,6 +10,8 @@ export interface UploadObjectParams {
   storageKey: string;
   body: Buffer | Readable;
   contentType: string;
+  /** Known source size allows streaming providers to avoid buffering. */
+  contentLength?: number;
   metadata?: Record<string, string>;
 }
 

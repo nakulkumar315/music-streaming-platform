@@ -9,11 +9,18 @@ export function isStatusPlayable(status: string): boolean {
   return PLAYABLE_STATUSES.has(normalized);
 }
 
-export function isContentEligibleForPlayback(
-  status: string,
-  isApproved: boolean
-): boolean {
-  return Boolean(isApproved) && isStatusPlayable(status);
+export function isContentEligibleForPlayback(input: {
+  technicalStatus: string;
+  lifecycleState: string;
+  isApproved: boolean;
+  isTakenDown: boolean;
+}): boolean {
+  return (
+    !input.isTakenDown &&
+    Boolean(input.isApproved) &&
+    String(input.lifecycleState || "").trim().toUpperCase() === "EARLY_ACCESS" &&
+    isStatusPlayable(input.technicalStatus)
+  );
 }
 
 /**

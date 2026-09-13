@@ -1,28 +1,16 @@
 /**
- * Media lifecycle and visibility constants.
+ * Canonical media technical lifecycle and visibility constants.
+ * Business publication state lives in content_items.lifecycle_state.
  */
 
 export const MEDIA_STATUS = {
-  DRAFT: "DRAFT",
   UPLOADING: "UPLOADING",
   PROCESSING: "PROCESSING",
   READY: "READY",
   FAILED: "FAILED",
-  REJECTED: "REJECTED",
-  TAKEDOWN: "TAKEDOWN",
-  DELETED: "DELETED",
-  BLOCKED: "BLOCKED",
 } as const;
 
-/**
- * Transitional production-playable states while content lifecycle naming is
- * consolidated. PROCESSING is intentionally excluded.
- */
-export const PLAYABLE_STATUSES = new Set([
-  MEDIA_STATUS.READY,
-  "PUBLISHED",
-  "APPROVED",
-]);
+export const PLAYABLE_STATUSES = new Set([MEDIA_STATUS.READY]);
 
 export const VISIBILITY = {
   PUBLIC: "PUBLIC",

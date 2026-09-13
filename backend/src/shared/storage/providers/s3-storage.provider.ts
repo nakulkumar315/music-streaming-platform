@@ -2,7 +2,6 @@
  * AWS S3 storage provider using AWS SDK v3. Section 25.3.
  */
 
-import { Readable } from "stream";
 import type { IStorageProvider } from "../interfaces/storage-provider.interface";
 import type {
   UploadObjectParams,
@@ -16,6 +15,7 @@ import {
   StorageDeleteFailedException,
   StorageReadFailedException
 } from "../../exceptions/storage.exception";
+import { Readable } from "stream";
 
 export interface S3StorageProviderConfig {
   accessKeyId: string;
@@ -46,25 +46,35 @@ export class S3StorageProvider implements IStorageProvider {
   }
 
   async upload(params: UploadObjectParams): Promise<UploadObjectResult> {
-    const { storageKey, body, contentType } = params;
+    const { storageKey, body, contentType, contentLength } = params;
     try {
       const client = await this.getClient();
       const { PutObjectCommand } = await import("@aws-sdk/client-s3");
-      const buffer = Buffer.isBuffer(body) ? body : await streamToBuffer(body as Readable);
+      const knownLength = Buffer.isBuffer(body) ? body.length : contentLength;
+      if (!Buffer.isBuffer(body) && (!Number.isSafeInteger(knownLength) || Number(knownLength) <= 0)) {
+        throw new StorageUploadFailedException(
+          "S3 streaming upload requires a known positive content length",
+          storageKey
+        );
+      }
+
       const cmd = new PutObjectCommand({
         Bucket: this.bucket,
         Key: storageKey,
-        Body: buffer,
-        ContentType: contentType
+        Body: body,
+        ContentType: contentType,
+        ...(knownLength ? { ContentLength: knownLength } : {}),
+        ...(params.metadata ? { Metadata: params.metadata } : {})
       });
       const result = await client.send(cmd);
       return {
         storageKey,
         providerAssetId: storageKey,
         etag: result.ETag,
-        sizeBytes: buffer.length
+        sizeBytes: knownLength
       };
     } catch (err: any) {
+      if (err instanceof StorageUploadFailedException) throw err;
       throw new StorageUploadFailedException(
         err?.message || "S3 upload failed",
         storageKey
@@ -132,24 +142,15 @@ export class S3StorageProvider implements IStorageProvider {
       });
       const response = await client.send(cmd);
       const stream = response.Body as Readable;
-      const contentLength = response.ContentLength ?? undefined;
+      const responseLength = response.ContentLength ?? undefined;
       return {
         stream,
         contentType: response.ContentType,
-        contentLength,
+        contentLength: responseLength,
         acceptRanges: true
       };
     } catch (err: any) {
       throw new StorageReadFailedException(err?.message || "S3 getObject failed", storageKey);
     }
   }
-}
-
-function streamToBuffer(stream: Readable): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
 }

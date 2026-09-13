@@ -1,13 +1,13 @@
 import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
-import { pool } from "../../common/db";
 import { logger } from "../../common/logger";
 import { getMediaConfig } from "../../config/media.config";
 import { requestPlaybackAccess } from "../media/media-access.service";
 import { isContentEligibleForPlayback } from "../media/media-policy.service";
 import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
 import { resolveMediaIdentity } from "../../shared/media/media-asset-locator";
+import { getContentForAccess } from "../../shared/security/media-authz.service";
 import {
   heartbeatPlaybackSession,
   terminatePlaybackSession,
@@ -101,7 +101,6 @@ router.post("/access", requireAuth, requireFan, async (req: any, res: any) => {
   }
 });
 
-/** Client should refresh the exact issued session every 30-60 seconds. */
 router.post("/heartbeat", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const userId = positiveInteger(req.user?.id);
@@ -148,7 +147,6 @@ router.post("/heartbeat", requireAuth, requireFan, async (req: any, res: any) =>
   }
 });
 
-/** Explicitly revokes the exact playback session. */
 router.post("/terminate", requireAuth, requireFan, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const userId = positiveInteger(req.user?.id);
@@ -175,9 +173,9 @@ router.post("/terminate", requireAuth, requireFan, async (req: any, res: any) =>
 });
 
 /**
- * Fan artwork delivery. Thumbnails may be delivered without a playback session,
- * but only for approved/playable content and only through explicit provider
- * identity; raw legacy media URL fallbacks are intentionally not used.
+ * Artwork may be public, but only for content that is currently eligible for
+ * fan discovery/playback. The canonical access record also enforces the
+ * owning artist's current approval/account state.
  */
 router.get("/thumbnail/:contentId", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
@@ -187,19 +185,19 @@ router.get("/thumbnail/:contentId", async (req: any, res: any) => {
   }
 
   try {
-    const result = await pool.query(
-      `SELECT id, status, lifecycle_state, is_approved, storage_provider,
-              thumbnail_storage_key, thumbnail_provider_asset_id
-         FROM content_items
-        WHERE id = $1
-        LIMIT 1`,
-      [contentId]
-    );
-    const row = result.rows[0];
-    if (!row) return res.status(404).json({ success: false, message: "Thumbnail not found", correlationId });
+    const row = await getContentForAccess(contentId);
+    if (!row) {
+      return res.status(404).json({ success: false, message: "Thumbnail not found", correlationId });
+    }
 
-    const status = String(row.status || row.lifecycle_state || "DRAFT").toUpperCase();
-    if (!isContentEligibleForPlayback(status, Boolean(row.is_approved))) {
+    if (
+      !isContentEligibleForPlayback({
+        technicalStatus: String(row.status || ""),
+        lifecycleState: String(row.lifecycle_state || ""),
+        isApproved: Boolean(row.is_approved),
+        isTakenDown: Boolean(row.is_taken_down),
+      })
+    ) {
       return res.status(404).json({ success: false, message: "Thumbnail not available", correlationId });
     }
 
@@ -221,11 +219,11 @@ router.get("/thumbnail/:contentId", async (req: any, res: any) => {
       if (url) return res.redirect(302, url);
     }
 
-    if (!storageKey) {
+    if (!storageKey || !storage.openReadStream) {
       return res.status(404).json({ success: false, message: "Thumbnail mapping incomplete", correlationId });
     }
 
-    const metadata = await storage.getObjectMetadata(storageKey);
+    const metadata = await storage.getObjectMetadata(storageKey, providerAssetId || undefined);
     const read = await storage.openReadStream({ storageKey });
     const contentType = metadata?.contentType || read?.contentType;
     const contentLength = metadata?.contentLength ?? read?.contentLength;
