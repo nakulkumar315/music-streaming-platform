@@ -31,6 +31,112 @@ export class StreamAccessError extends Error {
   }
 }
 
+export type PlaybackErrorPresentation = {
+  title: string;
+  message: string;
+  retryable: boolean;
+  shouldStopPlayback: boolean;
+};
+
+/**
+ * Converts backend machine codes into deterministic user-safe playback UX.
+ * Do not parse backend message strings here; those are diagnostic text and may
+ * change independently of the public API contract.
+ */
+export function getPlaybackErrorPresentation(error: unknown): PlaybackErrorPresentation {
+  const code = error instanceof StreamAccessError ? error.code : 'STREAM_ACCESS_FAILED';
+
+  switch (code) {
+    case 'AUTHENTICATION_REQUIRED':
+    case 'UNAUTHORIZED':
+      return {
+        title: 'Sign in required',
+        message: 'Your session is no longer active. Please sign in again to continue playback.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    case 'SUBSCRIPTION_REQUIRED':
+      return {
+        title: 'Subscription required',
+        message: 'This release requires an active subscription to the artist.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    case 'SUBSCRIPTION_EXPIRED':
+      return {
+        title: 'Subscription expired',
+        message: 'Your artist subscription has expired. Renew it to continue playback.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    case 'SUBSCRIPTION_INACTIVE':
+      return {
+        title: 'Subscription unavailable',
+        message: 'Your artist subscription is not active. Check your subscription before trying again.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    case 'CONTENT_TAKEN_DOWN':
+      return {
+        title: 'Content unavailable',
+        message: 'This content is no longer available for playback.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    case 'CONTENT_NOT_READY':
+      return {
+        title: 'Content not ready',
+        message: 'This content is still being prepared. Please try again later.',
+        retryable: true,
+        shouldStopPlayback: true,
+      };
+    case 'PLAYBACK_SESSION_LIMIT':
+      return {
+        title: 'Playback limit reached',
+        message: 'Too many playback sessions are active. Close another stream and try again.',
+        retryable: true,
+        shouldStopPlayback: false,
+      };
+    case 'PLAYBACK_ACCESS_EXPIRED':
+    case 'INVALID_PLAYBACK_TOKEN':
+      return {
+        title: 'Playback session expired',
+        message: 'Playback access expired. Please retry to request a fresh playback session.',
+        retryable: true,
+        shouldStopPlayback: true,
+      };
+    case 'CONTENT_NOT_FOUND':
+      return {
+        title: 'Content unavailable',
+        message: 'This content could not be found or is no longer available.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    case 'DELIVERY_PROVIDER_UNAVAILABLE':
+    case 'PLAYBACK_URL_GENERATION_FAILED':
+      return {
+        title: 'Playback temporarily unavailable',
+        message: 'The media service is temporarily unavailable. Please try again shortly.',
+        retryable: true,
+        shouldStopPlayback: false,
+      };
+    case 'INVALID_PLAYBACK_URL':
+      return {
+        title: 'Playback unavailable',
+        message: 'The server returned an invalid playback source. Please try again later.',
+        retryable: false,
+        shouldStopPlayback: true,
+      };
+    default:
+      return {
+        title: 'Playback error',
+        message: 'Could not start playback. Please try again.',
+        retryable: true,
+        shouldStopPlayback: false,
+      };
+  }
+}
+
 function getDevHost(): string | null {
   const hostUri =
     (Constants.expoConfig as any)?.hostUri ??
