@@ -1,4 +1,5 @@
 import { pool } from "../../common/db";
+import { AuditService } from "../../shared/audit/audit.service";
 
 export type ArtistApprovalDecision = "APPROVE" | "REJECT";
 
@@ -27,10 +28,17 @@ export class ArtistApprovalService {
     artistId: number;
     action: ArtistApprovalDecision;
     reason?: string | null;
+    actorId: number;
+    correlationId?: string;
   }): Promise<ArtistApprovalResult> {
     const artistId = Number(input.artistId);
     if (!Number.isSafeInteger(artistId) || artistId <= 0) {
       throw approvalError("Invalid artist id", 400, "INVALID_ARTIST_ID");
+    }
+
+    const actorId = Number(input.actorId);
+    if (!Number.isSafeInteger(actorId) || actorId <= 0) {
+      throw approvalError("Invalid admin actor", 401, "INVALID_ADMIN_ACTOR");
     }
 
     const action = input.action;
@@ -69,6 +77,8 @@ export class ArtistApprovalService {
       }
 
       const previousStatus = String(artist.artist_status || "PENDING").toUpperCase();
+      const nextStatus: "APPROVED" | "REJECTED" =
+        action === "APPROVE" ? "APPROVED" : "REJECTED";
 
       if (action === "APPROVE") {
         await client.query(
@@ -90,35 +100,47 @@ export class ArtistApprovalService {
            ON CONFLICT (artist_id) DO NOTHING`,
           [artistId]
         );
-
-        await client.query("COMMIT");
-        return {
-          artistId,
-          previousStatus,
-          status: "APPROVED",
-          isVerified: true,
-          reason: null,
-        };
+      } else {
+        await client.query(
+          `UPDATE users
+              SET artist_status = 'REJECTED',
+                  is_verified = false,
+                  verified = false,
+                  admin_remarks = $2,
+                  updated_at = now()
+            WHERE id = $1`,
+          [artistId, reason]
+        );
       }
 
-      await client.query(
-        `UPDATE users
-            SET artist_status = 'REJECTED',
-                is_verified = false,
-                verified = false,
-                admin_remarks = $2,
-                updated_at = now()
-          WHERE id = $1`,
-        [artistId, reason]
+      await AuditService.logCritical(
+        {
+          action:
+            nextStatus === "APPROVED"
+              ? "admin.artist_approved"
+              : "admin.artist_rejected",
+          entity: "user",
+          entityId: String(artistId),
+          performedBy: actorId,
+          role: "admin",
+          status: "success",
+          correlationId: input.correlationId,
+          metadata: {
+            previousStatus,
+            nextStatus,
+            ...(reason ? { reason } : {}),
+          },
+        },
+        client
       );
 
       await client.query("COMMIT");
       return {
         artistId,
         previousStatus,
-        status: "REJECTED",
-        isVerified: false,
-        reason,
+        status: nextStatus,
+        isVerified: nextStatus === "APPROVED",
+        reason: nextStatus === "REJECTED" ? reason : null,
       };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
