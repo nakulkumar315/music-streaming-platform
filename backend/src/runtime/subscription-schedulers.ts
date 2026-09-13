@@ -2,16 +2,21 @@ import { pool } from "../common/db";
 import { logger } from "../common/logger";
 import { NotificationService } from "../shared/notifications/notification.service";
 import { WinBackService } from "../shared/subscriptions/win-back.service";
+import { runClaimedJob } from "./operational-job-claim";
 
 export type RuntimeSchedulers = {
   stop(): void;
 };
 
+const SIX_HOURS = 6 * 60 * 60 * 1000;
+const ONE_HOUR = 60 * 60 * 1000;
+const ONE_DAY = 24 * 60 * 60 * 1000;
+
 export function startSubscriptionSchedulers(): RuntimeSchedulers {
   const timers: NodeJS.Timeout[] = [];
 
   const sweepExpiredSubscriptions = async () => {
-    try {
+    await runClaimedJob("subscription-expiry", SIX_HOURS, async () => {
       const result = await pool.query(`
         UPDATE subscriptions
         SET status = 'EXPIRED', updated_at = now()
@@ -22,7 +27,7 @@ export function startSubscriptionSchedulers(): RuntimeSchedulers {
       `);
 
       for (const row of result.rows) {
-        WinBackService.processChurnedUser(
+        await WinBackService.processChurnedUser(
           row.id,
           row.user_id,
           row.type,
@@ -31,13 +36,12 @@ export function startSubscriptionSchedulers(): RuntimeSchedulers {
           logger.error({ error, subscriptionId: row.id }, "[WinBack] Failed")
         );
       }
-    } catch (error) {
-      logger.error({ error }, "[Sweeper] Subscription expiry sweep failed");
-    }
+      logger.info({ updated: result.rowCount ?? 0 }, "[Sweeper] Subscription expiry sweep completed");
+    });
   };
 
   const notifyExpiringSubscriptions = async () => {
-    try {
+    await runClaimedJob("subscription-expiry-notification", ONE_HOUR, async () => {
       const result = await pool.query(`
         SELECT s.user_id, s.artist_id, u.name AS artist_name
         FROM subscriptions s
@@ -49,7 +53,7 @@ export function startSubscriptionSchedulers(): RuntimeSchedulers {
       `);
 
       for (const row of result.rows) {
-        NotificationService.sendToUser({
+        await NotificationService.sendToUser({
           userId: String(row.user_id),
           title: "Subscription Expiring Soon! ⏳",
           body: `Your subscription to ${row.artist_name || "your artist"} will expire in 2 days.`,
@@ -58,29 +62,44 @@ export function startSubscriptionSchedulers(): RuntimeSchedulers {
           logger.error({ error, userId: row.user_id }, "[Notifier] Expiry warning failed")
         );
       }
-    } catch (error) {
-      logger.error({ error }, "[Notifier] Expiry notification scan failed");
-    }
+      logger.info({ attempted: result.rowCount ?? 0 }, "[Notifier] Expiry notification scan completed");
+    });
   };
 
-  const sweepStaleSessions = async () => {
-    try {
-      await pool.query(`
+  const sweepStaleUserSessions = async () => {
+    await runClaimedJob("stale-user-session-cleanup", ONE_DAY, async () => {
+      const result = await pool.query(`
         DELETE FROM user_sessions
         WHERE last_active_at < now() - interval '30 days'
       `);
-    } catch (error) {
-      logger.error({ error }, "[Sweeper] Stale session cleanup failed");
-    }
+      logger.info({ deleted: result.rowCount ?? 0 }, "[Sweeper] Stale user session cleanup completed");
+    });
   };
 
-  void sweepExpiredSubscriptions();
-  void notifyExpiringSubscriptions();
-  void sweepStaleSessions();
+  const sweepStalePlaybackSessions = async () => {
+    await runClaimedJob("stale-playback-session-cleanup", ONE_DAY, async () => {
+      const result = await pool.query(`
+        DELETE FROM playback_sessions
+        WHERE (ended_at IS NOT NULL AND ended_at < now() - interval '24 hours')
+           OR (ended_at IS NULL AND heartbeat_at < now() - interval '24 hours')
+      `);
+      logger.info({ deleted: result.rowCount ?? 0 }, "[Sweeper] Stale playback session cleanup completed");
+    });
+  };
 
-  timers.push(setInterval(() => void sweepExpiredSubscriptions(), 6 * 60 * 60 * 1000));
-  timers.push(setInterval(() => void notifyExpiringSubscriptions(), 60 * 60 * 1000));
-  timers.push(setInterval(() => void sweepStaleSessions(), 24 * 60 * 60 * 1000));
+  const guarded = (label: string, task: () => Promise<void>) => {
+    void task().catch((error) => logger.error({ error, label }, "[Scheduler] Job failed"));
+  };
+
+  guarded("subscription-expiry", sweepExpiredSubscriptions);
+  guarded("subscription-expiry-notification", notifyExpiringSubscriptions);
+  guarded("stale-user-session-cleanup", sweepStaleUserSessions);
+  guarded("stale-playback-session-cleanup", sweepStalePlaybackSessions);
+
+  timers.push(setInterval(() => guarded("subscription-expiry", sweepExpiredSubscriptions), SIX_HOURS));
+  timers.push(setInterval(() => guarded("subscription-expiry-notification", notifyExpiringSubscriptions), ONE_HOUR));
+  timers.push(setInterval(() => guarded("stale-user-session-cleanup", sweepStaleUserSessions), ONE_DAY));
+  timers.push(setInterval(() => guarded("stale-playback-session-cleanup", sweepStalePlaybackSessions), ONE_DAY));
 
   return {
     stop() {
