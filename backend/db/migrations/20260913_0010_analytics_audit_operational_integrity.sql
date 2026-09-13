@@ -83,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_analytics_events_session
 CREATE TABLE IF NOT EXISTS operational_job_runs (
   job_name VARCHAR(100) NOT NULL,
   window_key VARCHAR(80) NOT NULL,
+  run_token UUID NOT NULL DEFAULT gen_random_uuid(),
   status VARCHAR(20) NOT NULL DEFAULT 'RUNNING',
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ,
