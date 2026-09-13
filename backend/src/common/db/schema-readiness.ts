@@ -1,7 +1,6 @@
 import { pool } from "./index";
 
-// Earlier required hardening migrations: 20260913_0008_user_media_assets
-export const LATEST_SCHEMA_VERSION = "20260913_0009_playback_progress";
+export const LATEST_SCHEMA_VERSION = "20260913_0010_analytics_audit_operational_integrity";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -31,6 +30,24 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "audio_provider_asset_id",
     "video_provider_asset_id",
     "thumbnail_provider_asset_id",
+  ],
+  content_plays: ["id", "content_id", "user_id", "playback_session_id", "created_at"],
+  analytics_events: [
+    "id",
+    "event_type",
+    "event_key",
+    "user_id",
+    "content_id",
+    "playback_session_id",
+    "created_at",
+  ],
+  operational_job_runs: [
+    "job_name",
+    "window_key",
+    "status",
+    "started_at",
+    "completed_at",
+    "last_error",
   ],
   user_media_assets: [
     "id",
@@ -106,7 +123,18 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "event_type",
     "created_at",
   ],
-  audit_logs: ["id", "action", "entity", "status", "created_at"],
+  audit_logs: [
+    "id",
+    "action",
+    "entity",
+    "entity_id",
+    "actor_id",
+    "actor_role",
+    "status",
+    "correlation_id",
+    "metadata",
+    "created_at",
+  ],
   playback_history: ["id", "user_id", "content_id", "played_at"],
   playback_sessions: [
     "id",
@@ -117,6 +145,11 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "current_position",
     "duration",
     "ended_at",
+    "analytics_heartbeat_at",
+    "last_accepted_position",
+    "trusted_listened_seconds",
+    "last_heartbeat_sequence",
+    "play_counted_at",
   ],
   revenue_share_configs: ["id", "version", "artist_share", "platform_share"],
   terms_versions: ["id", "version", "content", "effective_from"],
@@ -155,6 +188,14 @@ const REQUIRED_CONSTRAINTS = [
   "fk_playback_history_content",
   "fk_playback_sessions_user",
   "fk_playback_sessions_content",
+  "fk_content_plays_playback_session",
+  "playback_sessions_last_accepted_position_nonnegative",
+  "playback_sessions_trusted_listened_seconds_nonnegative",
+  "playback_sessions_last_heartbeat_sequence_nonnegative",
+  "analytics_events_event_type_valid",
+  "analytics_events_user_event_key_unique",
+  "operational_job_runs_pkey",
+  "operational_job_runs_status_valid",
   "fk_refund_requests_payment",
   "fk_refund_requests_subscription",
   "fk_refund_requests_user",
@@ -175,6 +216,11 @@ const REQUIRED_CONSTRAINTS = [
 
 const REQUIRED_INDEXES = [
   "idx_playback_progress_user_updated",
+  "idx_content_plays_playback_session_unique",
+  "idx_analytics_events_content_created",
+  "idx_analytics_events_user_created",
+  "idx_analytics_events_session",
+  "idx_operational_job_runs_started",
 ];
 
 export type SchemaReadinessResult = {
@@ -263,6 +309,16 @@ export async function assertDatabaseSchemaReady(): Promise<SchemaReadinessResult
     for (const idx of REQUIRED_INDEXES) {
       if (!actualIndexes.has(idx)) missing.push(`index:${idx}`);
     }
+
+    const auditTrigger = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM pg_trigger
+         WHERE tgname = 'audit_logs_append_only'
+           AND NOT tgisinternal
+       ) AS exists`
+    );
+    if (!auditTrigger.rows[0]?.exists) missing.push("trigger:audit_logs_append_only");
 
     if (missing.length > 0) {
       throw new Error(
