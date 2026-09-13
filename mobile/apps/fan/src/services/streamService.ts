@@ -31,8 +31,10 @@ export type PlaybackAccess = {
 export type ActivePlaybackLease = {
   contentId: number;
   sessionId: number;
+  lastValidatedAtMs: number;
 };
 
+const ACTIVE_LEASE_LOCAL_FRESHNESS_MS = 4 * 60 * 1000;
 let activePlaybackLease: ActivePlaybackLease | null = null;
 
 export class StreamAccessError extends Error {
@@ -229,6 +231,15 @@ function positiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function storeActiveLease(contentId: number, sessionId: number): ActivePlaybackLease {
+  activePlaybackLease = {
+    contentId,
+    sessionId,
+    lastValidatedAtMs: Date.now(),
+  };
+  return { ...activePlaybackLease };
+}
+
 export function getActivePlaybackLease(
   contentId?: string | number
 ): ActivePlaybackLease | null {
@@ -237,6 +248,15 @@ export function getActivePlaybackLease(
   const validContentId = positiveInteger(contentId);
   if (!validContentId || validContentId !== activePlaybackLease.contentId) return null;
   return { ...activePlaybackLease };
+}
+
+export function markActivePlaybackLeaseAlive(sessionId: number): void {
+  const validSessionId = positiveInteger(sessionId);
+  if (!validSessionId || activePlaybackLease?.sessionId !== validSessionId) return;
+  activePlaybackLease = {
+    ...activePlaybackLease,
+    lastValidatedAtMs: Date.now(),
+  };
 }
 
 function clearActivePlaybackLease(expectedSessionId?: number) {
@@ -360,12 +380,6 @@ export async function releaseActivePlaybackLease(): Promise<boolean> {
  * after the backend has rejected the old heartbeat/session as expired. The
  * fresh access request re-checks account/content/subscription authorization and
  * concurrency before a new lease is accepted locally.
- *
- * The returned signed URL is intentionally not persisted. Native playback may
- * already have an open/buffered source; this command repairs the control-plane
- * authorization lease so subsequent trusted heartbeats are bound to a current
- * server session. Normal player URL refresh paths still apply fresh URLs when
- * the source itself needs renewal.
  */
 export async function reacquireExpiredPlaybackLease(
   contentId: string | number
@@ -382,11 +396,58 @@ export async function reacquireExpiredPlaybackLease(
   }
 
   const access = await getPlaybackAccess(numericContentId);
-  activePlaybackLease = {
-    contentId: numericContentId,
-    sessionId: access.sessionId,
-  };
-  return { ...activePlaybackLease };
+  return storeActiveLease(numericContentId, access.sessionId);
+}
+
+/**
+ * Return a locally-fresh lease, refresh an older same-content lease, or create a
+ * new one when none exists. The backend is authoritative for whether a stale
+ * lease is still reusable; an expired/mismatched lease is explicitly replaced
+ * only after that refresh attempt fails with a session-expiry code.
+ */
+export async function ensureActivePlaybackLease(
+  contentId: string | number
+): Promise<ActivePlaybackLease> {
+  const numericContentId = positiveInteger(contentId);
+  if (!numericContentId) {
+    throw new StreamAccessError('Invalid content id', 'INVALID_CONTENT_ID', null);
+  }
+
+  if (activePlaybackLease && activePlaybackLease.contentId !== numericContentId) {
+    await releaseActivePlaybackLease();
+  }
+
+  const existing = getActivePlaybackLease(numericContentId);
+  if (
+    existing &&
+    Date.now() - existing.lastValidatedAtMs < ACTIVE_LEASE_LOCAL_FRESHNESS_MS
+  ) {
+    return existing;
+  }
+
+  if (existing) {
+    try {
+      const refreshed = await getPlaybackAccess(
+        numericContentId,
+        undefined,
+        undefined,
+        existing.sessionId
+      );
+      return storeActiveLease(numericContentId, refreshed.sessionId);
+    } catch (error) {
+      if (
+        !(error instanceof StreamAccessError) ||
+        (error.code !== 'PLAYBACK_SESSION_EXPIRED' &&
+          error.code !== 'PLAYBACK_SESSION_MISMATCH')
+      ) {
+        throw error;
+      }
+      clearActivePlaybackLease(existing.sessionId);
+    }
+  }
+
+  const created = await getPlaybackAccess(numericContentId);
+  return storeActiveLease(numericContentId, created.sessionId);
 }
 
 /**
@@ -416,10 +477,7 @@ export async function getPlaybackUrl(
       quality,
       existing?.sessionId
     );
-    activePlaybackLease = {
-      contentId: numericContentId,
-      sessionId: access.sessionId,
-    };
+    storeActiveLease(numericContentId, access.sessionId);
     return access.playbackUrl;
   } catch (error) {
     if (
