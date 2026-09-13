@@ -7,7 +7,6 @@ import adminArtistsRoutes from "./artists";
 import adminContentRoutes from "./content";
 import adminMediaRoutes from "./media";
 import adminFeaturedArtistsRoutes from "./featured-artists";
-import adminImageUploadRoutes from "./image-upload";
 import adminRefundRoutes from "./refunds";
 import adminSubscriptionRoutes from "./subscriptions";
 import adminAuditRoutes from "./audit";
@@ -34,12 +33,6 @@ router.use(
   requireAuth,
   requireRoles("ADMIN"),
   adminFeaturedArtistsRoutes
-);
-router.use(
-  "/upload-image",
-  requireAuth,
-  requireRoles("ADMIN"),
-  adminImageUploadRoutes
 );
 router.use(
   "/refunds",
