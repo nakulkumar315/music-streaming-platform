@@ -38,12 +38,43 @@ test('production guest experience has no committed mock catalog or diagnostics s
   assert.match(guestHome, /api|contentApi|searchApi/);
 });
 
-test('subscription success is gated by backend ACTIVE state', () => {
+test('subscription success is gated by backend ACTIVE state with no local unlock hint', () => {
   const flow = read('apps/fan/src/screens/SubscriptionFlowScreen.tsx');
   assert.match(flow, /subscriptionStatus === "ACTIVE"/);
   assert.match(flow, /apiV1\.get\(`\/subscriptions\/\$\{id\}`\)/);
   assert.match(flow, /Verified webhook state remains authoritative/);
   assert.doesNotMatch(flow, /set(?:Is)?Unlocked\s*\(/);
+  assert.doesNotMatch(flow, /unlocked\s*:\s*true/);
+
+  const authoritativeArtist = read('apps/fan/src/navigation/AuthoritativeArtistScreen.tsx');
+  assert.match(authoritativeArtist, /unlocked: _ignoredClientEntitlement/);
+});
+
+test('durable auth credentials use SecureStore with verified legacy migration', () => {
+  const pkg = JSON.parse(read('package.json'));
+  assert.equal(pkg.dependencies['expo-secure-store'], '~15.0.8');
+
+  const storage = read('apps/fan/src/security/credentialStorage.ts');
+  assert.match(storage, /from 'expo-secure-store'/);
+  assert.match(storage, /SecureStore\.setItemAsync/);
+  assert.match(storage, /SecureStore\.getItemAsync/);
+  assert.match(storage, /SecureStore\.deleteItemAsync/);
+  assert.match(storage, /verifiedCredential !== legacyCredential/);
+  assert.match(storage, /clearLegacyCredentialCopies/);
+  assert.match(storage, /LOCAL_LOGOUT_TOMBSTONE_KEY/);
+  assert.match(storage, /return null;\n\s*}\n\s*return null;/);
+
+  const api = read('apps/fan/src/services/api.ts');
+  assert.match(api, /readAuthCredential/);
+  assert.match(api, /saveAuthCredential/);
+  assert.match(api, /clearAuthCredential/);
+  assert.doesNotMatch(api, /AsyncStorage\.setItem\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
+
+  const authStore = read('apps/fan/src/store/authStore.ts');
+  assert.match(authStore, /readAuthCredential/);
+  assert.match(authStore, /saveAuthCredential/);
+  assert.match(authStore, /clearAuthCredential/);
+  assert.doesNotMatch(authStore, /AsyncStorage\.(?:getItem|setItem)\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
 });
 
 test('mobile tests are executable rather than a typecheck alias', () => {
