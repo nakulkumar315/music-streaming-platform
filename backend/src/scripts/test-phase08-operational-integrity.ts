@@ -104,8 +104,19 @@ function testPlaybackAndAnalyticsContracts() {
   assert.match(streamRoutes, /positiveInteger\(req\.body\?\.sequence\)/);
   assert.match(streamRoutes, /PLAYBACK_SESSION_REVOKED/);
 
-  assert.match(mobileHeartbeat, /const sequence = \+\+heartbeatSequence/);
+  // Sequence is scoped to the server playback session, not to the local timer.
+  // Pause/resume keeps the lease alive and therefore must not replay 1..N.
+  assert.match(mobileHeartbeat, /let heartbeatSessionId: number \| null = null/);
+  assert.match(mobileHeartbeat, /function nextHeartbeatSequence/);
+  assert.match(mobileHeartbeat, /if \(heartbeatSessionId !== sessionId\)/);
+  assert.match(mobileHeartbeat, /const sequence = nextHeartbeatSequence\(lease\.sessionId\)/);
   assert.match(mobileHeartbeat, /\n\s*sequence,\n\s*currentPosition:/);
+  const stopStart = mobileHeartbeat.indexOf("export function stopHeartbeat");
+  const stopEnd = mobileHeartbeat.indexOf("/** Check if heartbeat", stopStart);
+  assert.ok(stopStart >= 0 && stopEnd > stopStart);
+  const stopHeartbeatSource = mobileHeartbeat.slice(stopStart, stopEnd);
+  assert.doesNotMatch(stopHeartbeatSource, /heartbeatSequence\s*=\s*0/);
+  assert.doesNotMatch(stopHeartbeatSource, /heartbeatSessionId\s*=\s*null/);
 
   assert.match(analyticsRoutes, /ON CONFLICT \(user_id, event_key\) DO NOTHING/);
   assert.match(analyticsRoutes, /isPlaybackSessionActive/);
@@ -116,6 +127,7 @@ function testPlaybackAndAnalyticsContracts() {
   assert.match(artistAnalytics, /JOIN content_items c ON c\.id = p\.content_id/);
   assert.match(artistAnalytics, /WHERE s\.artist_id = \$1/);
   assert.match(artistAnalytics, /WHERE c\.artist_id = \$1/);
+  assert.match(artistAnalytics, /p\.playback_session_id IS NOT NULL/);
   assert.doesNotMatch(artistAnalytics, /safeRows|safeScalar|\*\s*0\.9|\*\s*0\.1/);
 
   const strictPricingMount = app.indexOf('app.use("/api/v1/artist", artistPricingRoutes)');
@@ -198,6 +210,7 @@ function testFinancialAndUiContracts() {
   const adminAnalytics = readBackend("controllers/adminAnalyticsController.ts");
   const adminAnalyticsRoutes = readBackend("routes/admin/analytics.ts");
   const adminUi = readRepo("web-admin/src/pages/AdminAnalyticsPage.tsx");
+  const adminHome = readRepo("web-admin/src/pages/AdminHomePage.tsx");
   const artistUi = readRepo("web-artist/src/pages/ArtistAnalyticsSummaryPage.tsx");
 
   assert.doesNotMatch(adminAnalytics, /Math\.max\(paymentsRevenue, transactionsRevenue\)/);
@@ -206,11 +219,16 @@ function testFinancialAndUiContracts() {
   assert.doesNotMatch(adminAnalyticsRoutes, /Math\.max\(|transactionsRevenue|transactionRows/);
   assert.doesNotMatch(adminAnalyticsRoutes, /_debug/);
   assert.match(adminAnalyticsRoutes, /FROM payments/);
+  assert.match(adminAnalyticsRoutes, /p\.playback_session_id IS NOT NULL/);
 
   assert.doesNotMatch(adminUi, /totalRevenue\s*\*\s*0\.[19]/);
   assert.match(adminUi, /Payment ledger only/);
   assert.match(adminUi, /Analytics unavailable/);
   assert.match(adminUi, /status === 403/);
+
+  assert.doesNotMatch(adminHome, /12\.5%|8\.2%|5\.7%|24\.8%|3\.1%/);
+  assert.match(adminHome, /Dashboard unavailable/);
+  assert.match(adminHome, /status === 403/);
 
   assert.doesNotMatch(artistUi, /\*\s*0\.9|\*\s*0\.1/);
   assert.match(artistUi, /Gross captured revenue/);
