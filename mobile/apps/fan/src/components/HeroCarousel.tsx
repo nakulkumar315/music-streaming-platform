@@ -8,7 +8,7 @@ import { colors } from '../theme-guest/colors';
 import { spacing } from '../theme-guest/spacing';
 import { radius } from '../theme-guest/radius';
 import { typography } from '../theme-guest/typography';
-import { heroSlides } from '../data/guestHome.mock';
+import { heroSlides } from '../data/guestHome.static';
 
 const { width: screenWidth } = Dimensions.get('window');
 const CAROUSEL_WIDTH = screenWidth - spacing.horizontalPadding * 2;
@@ -20,7 +20,7 @@ interface HeroCarouselProps {
 export default function HeroCarousel({ onAction }: HeroCarouselProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const flatListRef = useRef<FlatList<any>>(null);
-  const autoScrollTimer = useRef<NodeJS.Timeout | null>(null);
+  const autoScrollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const isDragging = useRef(false);
 
   const startAutoScroll = () => {
@@ -128,7 +128,6 @@ export default function HeroCarousel({ onAction }: HeroCarouselProps) {
         style={styles.list}
       />
 
-      {/* Pagination indicators */}
       <View style={styles.pagination}>
         {heroSlides.map((_, index) => (
           <View
