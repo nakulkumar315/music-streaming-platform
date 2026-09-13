@@ -7,7 +7,11 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import AppNavigator from './apps/fan/src/navigation/AppNavigator';
 import { AuthProvider } from './apps/fan/src/store/authStore';
 import { ConnectivityProvider } from './apps/fan/src/providers/ConnectivityProvider';
-import { MediaPlayerProvider } from './apps/fan/src/providers/MediaPlayerProvider';
+import {
+  MediaPlayerProvider,
+  useMediaPlayer,
+} from './apps/fan/src/providers/MediaPlayerProvider';
+import { releaseActivePlaybackLease } from './apps/fan/src/services/streamService';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ErrorBoundary from './apps/fan/src/ui/ErrorBoundary';
@@ -38,6 +42,29 @@ const queryClient = new QueryClient({
   },
 });
 
+/**
+ * The media player intentionally keeps a lease while paused so Resume remains
+ * the same playback session. When Close clears the queue/current item, release
+ * that lease immediately instead of waiting for the server's stale-session TTL.
+ */
+function PlaybackLeaseLifecycleBridge() {
+  const { currentItem } = useMediaPlayer();
+
+  useEffect(() => {
+    if (!currentItem) {
+      void releaseActivePlaybackLease();
+    }
+  }, [currentItem]);
+
+  useEffect(() => {
+    return () => {
+      void releaseActivePlaybackLease();
+    };
+  }, []);
+
+  return null;
+}
+
 export default function App() {
   useEffect(() => {
     if (Platform.OS !== 'web') {
@@ -52,6 +79,7 @@ export default function App() {
           <AuthProvider>
             <ConnectivityProvider>
               <MediaPlayerProvider>
+                <PlaybackLeaseLifecycleBridge />
                 <AppNavigator />
               </MediaPlayerProvider>
             </ConnectivityProvider>
