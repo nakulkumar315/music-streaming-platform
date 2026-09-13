@@ -114,8 +114,16 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
       );
       const content = contentResult.rows[0];
       if (!content) {
-        await client.query("COMMIT");
-        return res.status(200).json({ received: true, ignored: true, reason: "Unknown asset", correlationId });
+        // A valid eager callback can race the application's final DB mapping
+        // transaction. Do not consume the idempotency marker in that case:
+        // rollback and return 5xx so Cloudinary retries the same callback.
+        await client.query("ROLLBACK");
+        return res.status(503).json({
+          success: false,
+          code: "CLOUDINARY_ASSET_MAPPING_PENDING",
+          message: "Cloudinary asset mapping is not committed yet",
+          correlationId,
+        });
       }
 
       const current = String(content.status || "").toUpperCase();
