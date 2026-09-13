@@ -112,37 +112,46 @@ export interface ContentForAccess {
   thumbnail_url: string | null;
 }
 
-/** Load the exact current content authorization/delivery record. */
+/**
+ * Load the exact current content authorization/delivery record. Artist account
+ * governance is part of the access boundary, not merely a catalog filter.
+ */
 export async function getContentForAccess(
   contentId: number
 ): Promise<ContentForAccess | null> {
   const result = await pool.query<ContentForAccess>(
-    `SELECT id,
-            artist_id,
-            storage_provider,
-            storage_key,
-            video_storage_key,
-            thumbnail_storage_key,
-            provider_asset_id,
-            audio_provider_asset_id,
-            video_provider_asset_id,
-            thumbnail_provider_asset_id,
-            COALESCE(visibility, 'PROTECTED') AS visibility,
-            status,
-            lifecycle_state,
-            is_approved,
-            is_taken_down,
-            subscription_required,
-            mime_type,
-            file_size_bytes,
-            media_url,
-            audio_url,
-            video_url,
-            type,
-            file_key,
-            thumbnail_url
-       FROM content_items
-      WHERE id = $1
+    `SELECT c.id,
+            c.artist_id,
+            c.storage_provider,
+            c.storage_key,
+            c.video_storage_key,
+            c.thumbnail_storage_key,
+            c.provider_asset_id,
+            c.audio_provider_asset_id,
+            c.video_provider_asset_id,
+            c.thumbnail_provider_asset_id,
+            c.visibility,
+            c.status,
+            c.lifecycle_state,
+            c.is_approved,
+            c.is_taken_down,
+            c.subscription_required,
+            c.mime_type,
+            c.file_size_bytes,
+            c.media_url,
+            c.audio_url,
+            c.video_url,
+            c.type,
+            c.file_key,
+            c.thumbnail_url
+       FROM content_items c
+       JOIN users a ON a.id = c.artist_id
+      WHERE c.id = $1
+        AND UPPER(a.role) = 'ARTIST'
+        AND a.is_deleted = FALSE
+        AND UPPER(a.status) = 'ACTIVE'
+        AND a.is_verified = TRUE
+        AND UPPER(a.artist_status::text) = 'APPROVED'
       LIMIT 1`,
     [contentId]
   );
