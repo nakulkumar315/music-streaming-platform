@@ -112,8 +112,8 @@ function testSourceContracts() {
   assert.match(streamRoutes, /positiveInteger\(req\.body\?\.sequence\)/);
   assert.match(streamRoutes, /PLAYBACK_SESSION_REVOKED/);
 
-  assert.match(mobileHeartbeat, /sequence: sequence/);
   assert.match(mobileHeartbeat, /const sequence = \+\+heartbeatSequence/);
+  assert.match(mobileHeartbeat, /\n\s*sequence,\n\s*currentPosition:/);
 
   assert.match(analyticsRoutes, /ON CONFLICT \(user_id, event_key\) DO NOTHING/);
   assert.match(analyticsRoutes, /isPlaybackSessionActive/);
@@ -131,6 +131,7 @@ function testSourceContracts() {
   assert.match(schedulers, /stale-playback-session-cleanup/);
 
   assert.match(schema, /20260913_0010_analytics_audit_operational_integrity/);
+  assert.match(schema, /"run_token"/);
   assert.match(schema, /audit_logs_append_only/);
   assert.match(migration, /CREATE TRIGGER audit_logs_append_only/);
   assert.match(migration, /analytics_events_user_event_key_unique/);
