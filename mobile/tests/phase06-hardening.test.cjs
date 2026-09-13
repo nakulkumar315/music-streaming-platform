@@ -66,8 +66,11 @@ test('durable auth credentials use SecureStore with verified legacy migration', 
   assert.match(storage, /SecureStore\.deleteItemAsync/);
   assert.match(storage, /verifiedCredential !== legacyCredential/);
   assert.match(storage, /clearLegacyCredentialCopies/);
-  assert.match(storage, /logoutPending === '1'/);
+  assert.match(storage, /hasLogoutTombstone/);
   assert.match(storage, /LOCAL_LOGOUT_TOMBSTONE_KEY/);
+  assert.match(storage, /reason: CredentialWriteReason = 'session-rotation'/);
+  assert.match(storage, /sessionRotationWritesAllowed = false/);
+  assert.match(storage, /if \(!sessionRotationWritesAllowed\) return false/);
   assert.equal(
     (storage.match(/removeItem\(LOCAL_LOGOUT_TOMBSTONE_KEY\)/g) || []).length,
     1,
@@ -76,13 +79,13 @@ test('durable auth credentials use SecureStore with verified legacy migration', 
 
   const api = read('apps/fan/src/services/api.ts');
   assert.match(api, /readAuthCredential/);
-  assert.match(api, /saveAuthCredential/);
+  assert.match(api, /saveAuthCredential\(rotatedToken\)/);
   assert.match(api, /clearAuthCredential/);
   assert.doesNotMatch(api, /AsyncStorage\.setItem\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
 
   const authStore = read('apps/fan/src/store/authStore.ts');
   assert.match(authStore, /readAuthCredential/);
-  assert.match(authStore, /saveAuthCredential/);
+  assert.match(authStore, /saveAuthCredential\(next, 'fresh-auth'\)/);
   assert.match(authStore, /clearAuthCredential/);
   assert.doesNotMatch(authStore, /AsyncStorage\.(?:getItem|setItem)\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
 });
