@@ -51,16 +51,38 @@ export class FirebaseStorageProvider implements IStorageProvider {
     try {
       const bucket = await this.getBucket();
       const file = bucket.file(storageKey);
-      const buffer = Buffer.isBuffer(body) ? body : await streamToBuffer(body as Readable);
-      await file.save(buffer, {
-        metadata: { contentType }
-      });
+
+      if (Buffer.isBuffer(body)) {
+        await file.save(body, {
+          resumable: false,
+          metadata: {
+            contentType,
+            metadata: params.metadata,
+          }
+        });
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const write = file.createWriteStream({
+            resumable: false,
+            metadata: {
+              contentType,
+              metadata: params.metadata,
+            },
+          });
+          body.once("error", reject);
+          write.once("error", reject);
+          write.once("finish", resolve);
+          body.pipe(write);
+        });
+      }
+
       const [metadata] = await file.getMetadata();
+      const sizeBytes = metadata?.size ? Number(metadata.size) : params.contentLength;
       return {
         storageKey,
         providerAssetId: storageKey,
         etag: metadata?.etag,
-        sizeBytes: buffer.length
+        sizeBytes: Number.isFinite(sizeBytes) ? Number(sizeBytes) : undefined
       };
     } catch (err: any) {
       throw new StorageUploadFailedException(
@@ -134,13 +156,4 @@ export class FirebaseStorageProvider implements IStorageProvider {
       throw new StorageReadFailedException(err?.message || "Firebase openReadStream failed", storageKey);
     }
   }
-}
-
-function streamToBuffer(stream: Readable): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
 }
