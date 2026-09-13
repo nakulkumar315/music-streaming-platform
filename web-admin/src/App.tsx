@@ -2,6 +2,7 @@ import { Suspense, lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import AdminLayout from "./components/AdminLayout";
 import Skeleton from "./components/Skeleton";
+import { getPrivilegedRole } from "./services/adminSession";
 
 const AdminLoginPage = lazy(() => import("./pages/AdminLoginPage"));
 const AdminHomePage = lazy(() => import("./pages/AdminHomePage"));
@@ -12,6 +13,7 @@ const AdminContentApprovalQueuePage = lazy(() => import("./pages/AdminContentApp
 const AdminArtistApplicationsPage = lazy(() => import("./pages/AdminArtistApplicationsPage"));
 const AdminFeaturedArtistsPage = lazy(() => import("./pages/AdminFeaturedArtistsPage"));
 const AdminSubscriptionSettingsPage = lazy(() => import("./pages/AdminSubscriptionSettingsPage"));
+const AdminRefundsPage = lazy(() => import("./pages/AdminRefundsPage"));
 const AdminAuditPage = lazy(() => import("./pages/AdminAuditPage"));
 const AdminAgreementSettingsPage = lazy(() => import("./pages/AdminAgreementSettingsPage"));
 const AdminCommissionPlansPage = lazy(() => import("./pages/AdminCommissionPlansPage"));
@@ -25,6 +27,14 @@ const PageFallback = () => (
   </div>
 );
 
+function PrivilegedHome() {
+  return getPrivilegedRole() === "FINANCE" ? (
+    <Navigate to="/admin/refunds" replace />
+  ) : (
+    <AdminHomePage />
+  );
+}
+
 export default function App() {
   return (
     <Suspense fallback={<PageFallback />}>
@@ -33,7 +43,8 @@ export default function App() {
         <Route path="/admin/login" element={<AdminLoginPage />} />
 
         <Route element={<AdminLayout />}>
-          <Route path="/admin/home" element={<AdminHomePage />} />
+          <Route path="/admin/home" element={<PrivilegedHome />} />
+          <Route path="/admin/refunds" element={<AdminRefundsPage />} />
           <Route path="/admin/analytics" element={<AdminAnalyticsPage />} />
           <Route path="/admin/artists" element={<AdminArtistsPage />} />
           <Route path="/admin/artist-applications" element={<AdminArtistApplicationsPage />} />

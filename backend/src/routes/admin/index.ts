@@ -7,6 +7,7 @@ import adminArtistsRoutes from "./artists";
 import adminContentRoutes from "./content";
 import adminFeaturedArtistsRoutes from "./featured-artists";
 import adminImageUploadRoutes from "./image-upload";
+import adminRefundRoutes from "./refunds";
 import adminSubscriptionRoutes from "./subscriptions";
 import adminAuditRoutes from "./audit";
 import { requireAuth } from "../../common/auth/requireAuth";
@@ -45,6 +46,12 @@ router.use(
   requireAuth,
   requireRoles("ADMIN"),
   adminImageUploadRoutes
+);
+router.use(
+  "/refunds",
+  requireAuth,
+  requireRoles("ADMIN", "FINANCE"),
+  adminRefundRoutes
 );
 router.use(
   "/subscriptions",

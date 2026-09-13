@@ -197,6 +197,32 @@ model payments {
   created_at          DateTime @default(now()) @db.Timestamptz(6)
 }
 
+model refund_requests {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_id          String    @unique(map: "refund_requests_payment_unique") @db.Uuid
+  subscription_id     Int
+  user_id             Int
+  razorpay_payment_id String    @unique(map: "refund_requests_gateway_payment_unique") @db.VarChar(255)
+  idempotency_key     String    @unique(map: "refund_requests_idempotency_unique") @db.VarChar(255)
+  amount              BigInt
+  currency            String    @default("INR") @db.VarChar(10)
+  status              String    @db.VarChar(40)
+  provider_refund_id  String?   @unique(map: "refund_requests_provider_refund_unique") @db.VarChar(255)
+  provider_status     String?   @db.VarChar(40)
+  requested_by        Int?
+  requested_by_role   String    @db.VarChar(20)
+  failure_code        String?   @db.VarChar(100)
+  failure_message     String?
+  provider_snapshot   Json?
+  last_reconciled_at  DateTime? @db.Timestamptz(6)
+  completed_at        DateTime? @db.Timestamptz(6)
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([status, updated_at], map: "idx_refund_requests_reconciliation")
+  @@index([subscription_id, created_at(sort: Desc)], map: "idx_refund_requests_subscription")
+}
+
 model content_plays {
   id         Int      @id @default(autoincrement())
   content_id Int

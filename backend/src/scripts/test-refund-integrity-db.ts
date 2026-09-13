@@ -1,0 +1,409 @@
+import "dotenv/config";
+import assert from "node:assert/strict";
+import { v4 as uuidv4 } from "uuid";
+import type {
+  GatewayRefund,
+  RefundGateway,
+} from "../modules/payment/payment.refund.gateway";
+
+class MockRefundGateway implements RefundGateway {
+  createCalls = 0;
+  mode: "processed" | "ambiguous" | "pendingThenFailed" = "processed";
+  lastInput:
+    | {
+        paymentId: string;
+        amountPaise: number;
+        refundRequestId: string;
+        idempotencyKey: string;
+      }
+    | null = null;
+
+  async createFullRefund(input: {
+    paymentId: string;
+    amountPaise: number;
+    refundRequestId: string;
+    idempotencyKey: string;
+  }): Promise<GatewayRefund> {
+    this.createCalls += 1;
+    this.lastInput = input;
+    if (this.mode === "ambiguous") {
+      throw new Error("simulated network timeout after gateway acceptance");
+    }
+    return this.refund(this.mode === "pendingThenFailed" ? "pending" : "processed");
+  }
+
+  async listRefunds(): Promise<GatewayRefund[]> {
+    if (!this.lastInput) return [];
+    return [this.refund(this.mode === "pendingThenFailed" ? "failed" : "processed")];
+  }
+
+  async fetchPayment(paymentId: string) {
+    const amount = this.lastInput?.amountPaise ?? 1;
+    return {
+      paymentId,
+      amountPaise: amount,
+      amountRefundedPaise: this.mode === "pendingThenFailed" ? 0 : amount,
+      currency: "INR",
+      status: "captured",
+      refundStatus: this.mode === "pendingThenFailed" ? "failed" : "full",
+    };
+  }
+
+  private refund(status: string): GatewayRefund {
+    if (!this.lastInput) throw new Error("No refund input recorded");
+    return {
+      id: `rfnd_test_${this.lastInput.refundRequestId.replace(/-/g, "").slice(0, 12)}`,
+      paymentId: this.lastInput.paymentId,
+      amountPaise: this.lastInput.amountPaise,
+      currency: "INR",
+      status,
+      notes: {
+        refund_request_id: this.lastInput.refundRequestId,
+        idempotency_key: this.lastInput.idempotencyKey,
+      },
+    };
+  }
+}
+
+class ProviderOnlyRefundGateway implements RefundGateway {
+  createCalls = 0;
+
+  constructor(
+    private readonly targetPaymentId: string,
+    private readonly targetAmount: number,
+    private readonly targetRefundId: string
+  ) {}
+
+  async createFullRefund(): Promise<GatewayRefund> {
+    this.createCalls += 1;
+    throw new Error("Provider drift reconciliation must never create a refund");
+  }
+
+  async listRefunds(paymentId: string): Promise<GatewayRefund[]> {
+    if (paymentId !== this.targetPaymentId) return [];
+    return [
+      {
+        id: this.targetRefundId,
+        paymentId,
+        amountPaise: this.targetAmount,
+        currency: "INR",
+        status: "processed",
+        notes: {},
+      },
+    ];
+  }
+
+  async fetchPayment(paymentId: string) {
+    const target = paymentId === this.targetPaymentId;
+    return {
+      paymentId,
+      amountPaise: target ? this.targetAmount : 1,
+      amountRefundedPaise: target ? this.targetAmount : 0,
+      currency: "INR",
+      status: "captured",
+      refundStatus: target ? "full" : null,
+    };
+  }
+}
+
+async function main() {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Refusing to run refund DB tests with NODE_ENV=production");
+  }
+  const testDatabaseUrl = String(process.env.AUTH_TEST_DATABASE_URL || "").trim();
+  if (!testDatabaseUrl) {
+    throw new Error(
+      "AUTH_TEST_DATABASE_URL is required. Use a disposable database with all canonical migrations applied."
+    );
+  }
+  process.env.DATABASE_URL = testDatabaseUrl;
+
+  const [
+    { pool },
+    refundModule,
+    refundWebhookModule,
+    refundReconciliationModule,
+    cancellationModule,
+    entitlementModule,
+  ] = await Promise.all([
+    import("../common/db"),
+    import("../modules/payment/payment.refund.service"),
+    import("../modules/payment/payment.refund.webhook"),
+    import("../modules/payment/payment.refund.reconciliation"),
+    import("../modules/subscription/subscription.cancellation.service"),
+    import("../shared/security/artist-entitlement.service"),
+  ]);
+  const {
+    initiateFullRefund,
+    getRefundRequest,
+    reconcileRefundRequest,
+  } = refundModule;
+  const { processVerifiedRefundEvent } = refundWebhookModule;
+  const { reconcileProviderRefundDrift } = refundReconciliationModule;
+  const { cancelSubscription } = cancellationModule;
+  const { hasActiveArtistEntitlement } = entitlementModule;
+
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const userIds: number[] = [];
+  const subscriptionIds: number[] = [];
+  const paymentIds: string[] = [];
+
+  async function createUser(role: "FAN" | "ARTIST" | "ADMIN" | "FINANCE" | "MODERATOR") {
+    const result = await pool.query(
+      `INSERT INTO users (email, password, role, status, is_deleted, artist_status, is_verified, name)
+       VALUES ($1, 'test-hash', $2, 'ACTIVE', false, $3, $4, 'Refund Test')
+       RETURNING id`,
+      [
+        `refund-${role.toLowerCase()}-${suffix}-${userIds.length}@example.invalid`,
+        role,
+        role === "ARTIST" ? "APPROVED" : "PENDING",
+        role === "ARTIST",
+      ]
+    );
+    const id = Number(result.rows[0].id);
+    userIds.push(id);
+    return id;
+  }
+
+  const fanId = await createUser("FAN");
+  const artistId = await createUser("ARTIST");
+  const adminId = await createUser("ADMIN");
+  const financeId = await createUser("FINANCE");
+  const moderatorId = await createUser("MODERATOR");
+
+  async function createCapturedPurchase(index: number, paymentStatus = "SUCCESS") {
+    const subscription = await pool.query(
+      `INSERT INTO subscriptions
+         (user_id, artist_id, status, plan_type, start_date, next_billing_date, auto_renew, type, created_at, updated_at)
+       VALUES ($1, $2, 'ACTIVE', 'MONTHLY', now(), now() + interval '30 days', false, 'ARTIST', now(), now())
+       ON CONFLICT (user_id, artist_id)
+       DO UPDATE SET status = 'ACTIVE', canceled_at = NULL, next_billing_date = now() + interval '30 days', updated_at = now()
+       RETURNING id`,
+      [fanId, artistId]
+    );
+    const subscriptionId = Number(subscription.rows[0].id);
+    if (!subscriptionIds.includes(subscriptionId)) subscriptionIds.push(subscriptionId);
+
+    const gatewayPaymentId = `pay_phase01a_${suffix}_${index}`;
+    const gatewayOrderId = `order_phase01a_${suffix}_${index}`;
+    const amount = 12345 + index;
+    await pool.query(
+      `INSERT INTO transactions
+         (user_id, artist_id, amount, currency, status, razorpay_order_id,
+          razorpay_payment_id, artist_name, billing_cycle, payment_confirmed_at, created_at, updated_at)
+       VALUES ($1, $2, $3, 'INR', $4, $5, $6, 'Refund Artist', 'monthly', now(), now(), now())`,
+      [fanId, artistId, amount, paymentStatus, gatewayOrderId, gatewayPaymentId]
+    );
+
+    const paymentId = uuidv4();
+    paymentIds.push(paymentId);
+    await pool.query(
+      `INSERT INTO payments
+         (id, user_id, subscription_id, amount, status, razorpay_payment_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())`,
+      [paymentId, fanId, subscriptionId, amount, paymentStatus, gatewayPaymentId]
+    );
+
+    return { subscriptionId, paymentId, gatewayPaymentId, amount };
+  }
+
+  try {
+    const first = await createCapturedPurchase(1);
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
+    const gateway = new MockRefundGateway();
+    const firstRefund = await initiateFullRefund(
+      first.paymentId,
+      { userId: financeId, role: "FINANCE" },
+      gateway
+    );
+    assert.equal(firstRefund.request.status, "COMPLETED");
+    assert.equal(firstRefund.request.amountPaise, first.amount);
+    assert.equal(gateway.createCalls, 1);
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), false);
+
+    const firstPayment = await pool.query(`SELECT status, amount FROM payments WHERE id = $1`, [first.paymentId]);
+    assert.equal(firstPayment.rows[0].status, "REFUNDED");
+    assert.equal(Number(firstPayment.rows[0].amount), first.amount, "Captured amount must be preserved");
+    const firstTx = await pool.query(
+      `SELECT status, refund_amount, refund_status FROM transactions WHERE razorpay_payment_id = $1`,
+      [first.gatewayPaymentId]
+    );
+    assert.equal(firstTx.rows[0].status, "REFUNDED");
+    assert.equal(Number(firstTx.rows[0].refund_amount), first.amount);
+    assert.equal(firstTx.rows[0].refund_status, "REFUNDED");
+
+    const duplicate = await initiateFullRefund(
+      first.paymentId,
+      { userId: financeId, role: "FINANCE" },
+      gateway
+    );
+    assert.equal(duplicate.idempotent, true);
+    assert.equal(duplicate.request.status, "COMPLETED");
+    assert.equal(gateway.createCalls, 1, "Duplicate refund must not create another gateway refund");
+
+    await assert.rejects(
+      () =>
+        initiateFullRefund(
+          uuidv4(),
+          { userId: financeId, role: "FINANCE" },
+          new MockRefundGateway()
+        ),
+      (error: any) => error?.code === "PAYMENT_NOT_FOUND"
+    );
+
+    const failed = await createCapturedPurchase(2, "FAILED");
+    await assert.rejects(
+      () =>
+        initiateFullRefund(
+          failed.paymentId,
+          { userId: financeId, role: "FINANCE" },
+          new MockRefundGateway()
+        ),
+      (error: any) => error?.code === "PAYMENT_NOT_REFUNDABLE"
+    );
+    await assert.rejects(
+      () =>
+        initiateFullRefund(
+          failed.paymentId,
+          { userId: moderatorId, role: "MODERATOR" } as any,
+          new MockRefundGateway()
+        ),
+      (error: any) => error?.code === "REFUND_FORBIDDEN"
+    );
+
+    const concurrent = await createCapturedPurchase(3);
+    const concurrentGateway = new MockRefundGateway();
+    const concurrentResults = await Promise.all([
+      initiateFullRefund(concurrent.paymentId, { userId: adminId, role: "ADMIN" }, concurrentGateway),
+      initiateFullRefund(concurrent.paymentId, { userId: adminId, role: "ADMIN" }, concurrentGateway),
+    ]);
+    assert.equal(concurrentGateway.createCalls, 1, "Concurrent refund race must call gateway once");
+    assert.ok(concurrentResults.every((result) => result.request.paymentId === concurrent.paymentId));
+
+    const ambiguous = await createCapturedPurchase(4);
+    const ambiguousGateway = new MockRefundGateway();
+    ambiguousGateway.mode = "ambiguous";
+    const ambiguousResult = await initiateFullRefund(
+      ambiguous.paymentId,
+      { userId: adminId, role: "ADMIN" },
+      ambiguousGateway
+    );
+    assert.equal(ambiguousResult.request.status, "RECONCILIATION_REQUIRED");
+    const retry = await initiateFullRefund(
+      ambiguous.paymentId,
+      { userId: adminId, role: "ADMIN" },
+      ambiguousGateway
+    );
+    assert.equal(retry.idempotent, true);
+    assert.equal(ambiguousGateway.createCalls, 1, "Ambiguous outcome must never trigger a blind second refund");
+    const reconciled = await reconcileRefundRequest(ambiguousResult.request.id, ambiguousGateway);
+    assert.equal(reconciled.status, "COMPLETED");
+
+    const providerFailed = await createCapturedPurchase(5);
+    const failingGateway = new MockRefundGateway();
+    failingGateway.mode = "pendingThenFailed";
+    const pendingFailure = await initiateFullRefund(
+      providerFailed.paymentId,
+      { userId: financeId, role: "FINANCE" },
+      failingGateway
+    );
+    assert.equal(pendingFailure.request.status, "PROVIDER_PENDING");
+    const failedReconciled = await reconcileRefundRequest(pendingFailure.request.id, failingGateway);
+    assert.equal(failedReconciled.status, "FAILED");
+    const failedProviderPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [providerFailed.paymentId]);
+    assert.equal(failedProviderPayment.rows[0].status, "SUCCESS");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
+
+    // A verified provider-side partial refund is not a supported product flow.
+    // It is acknowledged and quarantined without changing payment or entitlement.
+    const partial = await createCapturedPurchase(6);
+    const partialClient = await pool.connect();
+    try {
+      await partialClient.query("BEGIN");
+      const partialResult = await processVerifiedRefundEvent(partialClient, {
+        paymentId: partial.gatewayPaymentId,
+        refundId: "rfnd_partial_test",
+        refundAmountPaise: partial.amount - 1,
+        providerStatus: "processed",
+        currency: "INR",
+      });
+      assert.equal(partialResult.fullRefund, false);
+      await partialClient.query("COMMIT");
+    } catch (error) {
+      await partialClient.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      partialClient.release();
+    }
+    const partialRequest = await pool.query(
+      `SELECT status, failure_code FROM refund_requests WHERE payment_id = $1`,
+      [partial.paymentId]
+    );
+    assert.equal(partialRequest.rows[0].status, "RECONCILIATION_REQUIRED");
+    assert.equal(partialRequest.rows[0].failure_code, "UNSUPPORTED_PARTIAL_REFUND_DETECTED");
+    const partialPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [partial.paymentId]);
+    assert.equal(partialPayment.rows[0].status, "SUCCESS");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
+
+    const cancelOnly = await createCapturedPurchase(7);
+    const cancelled = await cancelSubscription(
+      cancelOnly.subscriptionId,
+      { userId: adminId, role: "ADMIN" },
+      "Support cancellation test"
+    );
+    assert.equal(cancelled.status, "CANCELLED");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), false);
+    const cancelPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [cancelOnly.paymentId]);
+    assert.equal(cancelPayment.rows[0].status, "SUCCESS", "Cancellation must not fabricate a refund");
+    const cancelRefund = await pool.query(`SELECT COUNT(*)::int AS count FROM refund_requests WHERE payment_id = $1`, [cancelOnly.paymentId]);
+    assert.equal(cancelRefund.rows[0].count, 0, "Cancellation must not create refund intent");
+
+    // Provider says fully refunded while local has no refund intent: reconciliation
+    // repairs local state through the canonical finalizer and never calls create refund.
+    const providerOnly = await createCapturedPurchase(8);
+    const providerOnlyGateway = new ProviderOnlyRefundGateway(
+      providerOnly.gatewayPaymentId,
+      providerOnly.amount,
+      `rfnd_provider_only_${suffix.replace(/[^a-z0-9]/gi, "").slice(0, 12)}`
+    );
+    const driftOutcomes = await reconcileProviderRefundDrift(providerOnlyGateway, 100);
+    const providerOutcome = driftOutcomes.find(
+      (item: any) => item.paymentId === providerOnly.paymentId
+    );
+    assert.equal(providerOutcome?.status, "CORRECTED_FULL_REFUND");
+    assert.equal(providerOnlyGateway.createCalls, 0, "Drift repair must never issue another remote refund");
+    const providerOnlyPayment = await pool.query(`SELECT status FROM payments WHERE id = $1`, [providerOnly.paymentId]);
+    assert.equal(providerOnlyPayment.rows[0].status, "REFUNDED");
+    const providerOnlyRequest = await pool.query(
+      `SELECT status, requested_by_role FROM refund_requests WHERE payment_id = $1`,
+      [providerOnly.paymentId]
+    );
+    assert.equal(providerOnlyRequest.rows[0].status, "COMPLETED");
+    assert.equal(providerOnlyRequest.rows[0].requested_by_role, "SYSTEM");
+    assert.equal(await hasActiveArtistEntitlement(fanId, artistId), false);
+
+    const queried = await getRefundRequest(firstRefund.request.id);
+    assert.equal(queried.status, "COMPLETED");
+
+    console.log("Phase 01A refund/cancellation DB integration checks passed.");
+  } finally {
+    if (paymentIds.length) {
+      await pool.query(`DELETE FROM refund_requests WHERE payment_id = ANY($1::uuid[])`, [paymentIds]).catch(() => undefined);
+      await pool.query(`DELETE FROM payments WHERE id = ANY($1::uuid[])`, [paymentIds]).catch(() => undefined);
+    }
+    await pool.query(`DELETE FROM transactions WHERE razorpay_payment_id LIKE $1`, [`pay_phase01a_${suffix}_%`]).catch(() => undefined);
+    if (subscriptionIds.length) {
+      await pool.query(`DELETE FROM subscription_audit_logs WHERE subscription_id = ANY($1::int[])`, [subscriptionIds]).catch(() => undefined);
+      await pool.query(`DELETE FROM subscriptions WHERE id = ANY($1::int[])`, [subscriptionIds]).catch(() => undefined);
+    }
+    if (userIds.length) {
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::int[])`, [userIds]).catch(() => undefined);
+    }
+    await pool.end();
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

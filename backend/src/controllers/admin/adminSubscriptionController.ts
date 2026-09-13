@@ -1,125 +1,168 @@
 import { Request, Response } from "express";
 import { pool } from "../../common/db";
 import { logger } from "../../common/logger";
-import { razorpayClient } from "../../config/razorpay";
 import { AuditService } from "../../shared/audit/audit.service";
+import { PaymentDomainError } from "../../modules/payment/payment.service";
+import { cancelSubscription } from "../../modules/subscription/subscription.cancellation.service";
+
+function sendError(res: Response, error: unknown, fallback: string) {
+  if (error instanceof PaymentDomainError) {
+    return res.status(error.statusCode).json({
+      success: false,
+      code: error.code,
+      message: error.message,
+    });
+  }
+  logger.error({ error }, fallback);
+  return res.status(500).json({
+    success: false,
+    code: "SUBSCRIPTION_OPERATION_FAILED",
+    message: fallback,
+  });
+}
 
 /**
- * Admin: Force revoke a subscription immediately.
- * Cancels in Razorpay and marks as CANCELLED in DB.
+ * ADMIN cancellation is deliberately separate from refund. Phase-1 purchase
+ * uses captured Razorpay payments, not a recurring Razorpay subscription
+ * object, so cancellation changes only entitlement state and never fabricates a
+ * financial reversal.
  */
 export const revokeSubscription = async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const subscriptionId = Number(req.params.id);
   const correlationId = (req as any).correlationId || "-";
+  const adminUserId = Number((req as any).user?.id);
+  const reason = String((req.body as any)?.reason || "").trim();
 
   try {
-    const result = await pool.query(
-      `SELECT razorpay_subscription_id, status FROM subscriptions WHERE id = $1`,
-      [id]
+    const result = await cancelSubscription(
+      subscriptionId,
+      { userId: adminUserId, role: "ADMIN" },
+      reason
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Subscription not found" });
-    }
-
-    const { razorpay_subscription_id, status } = result.rows[0];
-
-    if (status === 'CANCELLED' || status === 'EXPIRED') {
-      return res.status(400).json({ success: false, message: "Subscription already inactive" });
-    }
-
-    // 1. Cancel in Razorpay (if applicable)
-    if (razorpay_subscription_id) {
-       try {
-         await razorpayClient.subscriptions.cancel(razorpay_subscription_id);
-         logger.info({ id, razorpay_subscription_id, correlationId }, "[ADMIN] Cancelled Razorpay subscription");
-       } catch (rzpErr: any) {
-         logger.error({ id, razorpay_subscription_id, correlationId, error: rzpErr.message }, "[ADMIN] Failed to cancel Razorpay subscription");
-         // Continue to update DB even if RZP fails (might already be cancelled there)
-       }
-    }
-
-    // 2. Mark as CANCELLED in DB
-    await pool.query(
-      `UPDATE subscriptions SET status = 'CANCELLED', updated_at = now() WHERE id = $1`,
-      [id]
-    );
-
-    logger.info({ id, correlationId, adminUserId: (req as any).user?.id }, "[ADMIN] Subscription revoked successfully");
 
     AuditService.log({
-      action: 'admin.subscription_cancelled',
-      entity: 'subscription',
-      entityId: String(id),
-      performedBy: (req as any).user?.id,
-      role: 'admin',
-      status: 'success',
+      action: "admin.subscription_cancelled",
+      entity: "subscription",
+      entityId: String(result.subscriptionId),
+      performedBy: adminUserId,
+      role: "admin",
+      status: "success",
       correlationId,
-      metadata: { action: 'revoked' }
+      metadata: {
+        action: "cancelled",
+        financial_refund: false,
+        entitlement_revoked: true,
+        already_cancelled: result.alreadyCancelled,
+        reason: reason || null,
+      },
     });
 
-    return res.json({ success: true, message: "Subscription revoked successfully" });
-  } catch (err: any) {
-    logger.error({ id, correlationId, error: err.message }, "[ADMIN] Failed to revoke subscription");
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    return res.json({
+      success: true,
+      subscription: {
+        id: result.subscriptionId,
+        status: result.status,
+        cancelledAt: result.cancelledAt,
+      },
+      alreadyCancelled: result.alreadyCancelled,
+      message: "Subscription cancelled without refund",
+      correlationId,
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to cancel subscription");
   }
 };
 
 /**
- * Admin: Adjust subscription status or expiry manually.
- * Used for manual fixes and support.
+ * Support adjustment may change canonical non-financial timing flags only.
+ * Subscription status is controlled by payment/cancellation/expiry/refund state
+ * machines and cannot be overwritten here.
  */
 export const adjustSubscription = async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { status, next_billing_date, grace_ends_at, auto_renew } = req.body;
+  const id = Number(req.params.id);
+  const { status, next_billing_date, auto_renew } = req.body as any;
   const correlationId = (req as any).correlationId || "-";
 
-  try {
-    // Basic validation
-    const allowedStatuses = ['ACTIVE', 'PAST_DUE', 'GRACE', 'EXPIRED', 'CANCELLED', 'SUPERSEDED'];
-    if (status && !allowedStatuses.includes(status.toUpperCase())) {
-       return res.status(400).json({ success: false, message: "Invalid status" });
-    }
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_SUBSCRIPTION_ID",
+      message: "Subscription id is invalid",
+      correlationId,
+    });
+  }
 
+  if (status !== undefined) {
+    return res.status(400).json({
+      success: false,
+      code: "SUBSCRIPTION_STATUS_MANAGED_BY_STATE_MACHINE",
+      message:
+        "Subscription status cannot be manually overwritten; use the canonical payment, cancellation, expiry or refund flow",
+      correlationId,
+    });
+  }
+
+  try {
     const updateParts: string[] = [];
     const values: any[] = [];
     let i = 1;
 
-    if (status) { updateParts.push(`status = $${i++}`); values.push(status.toUpperCase()); }
-    if (next_billing_date) { updateParts.push(`next_billing_date = $${i++}`); values.push(next_billing_date); }
-    if (grace_ends_at) { updateParts.push(`grace_ends_at = $${i++}`); values.push(grace_ends_at); }
-    if (typeof auto_renew === 'boolean') { updateParts.push(`auto_renew = $${i++}`); values.push(auto_renew); }
+    if (next_billing_date !== undefined) {
+      updateParts.push(`next_billing_date = $${i++}`);
+      values.push(next_billing_date || null);
+    }
+    if (typeof auto_renew === "boolean") {
+      updateParts.push(`auto_renew = $${i++}`);
+      values.push(auto_renew);
+    }
 
     if (updateParts.length === 0) {
-       return res.status(400).json({ success: false, message: "No updates provided" });
+      return res.status(400).json({
+        success: false,
+        code: "NO_UPDATES_PROVIDED",
+        message: "No supported updates provided",
+        correlationId,
+      });
     }
 
     values.push(id);
     const result = await pool.query(
-      `UPDATE subscriptions SET ${updateParts.join(", ")}, updated_at = now() WHERE id = $${i} RETURNING id`,
+      `UPDATE subscriptions
+          SET ${updateParts.join(", ")}, updated_at = now()
+        WHERE id = $${i}
+        RETURNING id`,
       values
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Subscription not found" });
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        code: "SUBSCRIPTION_NOT_FOUND",
+        message: "Subscription not found",
+        correlationId,
+      });
     }
 
-    logger.info({ id, correlationId, adminUserId: (req as any).user?.id, updates: req.body }, "[ADMIN] Subscription adjusted successfully");
-
     AuditService.log({
-      action: 'admin.subscription_adjusted',
-      entity: 'subscription',
+      action: "admin.subscription_adjusted",
+      entity: "subscription",
       entityId: String(id),
       performedBy: (req as any).user?.id,
-      role: 'admin',
-      status: 'success',
+      role: "admin",
+      status: "success",
       correlationId,
-      metadata: { updates: req.body }
+      metadata: {
+        next_billing_date: next_billing_date ?? undefined,
+        auto_renew: auto_renew ?? undefined,
+      },
     });
 
-    return res.json({ success: true, message: "Subscription adjusted successfully" });
-  } catch (err: any) {
-    logger.error({ id, correlationId, error: err.message }, "[ADMIN] Failed to adjust subscription");
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    return res.json({
+      success: true,
+      message: "Subscription timing settings updated",
+      correlationId,
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to adjust subscription");
   }
 };
