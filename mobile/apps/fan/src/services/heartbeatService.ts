@@ -1,11 +1,16 @@
 import { apiV1 } from './api';
-import { getActivePlaybackLease } from './streamService';
+import {
+  ensureActivePlaybackLease,
+  markActivePlaybackLeaseAlive,
+  reacquireExpiredPlaybackLease,
+} from './streamService';
 import logger from '../utils/logger';
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let currentContentId: string | null = null;
 let heartbeatSessionId: number | null = null;
 let heartbeatSequence = 0;
+let heartbeatInFlight = false;
 
 /**
  * Keep the sequence monotonic for the lifetime of one server playback session.
@@ -26,10 +31,30 @@ function nextHeartbeatSequence(rawSessionId: unknown): number | null {
   return heartbeatSequence;
 }
 
+function isExpiredSessionError(error: any) {
+  const code = String(error?.response?.data?.code || error?.code || '');
+  return code === 'PLAYBACK_SESSION_EXPIRED' || code === 'PLAYBACK_SESSION_MISMATCH';
+}
+
+function shouldStopHeartbeatForAuthorization(error: any) {
+  const status = Number(error?.response?.status || error?.status || 0);
+  const code = String(error?.response?.data?.code || error?.code || '');
+  return (
+    status === 401 ||
+    status === 403 ||
+    code === 'PLAYBACK_SESSION_REVOKED' ||
+    code === 'SUBSCRIPTION_REQUIRED' ||
+    code === 'SUBSCRIPTION_EXPIRED' ||
+    code === 'SUBSCRIPTION_INACTIVE' ||
+    code === 'CONTENT_TAKEN_DOWN' ||
+    code === 'CONTENT_NOT_READY'
+  );
+}
+
 /**
  * Start sending heartbeats for the exact server playback lease currently owned
- * by the global player. The lease id is resolved from streamService so token
- * refresh can rotate URLs without allocating or heartbeating a different slot.
+ * by the global player. The lease is revalidated/reacquired when local freshness
+ * shows it may have expired during a long pause/background interval.
  */
 export function startHeartbeat(
   contentId: string,
@@ -43,38 +68,65 @@ export function startHeartbeat(
   stopHeartbeat();
   currentContentId = contentId;
 
+  const postForLease = async (lease: { sessionId: number }) => {
+    const sequence = nextHeartbeatSequence(lease.sessionId);
+    if (!sequence) {
+      throw new Error('Invalid playback lease session id');
+    }
+
+    const currentPosition = getPosition ? getPosition() : 0;
+    const duration = getDuration ? getDuration() : 0;
+    const response = await apiV1.post('/stream/heartbeat', {
+      sessionId: lease.sessionId,
+      contentId: Number(contentId),
+      sequence,
+      currentPosition: Math.max(0, Math.round(currentPosition)),
+      duration: Math.max(0, Math.round(duration)),
+    });
+
+    if (response.data?.success) {
+      markActivePlaybackLeaseAlive(lease.sessionId);
+    }
+    return response;
+  };
+
   const sendBeat = async () => {
+    if (heartbeatInFlight || currentContentId !== contentId) return;
+    heartbeatInFlight = true;
+
     try {
-      const lease = getActivePlaybackLease(contentId);
-      if (!lease) {
-        logger.warn('[Heartbeat] No active playback lease for content:', contentId);
-        return;
-      }
+      const lease = await ensureActivePlaybackLease(contentId);
+      if (currentContentId !== contentId) return;
 
-      const sequence = nextHeartbeatSequence(lease.sessionId);
-      if (!sequence) {
-        logger.warn('[Heartbeat] Invalid playback lease session id');
-        return;
-      }
-
-      const currentPosition = getPosition ? getPosition() : 0;
-      const duration = getDuration ? getDuration() : 0;
-
-      const response = await apiV1.post('/stream/heartbeat', {
-        sessionId: lease.sessionId,
-        contentId: Number(contentId),
-        sequence,
-        currentPosition: Math.max(0, Math.round(currentPosition)),
-        duration: Math.max(0, Math.round(duration)),
-      });
-      if (!response.data.success) {
-        logger.warn('[Heartbeat] Failed to send heartbeat:', response.data.message);
+      try {
+        const response = await postForLease(lease);
+        if (!response.data?.success) {
+          logger.warn('[Heartbeat] Failed to send heartbeat:', response.data?.message);
+        }
+      } catch (error: any) {
+        // A long pause/background interval can cross the five-minute server
+        // lease window between local checks. Recover once by explicitly creating
+        // a fresh same-content lease, then establish its baseline heartbeat.
+        if (isExpiredSessionError(error) && currentContentId === contentId) {
+          const recovered = await reacquireExpiredPlaybackLease(contentId);
+          if (currentContentId !== contentId) return;
+          await postForLease(recovered);
+          return;
+        }
+        throw error;
       }
     } catch (error: any) {
+      if (shouldStopHeartbeatForAuthorization(error)) {
+        // Do not keep retrying a lease after current authorization has been
+        // revoked. Playback source TTL remains the final media-delivery bound.
+        stopHeartbeat();
+      }
       logger.error(
         '[Heartbeat] Error sending heartbeat:',
-        error?.response?.data?.code || error?.response?.status || error?.message
+        error?.response?.data?.code || error?.response?.status || error?.code || error?.message
       );
+    } finally {
+      heartbeatInFlight = false;
     }
   };
 
