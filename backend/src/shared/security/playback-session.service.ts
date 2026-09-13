@@ -82,6 +82,36 @@ export async function createPlaybackSession(
   }
 }
 
+/**
+ * Renews one explicit existing playback lease without allocating another
+ * concurrency slot. The lease is reusable only by the same authenticated user
+ * for the same content, and only while it is still active.
+ */
+export async function refreshPlaybackSessionLease(input: {
+  sessionId: unknown;
+  userId: unknown;
+  contentId: unknown;
+}): Promise<Date | null> {
+  const sessionId = positiveInteger(input.sessionId);
+  const userId = positiveInteger(input.userId);
+  const contentId = positiveInteger(input.contentId);
+  if (!sessionId || !userId || !contentId) return null;
+
+  const result = await pool.query<{ heartbeat_at: Date }>(
+    `UPDATE playback_sessions
+        SET heartbeat_at = now()
+      WHERE id = $1
+        AND user_id = $2
+        AND content_id = $3
+        AND ended_at IS NULL
+        AND heartbeat_at > now() - interval '5 minutes'
+      RETURNING heartbeat_at`,
+    [sessionId, userId, contentId]
+  );
+
+  return result.rows[0]?.heartbeat_at ?? null;
+}
+
 export async function discardPlaybackSession(
   sessionId: number,
   userId: number,
