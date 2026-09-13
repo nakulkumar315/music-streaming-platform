@@ -4,6 +4,7 @@ import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
 import authRoutes from "../../modules/auth/auth.routes";
 import userRoutes from "../../modules/user/user.routes";
+import trustedListenTimeRoutes from "../../modules/user/listen-time.routes";
 import artistRoutes from "../../modules/artist/public-artist.routes";
 import contentRoutes from "../../modules/content/content.routes";
 import streamRoutes from "../../modules/streaming/stream.routes";
@@ -18,8 +19,9 @@ const requireFan = requireRoles("FAN");
 router.use("/auth", authRoutes);
 
 // Private fan account domains are mounted behind an explicit FAN boundary.
-// Public discovery/content routes below remain independently guarded where
-// authentication is optional by product design.
+// Trusted listening-time shadows the legacy user handler so raw sessions/play
+// counts can never be used as a fallback analytics source.
+router.use("/user", requireAuth, requireFan, trustedListenTimeRoutes);
 router.use("/user", requireAuth, requireFan, userRoutes);
 router.use("/subscriptions", requireAuth, requireFan, subRoutes);
 router.use("/subs", requireAuth, requireFan, subRoutes);
