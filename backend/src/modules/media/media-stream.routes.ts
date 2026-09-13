@@ -74,8 +74,14 @@ router.get("/:mediaId", async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, message: "Media not found" });
     }
 
-    const status = String(content.status || content.lifecycle_state || "DRAFT").toUpperCase();
-    if (!isContentEligibleForPlayback(status, Boolean(content.is_approved))) {
+    const technicalStatus = String(content.status || "").toUpperCase();
+    const lifecycleState = String(content.lifecycle_state || "DRAFT").toUpperCase();
+    if (!isContentEligibleForPlayback({
+      technicalStatus,
+      lifecycleState,
+      isApproved: Boolean(content.is_approved),
+      isTakenDown: Boolean(content.is_taken_down),
+    })) {
       return res.status(409).json({ success: false, message: "Media is not approved for playback" });
     }
 

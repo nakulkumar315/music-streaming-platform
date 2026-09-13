@@ -6,7 +6,7 @@ import { PLAYABLE_STATUSES, VISIBILITY, type Visibility } from "./media.constant
 
 export function isStatusPlayable(status: string): boolean {
   const normalized = String(status || "").trim().toUpperCase();
-  return PLAYABLE_STATUSES.has(normalized);
+  return (PLAYABLE_STATUSES as Set<string>).has(normalized);
 }
 
 export function isContentEligibleForPlayback(input: {

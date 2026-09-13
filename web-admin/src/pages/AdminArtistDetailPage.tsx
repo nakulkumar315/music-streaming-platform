@@ -123,7 +123,7 @@ type SoftDeleteResponse = {
   correlationId?: string;
 };
 
-function formatDateTime(v: string | null) {
+function formatDateTime(v: string | null | undefined) {
   if (!v) return "—";
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return "—";

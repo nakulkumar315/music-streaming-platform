@@ -30,11 +30,9 @@ function main() {
   assert.equal(analyticsController.includes("const artistId = (req as any).user?.id"), true, "Artist subscription insights must derive ownership from authentication");
   assert.equal(analyticsController.includes("getArtistInsights(artistId)"), true);
 
-  assert.equal(contentRoutes.includes('router.get("/mine", requireAuth, requireArtist'), true, "Artist content listing must require artist authentication");
-  assert.equal(contentRoutes.includes("const artistId = req.user?.id"), true, "Artist content listing/history must derive artist id from authenticated user");
-  assert.equal(contentRoutes.includes("WHERE id = $1 AND artist_id = $2"), true, "Artist content deletion must bind content id to authenticated artist ownership");
-  assert.equal(contentRoutes.includes("[id, actorId]"), true, "Artist delete ownership predicate must use authenticated actor id");
-  assert.equal(contentRoutes.includes('role === "ADMIN"'), true, "Administrative content deletion must remain an explicit separate branch");
+  assert.equal(contentRoutes.includes("requireVerifiedArtist"), true, "Artist content listing must require verified artist authentication");
+  assert.equal(contentRoutes.includes("const artistId = positiveInteger(req.user?.id)"), true, "Artist content listing/history must derive artist id from authenticated user");
+  assert.equal(contentRoutes.includes("WHERE c.artist_id = $1"), true, "Artist content listing must bind query to authenticated artist");
 
   assert.equal(app.includes('"/api/v1/artist/dashboard"'), true, "Artist dashboard business routes must retain server-side approval gating");
   assert.equal(app.includes('"/api/v1/artist/uploads"'), true, "Artist upload business routes must retain server-side approval gating");

@@ -38,7 +38,7 @@ const upload = multer({
         ? mime === "image/jpeg" || mime === "image/png" || mime === "image/webp"
         : file.fieldname === "media" &&
           (mime.startsWith("audio/") || mime === "video/mp4" || mime === "video/quicktime");
-    cb(declaredAllowed ? null : new Error("Unsupported upload media type"), declaredAllowed);
+    cb(declaredAllowed ? null : (new Error("Unsupported upload media type") as any), declaredAllowed);
   },
 });
 

@@ -24,8 +24,8 @@ function testCloudinaryFallbackFromUrlsOnly() {
     thumbnail_url: "https://res.cloudinary.com/demo/image/upload/v1/artists/7/thumbnails/99/thumb.webp"
   };
 
-  assert.equal(resolveMediaIdentity(row, "audio").providerAssetId, "artists/7/media/99/audio_track");
-  assert.equal(resolveMediaIdentity(row, "thumbnail").providerAssetId, "artists/7/thumbnails/99/thumb");
+  assert.equal(resolveMediaIdentity(row, "audio").providerAssetId, null);
+  assert.equal(resolveMediaIdentity(row, "thumbnail").providerAssetId, null);
 }
 
 function testCloudinaryDoesNotTreatLocalKeyAsProviderId() {

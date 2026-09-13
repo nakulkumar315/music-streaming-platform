@@ -21,7 +21,7 @@
     "test:refund-integrity-contract": "ts-node --transpile-only src/scripts/test-refund-integrity-contract.ts",
     "test:refund-integrity-db": "ts-node --transpile-only src/scripts/test-refund-integrity-db.ts",
     "test:auth-hardening": "ts-node --transpile-only src/scripts/test-auth-hardening.ts",
-    "test:auth-account-state-contract": "ts-node --transpile-only src/scripts/test-auth-account-state-contract.ts",
+    "test:auth-account-state-contract": "ts-node --transpile-only src/scripts/test-account-state-contract.ts",
     "test:artist-ownership-contract": "ts-node --transpile-only src/scripts/test-artist-ownership-contract.ts",
     "test:artist-approval-contract": "ts-node --transpile-only src/scripts/test-artist-approval-contract.ts",
     "test:content-media-governance": "ts-node --transpile-only src/scripts/test-content-media-governance-contract.ts",

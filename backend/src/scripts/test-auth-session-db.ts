@@ -310,7 +310,7 @@ async function main() {
       );
     } else {
       assert.equal(
-        raceLoginResult.error?.code,
+        (raceLoginResult as any).error?.code,
         "INVALID_CREDENTIALS",
         "If password rotation wins the lock, the old-password login must be rejected"
       );

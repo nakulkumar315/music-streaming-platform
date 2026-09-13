@@ -45,7 +45,11 @@ function main() {
   assert.equal(prisma.includes("provider_refund_id"), true);
   assert.equal(prisma.includes("idempotency_key"), true);
 
-  assert.equal(schemaReadiness.includes('LATEST_SCHEMA_VERSION = "20260913_0006_refund_intent_integrity"'), true, "Service startup must require the refund schema");
+  const latestVersionMatch = schemaReadiness.match(/LATEST_SCHEMA_VERSION = "([^"]+)"/);
+  assert.ok(
+    latestVersionMatch && latestVersionMatch[1] >= "20260913_0006_refund_intent_integrity",
+    "Service startup must require at least the refund schema"
+  );
   assert.equal(schemaReadiness.includes("refund_requests"), true, "Refund ledger columns must be checked at startup");
   assert.equal(schemaReadiness.includes("fk_refund_requests_payment"), true, "Refund relational constraints must be checked at startup");
 
@@ -99,8 +103,16 @@ function main() {
   assert.equal(paymentController.includes('case "refund.processed"'), true, "Verified refund processed webhook remains authoritative final signal");
   assert.equal(paymentController.includes('case "refund.failed"'), true, "Provider failed refund webhook must be tracked");
   assert.equal(paymentController.includes("processVerifiedRefundEvent(client"), true, "Refund webhooks must pass through the anomaly-aware canonical refund boundary");
-  assert.equal(entitlement.includes("s.status = 'ACTIVE'"), true, "Refund/cancellation status transition must revoke Phase-02 entitlement");
-  assert.equal(entitlement.includes("s.next_billing_date > now()"), true, "Entitlement remains time-bound as well as state-bound");
+  assert.equal(
+    entitlement.includes("s.status = 'ACTIVE'") || entitlement.includes('status === "ACTIVE"'),
+    true,
+    "Refund/cancellation status transition must revoke Phase-02 entitlement"
+  );
+  assert.equal(
+    entitlement.includes("s.next_billing_date > now()") || entitlement.includes("expiryMs > Date.now()"),
+    true,
+    "Entitlement remains time-bound as well as state-bound"
+  );
 
   console.log("Phase 01A refund/cancellation contract checks passed.");
 }

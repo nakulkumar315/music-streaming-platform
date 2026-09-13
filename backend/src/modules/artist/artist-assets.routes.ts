@@ -32,7 +32,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || "").toLowerCase();
     const allowed = mime === "image/jpeg" || mime === "image/png" || mime === "image/webp";
-    cb(allowed ? null : new Error("Unsupported image type"), allowed);
+    cb(allowed ? null : (new Error("Unsupported image type") as any), allowed);
   },
 });
 

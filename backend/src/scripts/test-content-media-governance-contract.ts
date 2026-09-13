@@ -107,7 +107,7 @@ function main() {
   assert.equal(firebase.includes("streamToBuffer"), false, "Firebase must not buffer full media uploads");
   assert.equal(local.includes("pipeline"), true, "Local provider must use streaming file pipeline");
 
-  assert.equal(env.includes('envStr("CLOUDINARY_WEBHOOK_URL")'), true, "Cloudinary video processing webhook must fail fast when missing");
+  assert.equal(env.includes('CLOUDINARY_WEBHOOK_URL is required when STORAGE_PROVIDER=cloudinary'), true, "Cloudinary video processing webhook must fail fast when missing");
   assert.equal(migration7.includes("content_items_technical_status_valid"), true, "DB must constrain technical media states");
   assert.equal(migration7.includes("content_items_media_key_valid"), true, "DB must constrain AUDIO/VIDEO storage-key shape");
   assert.equal(migration8.includes("CREATE TABLE user_media_assets"), true, "Provider-neutral artist asset mapping must be migrated");

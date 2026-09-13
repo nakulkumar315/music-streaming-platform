@@ -144,7 +144,7 @@ router.post("/logout", requireAuth, async (req: any, res) => {
     return res.status(403).json({
       success: false,
       code: "FORBIDDEN",
-      message: "This account cannot access the administration portal",
+      message: "Access forbidden",
     });
   }
 
