@@ -10,7 +10,7 @@ import {
   markPaymentFailed,
 } from "../modules/payment/payment.service";
 import { startArtistSubscriptionPurchase } from "../modules/payment/payment.purchase.service";
-import { finalizeRefund } from "../modules/payment/payment.refund.service";
+import { processVerifiedRefundEvent } from "../modules/payment/payment.refund.webhook";
 import {
   deriveWebhookEventId,
   parseVerifiedWebhookPayload,
@@ -373,11 +373,12 @@ export const razorpayWebhook = async (req: any, res: Response) => {
             );
           }
 
-          const refund = await finalizeRefund(client, {
+          const refund = await processVerifiedRefundEvent(client, {
             paymentId,
             refundId,
             refundAmountPaise,
             providerStatus,
+            currency: normalizeCurrency(entity?.currency || "INR"),
           });
 
           if (refund.fullRefund) {
