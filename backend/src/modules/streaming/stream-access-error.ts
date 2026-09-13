@@ -31,7 +31,13 @@ export function mapStreamAccessError(err: unknown): StreamAccessErrorPayload {
     return { status: 409, code: "CONTENT_NOT_READY", message: err.message };
   }
   if (err instanceof MediaAccessDeniedException) {
-    return { status: 403, code: err.code, message: err.message };
+    const status =
+      err.code === "AUTHENTICATION_REQUIRED"
+        ? 401
+        : err.code === "PLAYBACK_SESSION_LIMIT"
+          ? 429
+          : 403;
+    return { status, code: err.code, message: err.message };
   }
   if (err instanceof MediaExpiredAccessException) {
     return { status: 401, code: "PLAYBACK_ACCESS_EXPIRED", message: err.message };
