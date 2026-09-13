@@ -24,6 +24,8 @@ function main() {
   const adminSubscriptionSettings = read(
     "web-admin/src/pages/AdminSubscriptionSettingsPage.tsx"
   );
+  const artistApp = read("web-artist/src/App.tsx");
+  const artistAccount = read("web-artist/src/pages/ArtistAccountPage.tsx");
   const artistSession = read("web-artist/src/services/artistSession.ts");
   const artistHttp = read("web-artist/src/services/http.ts");
   const artistRuntime = read("web-artist/src/config/runtime.ts");
@@ -122,6 +124,34 @@ function main() {
     artistShell.includes('failure.code === "ARTIST_NOT_APPROVED"'),
     true,
     "Artist approval denial must route to approval state without treating it as authentication loss"
+  );
+  assert.equal(
+    artistApp.includes("<ArtistLoginRoute />") && artistApp.includes("getArtistToken()"),
+    true,
+    "An existing tab-scoped Artist session must bypass the login page and reach server validation"
+  );
+  assert.equal(
+    artistAccount.includes("artistRuntimeConfig.apiBaseUrl"),
+    true,
+    "Artist profile asset URLs must use the centralized validated runtime origin"
+  );
+  assert.equal(
+    artistAccount.includes("import.meta.env.VITE_API_BASE_URL") ||
+      artistAccount.includes('"http://localhost:8000"'),
+    false,
+    "Artist profile must not define a second raw/fallback API origin"
+  );
+  assert.equal(
+    artistAccount.includes("normalizeExternalUrl") &&
+      artistAccount.includes('parsed.protocol !== "http:"') &&
+      artistAccount.includes('parsed.protocol !== "https:"'),
+    true,
+    "Artist profile external links must reject non-http(s) schemes"
+  );
+  assert.equal(
+    artistAccount.includes("await load();"),
+    true,
+    "Artist profile updates must reconcile with canonical server state after save"
   );
 
   for (const [label, runtime] of [
