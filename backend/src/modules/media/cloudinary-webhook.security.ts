@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { validateEnv } from "../../config/env.validation";
 
 export class CloudinaryWebhookAuthError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -30,7 +31,8 @@ export function verifyCloudinaryWebhook(input: {
 }) {
   const signature = String(input.signature || "").trim().toLowerCase();
   const timestamp = String(input.timestamp || "").trim();
-  const secret = String(process.env.CLOUDINARY_API_SECRET || "").trim();
+  const runtime = validateEnv();
+  const secret = runtime.cloudinaryApiSecret;
 
   if (!secret) {
     throw new CloudinaryWebhookAuthError(
@@ -53,10 +55,7 @@ export function verifyCloudinaryWebhook(input: {
     );
   }
 
-  const configuredMaxAge = Number(process.env.CLOUDINARY_WEBHOOK_MAX_AGE_SECONDS || 7200);
-  const maxAgeSeconds = Number.isSafeInteger(configuredMaxAge) && configuredMaxAge >= 60
-    ? Math.min(configuredMaxAge, 7200)
-    : 7200;
+  const maxAgeSeconds = runtime.cloudinaryWebhookMaxAgeSeconds;
   const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
   const age = Math.abs(nowSeconds - timestampSeconds);
   if (age > maxAgeSeconds) {
