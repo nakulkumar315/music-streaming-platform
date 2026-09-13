@@ -12,7 +12,7 @@ interface VideoCardProps {
     title: string;
     artistName: string;
     thumbnail: any;
-    duration: string;
+    duration?: string;
     viewCount: string;
   };
   onAction: () => void;
@@ -56,9 +56,11 @@ export default function VideoCard({ video, onAction }: VideoCardProps) {
               <Play color="#FFFFFF" size={16} fill="#FFFFFF" />
             </View>
           </View>
-          <View style={styles.durationBadge}>
-            <Text style={styles.durationText}>{video.duration}</Text>
-          </View>
+          {video.duration ? (
+            <View style={styles.durationBadge}>
+              <Text style={styles.durationText}>{video.duration}</Text>
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.infoContainer}>
