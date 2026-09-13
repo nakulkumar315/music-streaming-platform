@@ -17,15 +17,19 @@ export const logger = pino({
     : undefined,
 });
 
+function requestPathOnly(req: { url?: string; originalUrl?: string }) {
+  return String(req.originalUrl || req.url || '').split('?')[0];
+}
+
 export const httpLogger = pinoHttp({
   logger,
   serializers: {
     req: (req) => ({
       method: req.method,
-      url: req.url,
-      query: req.query,
+      // Never log raw query strings here. Protected media URLs carry short-lived
+      // security tokens in the query and request logging must not persist them.
+      path: requestPathOnly(req),
       params: req.params,
-      // Avoid logging sensitive headers
       headers: {
         'user-agent': req.headers['user-agent'],
         'x-correlation-id': req.headers['x-correlation-id'],
