@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 
 /**
- * Deterministic storage key format. Section 13.
+ * Deterministic storage key format.
  * artists/{artistId}/{mediaType}/{yyyy}/{mm}/{uuid}.{ext}
  * Never use raw user filename as path.
  */
@@ -9,10 +9,10 @@ import { v4 as uuidv4 } from "uuid";
 export type MediaTypeCategory = "audio" | "video" | "thumbnails" | "images";
 
 const ALLOWED_EXT_BY_MEDIA: Record<MediaTypeCategory, string[]> = {
-  audio: ["mp3", "m4a", "wav", "mp4"],
-  video: ["mp4", "webm", "mov"],
+  audio: ["mp3", "m4a", "wav", "aac"],
+  video: ["mp4", "mov"],
   thumbnails: ["jpg", "jpeg", "png", "webp"],
-  images: ["jpg", "jpeg", "png", "webp"]
+  images: ["jpg", "jpeg", "png", "webp"],
 };
 
 function normalizeExt(ext: string, mediaType: MediaTypeCategory): string {
