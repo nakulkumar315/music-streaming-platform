@@ -19,6 +19,15 @@ export type StreamAccessResponse = {
   code?: string;
 };
 
+export type PlaybackAccess = {
+  mediaId: number;
+  sessionId: number;
+  playbackUrl: string;
+  expiresIn?: number;
+  contentType?: string;
+  contentLength?: number;
+};
+
 export class StreamAccessError extends Error {
   readonly code: string;
   readonly status: number | null;
@@ -97,11 +106,13 @@ export function getPlaybackErrorPresentation(error: unknown): PlaybackErrorPrese
         retryable: true,
         shouldStopPlayback: false,
       };
+    case 'PLAYBACK_SESSION_EXPIRED':
+    case 'PLAYBACK_SESSION_MISMATCH':
     case 'PLAYBACK_ACCESS_EXPIRED':
     case 'INVALID_PLAYBACK_TOKEN':
       return {
         title: 'Playback session expired',
-        message: 'Playback access expired. Please retry to request a fresh playback session.',
+        message: 'Playback access expired. Please start playback again to create a fresh session.',
         retryable: true,
         shouldStopPlayback: true,
       };
@@ -206,22 +217,58 @@ export function validatePlaybackUrl(url: string, kind?: 'audio' | 'video'): bool
 
 export type VideoQuality = '144p' | '240p' | '360p' | '480p' | '720p' | '1080p' | 'Auto' | 'SD' | 'HD';
 
-export async function getPlaybackUrl(
+function positiveInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+/**
+ * Requests initial playback access or refreshes the short-lived token for one
+ * existing server playback lease. A refresh must return the same session id;
+ * otherwise the client fails closed rather than silently consuming a new slot.
+ */
+export async function getPlaybackAccess(
   contentId: string | number,
   kind?: 'audio' | 'video',
-  quality?: VideoQuality
-): Promise<string> {
+  quality?: VideoQuality,
+  existingSessionId?: number
+): Promise<PlaybackAccess> {
   try {
+    const numericContentId = positiveInteger(contentId);
+    if (!numericContentId) {
+      throw new StreamAccessError('Invalid content id', 'INVALID_CONTENT_ID', null);
+    }
+
+    const sessionId =
+      existingSessionId === undefined ? undefined : positiveInteger(existingSessionId);
+    if (existingSessionId !== undefined && !sessionId) {
+      throw new StreamAccessError(
+        'Playback session is invalid',
+        'PLAYBACK_SESSION_EXPIRED',
+        null
+      );
+    }
+
     const res = await apiV1.post<StreamAccessResponse>('/stream/access', {
-      contentId: Number(contentId),
+      contentId: numericContentId,
+      sessionId,
       kind,
       quality,
     });
     const data = res.data;
-    if (!data?.success || !data?.playbackUrl) {
+    const returnedSessionId = positiveInteger(data?.sessionId);
+    if (!data?.success || !data?.playbackUrl || !returnedSessionId) {
       throw new StreamAccessError(
         data?.message || 'Failed to get playback URL',
         data?.code || 'STREAM_ACCESS_FAILED',
+        res.status
+      );
+    }
+
+    if (sessionId && returnedSessionId !== sessionId) {
+      throw new StreamAccessError(
+        'Playback session changed unexpectedly',
+        'PLAYBACK_SESSION_MISMATCH',
         res.status
       );
     }
@@ -234,10 +281,53 @@ export async function getPlaybackUrl(
         res.status
       );
     }
-    return normalized;
+
+    return {
+      mediaId: positiveInteger(data.mediaId) || numericContentId,
+      sessionId: returnedSessionId,
+      playbackUrl: normalized,
+      expiresIn: data.expiresIn,
+      contentType: data.contentType,
+      contentLength: data.contentLength,
+    };
   } catch (error) {
     if (error instanceof StreamAccessError) throw error;
     const normalized = normalizeApiError(error);
     throw new StreamAccessError(normalized.message, normalized.code, normalized.status);
+  }
+}
+
+/**
+ * Compatibility helper for call sites that only need a one-shot URL. New
+ * playback lifecycle code should use getPlaybackAccess so it retains sessionId.
+ */
+export async function getPlaybackUrl(
+  contentId: string | number,
+  kind?: 'audio' | 'video',
+  quality?: VideoQuality
+): Promise<string> {
+  const access = await getPlaybackAccess(contentId, kind, quality);
+  return access.playbackUrl;
+}
+
+/** Best-effort explicit release of one server playback lease. */
+export async function terminatePlaybackAccess(
+  sessionId: number,
+  contentId: string | number
+): Promise<boolean> {
+  const validSessionId = positiveInteger(sessionId);
+  const validContentId = positiveInteger(contentId);
+  if (!validSessionId || !validContentId) return false;
+
+  try {
+    const response = await apiV1.post('/stream/terminate', {
+      sessionId: validSessionId,
+      contentId: validContentId,
+    });
+    return response.data?.success === true && response.data?.terminated === true;
+  } catch {
+    // Session release is best effort on close/switch. Server staleness cleanup
+    // remains the final safety net; callers should clear local lease state.
+    return false;
   }
 }
