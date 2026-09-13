@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { http } from "../services/http";
 import ImageCropModal from "../components/ImageCropModal";
+import { artistRuntimeConfig } from "../config/runtime";
+import { http } from "../services/http";
 
-// Icons as SVG components for consistent styling
 const CameraIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
@@ -70,11 +70,22 @@ type MeResponse = {
     bio: string;
     accentColor: string | null;
     artistStatus?: string;
-    socialLinks?: Record<string, any> | null;
+    socialLinks?: Record<string, unknown> | null;
   };
 };
 
-
+function normalizeExternalUrl(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    if (parsed.username || parsed.password) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
 
 export default function ArtistAccountPage() {
   const [loading, setLoading] = useState(true);
@@ -103,24 +114,20 @@ export default function ArtistAccountPage() {
   const profileInputRef = useRef<HTMLInputElement | null>(null);
   const bannerInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Image cropping state
   const [cropModalOpen, setCropModalOpen] = useState(false);
   const [cropImageSrc, setCropImageSrc] = useState<string | null>(null);
   const [cropType, setCropType] = useState<"profile" | "banner">("profile");
   const [pendingFile, setPendingFile] = useState<File | null>(null);
 
-
-
-  const apiBaseUrl = useMemo(() => {
-    return (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").toString().replace(/\/$/, "");
-  }, []);
+  const apiBaseUrl = artistRuntimeConfig.apiBaseUrl;
 
   const resolvePublicUrl = (url: string | null) => {
-    const raw = (url || "").toString().trim();
+    const raw = String(url ?? "").trim();
     if (!raw) return null;
-    if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
-    if (raw.startsWith("/")) return `${apiBaseUrl}${raw}`;
-    return raw;
+    if (raw.startsWith("/")) {
+      return new URL(raw, `${apiBaseUrl}/`).toString();
+    }
+    return normalizeExternalUrl(raw);
   };
 
   const profileSrc = useMemo(() => {
@@ -151,7 +158,7 @@ export default function ArtistAccountPage() {
         { headers: { "Content-Type": "multipart/form-data" } }
       );
 
-      const url = resolvePublicUrl((res.data as any)?.url ?? null);
+      const url = resolvePublicUrl(res.data?.url ?? null);
       if (!url) {
         setImageError("Upload failed. Please try again.");
         return;
@@ -171,7 +178,6 @@ export default function ArtistAccountPage() {
   };
 
   const onPickImage = async (kind: "profile" | "banner", file: File) => {
-    // Show crop modal instead of uploading directly
     const objectUrl = URL.createObjectURL(file);
     setCropType(kind);
     setCropImageSrc(objectUrl);
@@ -182,16 +188,14 @@ export default function ArtistAccountPage() {
   const handleCropConfirm = async (croppedBlob: Blob) => {
     if (!pendingFile || !cropImageSrc) return;
 
-    // Create a new file from the cropped blob
-    const ext = pendingFile.name.split('.').pop() || 'jpg';
-    const croppedFile = new File([croppedBlob], `cropped-${cropType}-${Date.now()}.${ext}`, {
-      type: 'image/jpeg',
-    });
+    const croppedFile = new File(
+      [croppedBlob],
+      `cropped-${cropType}-${Date.now()}.jpg`,
+      { type: "image/jpeg" }
+    );
 
-    // Upload the cropped image
     await uploadImage(cropType, croppedFile);
 
-    // Cleanup
     URL.revokeObjectURL(cropImageSrc);
     setCropModalOpen(false);
     setCropImageSrc(null);
@@ -199,9 +203,7 @@ export default function ArtistAccountPage() {
   };
 
   const handleCropCancel = () => {
-    if (cropImageSrc) {
-      URL.revokeObjectURL(cropImageSrc);
-    }
+    if (cropImageSrc) URL.revokeObjectURL(cropImageSrc);
     setCropModalOpen(false);
     setCropImageSrc(null);
     setPendingFile(null);
@@ -219,7 +221,6 @@ export default function ArtistAccountPage() {
 
     e.preventDefault();
 
-    // Use crop modal for pasted images too
     const ext = blob.type.split("/")[1] || "png";
     const file = new File([blob], `${kind}-${Date.now()}.${ext}`, { type: blob.type });
     const objectUrl = URL.createObjectURL(blob);
@@ -249,20 +250,20 @@ export default function ArtistAccountPage() {
 
   const load = async () => {
     const res = await http.get<MeResponse>("/api/v1/artist/me");
-    const a = res.data?.artist;
-    if (!a) return;
-    setRegisteredEmail((a.email ?? "").toString());
-    setArtistStatus((a.artistStatus ?? "PENDING").toString());
-    setName(a.name ?? "");
-    setBio(a.bio ?? "");
-    setProfileImageUrl(resolvePublicUrl(a.profileImageUrl ?? null));
-    setBannerImageUrl(resolvePublicUrl(a.bannerImageUrl ?? null));
+    const artist = res.data?.artist;
+    if (!artist) throw new Error("Artist profile is unavailable");
 
+    setRegisteredEmail(String(artist.email ?? ""));
+    setArtistStatus(String(artist.artistStatus ?? "PENDING"));
+    setName(artist.name ?? "");
+    setBio(artist.bio ?? "");
+    setProfileImageUrl(resolvePublicUrl(artist.profileImageUrl ?? null));
+    setBannerImageUrl(resolvePublicUrl(artist.bannerImageUrl ?? null));
 
-    const socials = (a.socialLinks ?? null) as any;
-    setSpotify((socials?.spotify ?? "").toString());
-    setYoutube((socials?.youtube ?? "").toString());
-    setInstagram((socials?.instagram ?? "").toString());
+    const socials = artist.socialLinks ?? {};
+    setSpotify(normalizeExternalUrl(socials.spotify) ?? "");
+    setYoutube(normalizeExternalUrl(socials.youtube) ?? "");
+    setInstagram(normalizeExternalUrl(socials.instagram) ?? "");
   };
 
   useEffect(() => {
@@ -270,7 +271,14 @@ export default function ArtistAccountPage() {
     (async () => {
       try {
         setLoading(true);
+        setSaveError(null);
         await load();
+      } catch (err: any) {
+        if (mounted) {
+          setSaveError(
+            err?.response?.data?.message || err?.message || "Failed to load profile"
+          );
+        }
       } finally {
         if (mounted) setLoading(false);
       }
@@ -285,14 +293,13 @@ export default function ArtistAccountPage() {
     setSaving(true);
     setSaved(false);
     setSaveError(null);
-    const socialLinks = {
-      spotify: spotify.trim(),
-      youtube: youtube.trim(),
-      instagram: instagram.trim()
-    };
 
-    if (!socialLinks.spotify || !socialLinks.youtube || !socialLinks.instagram) {
-      setSaveError("Spotify, YouTube, and Instagram links are required");
+    const spotifyUrl = normalizeExternalUrl(spotify);
+    const youtubeUrl = normalizeExternalUrl(youtube);
+    const instagramUrl = normalizeExternalUrl(instagram);
+
+    if (!spotifyUrl || !youtubeUrl || !instagramUrl) {
+      setSaveError("Spotify, YouTube, and Instagram must be valid http(s) URLs.");
       setSaving(false);
       return;
     }
@@ -301,10 +308,15 @@ export default function ArtistAccountPage() {
       await http.patch("/api/v1/artist/me", {
         name,
         bio,
-        profileImageUrl,
-        bannerImageUrl,
-        socialLinks
+        profileImageUrl: resolvePublicUrl(profileImageUrl),
+        bannerImageUrl: resolvePublicUrl(bannerImageUrl),
+        socialLinks: {
+          spotify: spotifyUrl,
+          youtube: youtubeUrl,
+          instagram: instagramUrl,
+        },
       });
+      await load();
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2500);
     } catch (err: any) {
@@ -314,11 +326,12 @@ export default function ArtistAccountPage() {
     }
   };
 
-
+  const spotifyHref = normalizeExternalUrl(spotify);
+  const youtubeHref = normalizeExternalUrl(youtube);
+  const instagramHref = normalizeExternalUrl(instagram);
 
   return (
     <>
-      {/* Image Crop Modal */}
       <ImageCropModal
         isOpen={cropModalOpen}
         imageSrc={cropImageSrc}
@@ -332,20 +345,15 @@ export default function ArtistAccountPage() {
         className="relative min-h-screen overflow-hidden rounded-[16px] border border-white/10 bg-gradient-to-br from-[#1a1412] via-surface to-[#0a0808] backdrop-blur-xl shadow-[0_30px_100px_rgba(0,0,0,0.6)]"
         style={backgroundStyle}
       >
-      {/* Ambient glow effects */}
       <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-secondary/5 rounded-full blur-[150px] pointer-events-none" />
       <div className="absolute bottom-0 right-0 w-[400px] h-[400px] bg-secondary/3 rounded-full blur-[120px] pointer-events-none" />
       
       <div className="relative px-6 py-8 sm:px-10 sm:py-10 lg:px-12 lg:py-12">
-        
-        {/* Header Section */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <div>
             <h1 className="text-[32px] font-bold tracking-tight text-white mb-1">Profile Settings</h1>
             <p className="text-[14px] text-[#a99792]">Manage your artist identity and social presence</p>
           </div>
-          
-          {/* Profile Completion Indicator */}
           <div className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 border border-white/10">
             <div className="relative w-12 h-12">
               <svg className="w-12 h-12 -rotate-90" viewBox="0 0 36 36">
@@ -378,9 +386,7 @@ export default function ArtistAccountPage() {
           </div>
         </div>
 
-        {/* Hero Card with Banner & Avatar */}
         <div className="relative rounded-[20px] border border-white/10 bg-[#0e0a0a]/60 overflow-hidden mb-8 shadow-2xl">
-          {/* Banner Section - using object-contain to show full image without cropping */}
           <div className="relative min-h-[240px] max-h-[400px] bg-gradient-to-br from-[#2a1f1a] to-[#0f0c0a] group flex items-center justify-center">
             {bannerSrc ? (
               <img 
@@ -399,12 +405,11 @@ export default function ArtistAccountPage() {
               </div>
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-[#0e0a0a] via-transparent to-black/20 pointer-events-none" />
-            
-            {/* Banner Upload Button */}
             <button
               type="button"
+              disabled={Boolean(imageUploading)}
               onClick={() => bannerInputRef.current?.click()}
-              className="absolute top-4 right-4 flex items-center gap-2 px-4 py-2 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[13px] text-white hover:bg-black/80 transition-all group/btn"
+              className="absolute top-4 right-4 flex items-center gap-2 px-4 py-2 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[13px] text-white hover:bg-black/80 transition-all group/btn disabled:opacity-50"
             >
               <CameraIcon />
               <span className="hidden sm:inline">{bannerSrc ? "Change Banner" : "Add Banner"}</span>
@@ -413,22 +418,21 @@ export default function ArtistAccountPage() {
             <input
               ref={bannerInputRef}
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               className="hidden"
+              disabled={Boolean(imageUploading)}
               onChange={async (e) => {
                 const input = e.currentTarget;
                 const file = e.target.files?.[0];
                 if (!file) return;
                 await onPickImage("banner", file);
-                if (input) input.value = "";
+                input.value = "";
               }}
             />
           </div>
 
-          {/* Profile Info Section */}
           <div className="px-6 pb-6 sm:px-8 sm:pb-8">
             <div className="flex flex-col sm:flex-row items-start sm:items-end gap-5 -mt-16 relative z-10">
-              {/* Avatar */}
               <div className="relative group">
                 <div className="w-[120px] h-[120px] rounded-full overflow-hidden border-4 border-[#0e0a0a] bg-surface shadow-2xl">
                   {profileSrc ? (
@@ -441,12 +445,11 @@ export default function ArtistAccountPage() {
                     </div>
                   )}
                 </div>
-                
-                {/* Avatar Upload Overlay */}
                 <button
                   type="button"
+                  disabled={Boolean(imageUploading)}
                   onClick={() => profileInputRef.current?.click()}
-                  className="absolute inset-0 rounded-full bg-black/60 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all border-4 border-[#0e0a0a]"
+                  className="absolute inset-0 rounded-full bg-black/60 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all border-4 border-[#0e0a0a] disabled:cursor-not-allowed"
                 >
                   <div className="text-center text-white">
                     <CameraIcon />
@@ -454,7 +457,6 @@ export default function ArtistAccountPage() {
                   </div>
                 </button>
 
-                {/* Status Badge - repositioned to bottom center */}
                 <div className={`absolute -bottom-2 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border-2 border-[#0e0a0a] whitespace-nowrap shadow-lg ${
                   isVerified
                     ? "bg-emerald-500 text-white border-emerald-600"
@@ -474,19 +476,19 @@ export default function ArtistAccountPage() {
                 <input
                   ref={profileInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/jpeg,image/png,image/webp"
                   className="hidden"
+                  disabled={Boolean(imageUploading)}
                   onChange={async (e) => {
                     const input = e.currentTarget;
                     const file = e.target.files?.[0];
                     if (!file) return;
                     await onPickImage("profile", file);
-                    if (input) input.value = "";
+                    input.value = "";
                   }}
                 />
               </div>
 
-              {/* Name & Email */}
               <div className="flex-1 pb-2">
                 <h2 className="text-[24px] font-bold text-white tracking-tight">{name || "Your Name"}</h2>
                 <p className="text-[14px] text-[#a99792] flex items-center gap-2">
@@ -495,7 +497,6 @@ export default function ArtistAccountPage() {
                 </p>
               </div>
 
-              {/* Upload Status */}
               {imageUploading && (
                 <div className="px-4 py-2 rounded-lg bg-secondary/10 border border-secondary/30 text-[13px] text-secondary flex items-center gap-2">
                   <div className="w-4 h-4 border-2 border-secondary/30 border-t-secondary rounded-full animate-spin" />
@@ -506,7 +507,6 @@ export default function ArtistAccountPage() {
           </div>
         </div>
 
-        {/* Error Messages */}
         {imageError && (
           <div className="mb-6 rounded-xl border border-rose-500/30 bg-rose-500/10 px-5 py-4 flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-rose-500/20 flex items-center justify-center text-rose-400">
@@ -525,7 +525,6 @@ export default function ArtistAccountPage() {
           </div>
         )}
 
-        {/* Success Message */}
         {saved && (
           <div className="mb-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-4 flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
@@ -535,9 +534,9 @@ export default function ArtistAccountPage() {
           </div>
         )}
 
-        {/* Navigation Tabs */}
         <div className="flex items-center gap-2 mb-6">
           <button
+            type="button"
             onClick={() => setActiveTab("profile")}
             className={`px-6 py-3 rounded-xl text-[14px] font-medium transition-all ${
               activeTab === "profile"
@@ -554,6 +553,7 @@ export default function ArtistAccountPage() {
             </span>
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab("socials")}
             className={`px-6 py-3 rounded-xl text-[14px] font-medium transition-all ${
               activeTab === "socials"
@@ -572,10 +572,7 @@ export default function ArtistAccountPage() {
           </button>
         </div>
 
-        {/* Content Area */}
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6">
-          
-          {/* Main Form Area */}
           <div className="space-y-6">
             {activeTab === "profile" ? (
               <div className="rounded-[20px] border border-white/10 bg-[#0e0a0a]/40 p-6 sm:p-8 backdrop-blur-sm">
@@ -590,7 +587,6 @@ export default function ArtistAccountPage() {
                 </h3>
 
                 <div className="space-y-5">
-                  {/* Display Name */}
                   <div>
                     <label className="block text-[12px] uppercase tracking-wider text-[#8d7b77] mb-2 font-medium">
                       Display Name <span className="text-secondary">*</span>
@@ -598,12 +594,12 @@ export default function ArtistAccountPage() {
                     <input
                       value={name}
                       onChange={(e) => setName(e.target.value)}
-                      className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 px-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] focus:ring-1 focus:ring-secondary/20 transition-all"
+                      disabled={loading || saving}
+                      className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 px-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] focus:ring-1 focus:ring-secondary/20 transition-all disabled:opacity-50"
                       placeholder="How fans will know you"
                     />
                   </div>
 
-                  {/* Bio */}
                   <div>
                     <label className="block text-[12px] uppercase tracking-wider text-[#8d7b77] mb-2 font-medium">
                       Bio <span className="text-secondary">*</span>
@@ -612,7 +608,9 @@ export default function ArtistAccountPage() {
                       value={bio}
                       onChange={(e) => setBio(e.target.value)}
                       rows={4}
-                      className="w-full rounded-xl bg-white/5 border border-white/10 px-5 py-4 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] focus:ring-1 focus:ring-secondary/20 transition-all resize-none"
+                      maxLength={500}
+                      disabled={loading || saving}
+                      className="w-full rounded-xl bg-white/5 border border-white/10 px-5 py-4 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] focus:ring-1 focus:ring-secondary/20 transition-all resize-none disabled:opacity-50"
                       placeholder="Tell fans about your music, style, and story..."
                     />
                     <div className="flex justify-between mt-2">
@@ -621,7 +619,6 @@ export default function ArtistAccountPage() {
                     </div>
                   </div>
 
-                  {/* Image URLs */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     <div>
                       <label className="block text-[12px] uppercase tracking-wider text-[#8d7b77] mb-2 font-medium">
@@ -631,7 +628,8 @@ export default function ArtistAccountPage() {
                         <input
                           value={profileImageUrl ?? ""}
                           onChange={(e) => setProfileImageUrl(e.target.value || null)}
-                          className="w-full h-[48px] rounded-xl bg-white/5 border border-white/10 pl-11 pr-4 text-[14px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] transition-all"
+                          disabled={loading || saving || Boolean(imageUploading)}
+                          className="w-full h-[48px] rounded-xl bg-white/5 border border-white/10 pl-11 pr-4 text-[14px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] transition-all disabled:opacity-50"
                           placeholder="https://..."
                         />
                         <div className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5a4a45]">
@@ -647,8 +645,9 @@ export default function ArtistAccountPage() {
                           <span className="text-secondary">Paste</span> image here or
                           <button
                             type="button"
+                            disabled={Boolean(imageUploading)}
                             onClick={() => profileInputRef.current?.click()}
-                            className="ml-1 text-white hover:underline"
+                            className="ml-1 text-white hover:underline disabled:opacity-50"
                           >
                             browse
                           </button>
@@ -664,7 +663,8 @@ export default function ArtistAccountPage() {
                         <input
                           value={bannerImageUrl ?? ""}
                           onChange={(e) => setBannerImageUrl(e.target.value || null)}
-                          className="w-full h-[48px] rounded-xl bg-white/5 border border-white/10 pl-11 pr-4 text-[14px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] transition-all"
+                          disabled={loading || saving || Boolean(imageUploading)}
+                          className="w-full h-[48px] rounded-xl bg-white/5 border border-white/10 pl-11 pr-4 text-[14px] text-white placeholder-[#5a4a45] outline-none focus:border-secondary/50 focus:bg-white/[0.07] transition-all disabled:opacity-50"
                           placeholder="https://..."
                         />
                         <div className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5a4a45]">
@@ -680,8 +680,9 @@ export default function ArtistAccountPage() {
                           <span className="text-secondary">Paste</span> image here or
                           <button
                             type="button"
+                            disabled={Boolean(imageUploading)}
                             onClick={() => bannerInputRef.current?.click()}
-                            className="ml-1 text-white hover:underline"
+                            className="ml-1 text-white hover:underline disabled:opacity-50"
                           >
                             browse
                           </button>
@@ -704,7 +705,6 @@ export default function ArtistAccountPage() {
                 </h3>
 
                 <div className="space-y-5">
-                  {/* Spotify */}
                   <div>
                     <label className="flex items-center gap-2 text-[12px] uppercase tracking-wider text-[#8d7b77] mb-2 font-medium">
                       <span className="text-[#1DB954]"><SpotifyIcon /></span>
@@ -712,9 +712,11 @@ export default function ArtistAccountPage() {
                     </label>
                     <div className="relative">
                       <input
+                        type="url"
                         value={spotify}
                         onChange={(e) => setSpotify(e.target.value)}
-                        className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 pl-12 pr-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-[#1DB954]/50 focus:bg-white/[0.07] transition-all"
+                        disabled={loading || saving}
+                        className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 pl-12 pr-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-[#1DB954]/50 focus:bg-white/[0.07] transition-all disabled:opacity-50"
                         placeholder="https://open.spotify.com/artist/..."
                       />
                       <div className="absolute left-4 top-1/2 -translate-y-1/2">
@@ -723,7 +725,6 @@ export default function ArtistAccountPage() {
                     </div>
                   </div>
 
-                  {/* YouTube */}
                   <div>
                     <label className="flex items-center gap-2 text-[12px] uppercase tracking-wider text-[#8d7b77] mb-2 font-medium">
                       <span className="text-[#FF0000]"><YoutubeIcon /></span>
@@ -731,9 +732,11 @@ export default function ArtistAccountPage() {
                     </label>
                     <div className="relative">
                       <input
+                        type="url"
                         value={youtube}
                         onChange={(e) => setYoutube(e.target.value)}
-                        className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 pl-12 pr-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-[#FF0000]/50 focus:bg-white/[0.07] transition-all"
+                        disabled={loading || saving}
+                        className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 pl-12 pr-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-[#FF0000]/50 focus:bg-white/[0.07] transition-all disabled:opacity-50"
                         placeholder="https://youtube.com/@..."
                       />
                       <div className="absolute left-4 top-1/2 -translate-y-1/2">
@@ -742,7 +745,6 @@ export default function ArtistAccountPage() {
                     </div>
                   </div>
 
-                  {/* Instagram */}
                   <div>
                     <label className="flex items-center gap-2 text-[12px] uppercase tracking-wider text-[#8d7b77] mb-2 font-medium">
                       <span className="text-[#E4405F]"><InstagramIcon /></span>
@@ -750,9 +752,11 @@ export default function ArtistAccountPage() {
                     </label>
                     <div className="relative">
                       <input
+                        type="url"
                         value={instagram}
                         onChange={(e) => setInstagram(e.target.value)}
-                        className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 pl-12 pr-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-[#E4405F]/50 focus:bg-white/[0.07] transition-all"
+                        disabled={loading || saving}
+                        className="w-full h-[52px] rounded-xl bg-white/5 border border-white/10 pl-12 pr-5 text-[15px] text-white placeholder-[#5a4a45] outline-none focus:border-[#E4405F]/50 focus:bg-white/[0.07] transition-all disabled:opacity-50"
                         placeholder="https://instagram.com/..."
                       />
                       <div className="absolute left-4 top-1/2 -translate-y-1/2">
@@ -776,19 +780,14 @@ export default function ArtistAccountPage() {
             )}
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-6">
-            {/* Quick Preview Card */}
             <div className="rounded-[20px] border border-white/10 bg-[#0e0a0a]/40 p-6 backdrop-blur-sm">
               <h4 className="text-[14px] uppercase tracking-wider text-[#8d7b77] mb-4 font-semibold">Profile Preview</h4>
               <div className="rounded-xl overflow-hidden border border-white/10 bg-surface">
-                {/* Banner with gradient fallback - object-contain to show full image */}
                 <div className="h-[100px] bg-gradient-to-br from-secondary/30 to-[#2a1a17] relative flex items-center justify-center overflow-hidden">
                   {bannerSrc && <img src={bannerSrc} alt="" className="h-full w-full object-contain" />}
                 </div>
-                {/* Avatar section with proper spacing - no overlap */}
                 <div className="px-4 pb-4 relative">
-                  {/* Avatar positioned to overlap banner edge with background padding */}
                   <div className="relative -mt-8 mb-2">
                     <div className="w-16 h-16 rounded-full overflow-hidden border-4 border-surface bg-[#0e0a0a] shadow-xl">
                       {profileSrc ? (
@@ -811,21 +810,19 @@ export default function ArtistAccountPage() {
                     )}
                   </div>
                   <p className="text-[12px] text-[#8d7b77] line-clamp-2 mt-1">{bio || "No bio yet"}</p>
-                  
-                  {/* Social Icons */}
                   <div className="flex items-center gap-3 mt-3">
-                    {spotify && (
-                      <a href={spotify} target="_blank" rel="noopener noreferrer" className="w-8 h-8 rounded-full bg-[#1DB954]/20 flex items-center justify-center text-[#1DB954] hover:bg-[#1DB954]/30 transition-colors">
+                    {spotifyHref && (
+                      <a href={spotifyHref} target="_blank" rel="noopener noreferrer" className="w-8 h-8 rounded-full bg-[#1DB954]/20 flex items-center justify-center text-[#1DB954] hover:bg-[#1DB954]/30 transition-colors">
                         <SpotifyIcon />
                       </a>
                     )}
-                    {youtube && (
-                      <a href={youtube} target="_blank" rel="noopener noreferrer" className="w-8 h-8 rounded-full bg-[#FF0000]/20 flex items-center justify-center text-[#FF0000] hover:bg-[#FF0000]/30 transition-colors">
+                    {youtubeHref && (
+                      <a href={youtubeHref} target="_blank" rel="noopener noreferrer" className="w-8 h-8 rounded-full bg-[#FF0000]/20 flex items-center justify-center text-[#FF0000] hover:bg-[#FF0000]/30 transition-colors">
                         <YoutubeIcon />
                       </a>
                     )}
-                    {instagram && (
-                      <a href={instagram} target="_blank" rel="noopener noreferrer" className="w-8 h-8 rounded-full bg-[#E4405F]/20 flex items-center justify-center text-[#E4405F] hover:bg-[#E4405F]/30 transition-colors">
+                    {instagramHref && (
+                      <a href={instagramHref} target="_blank" rel="noopener noreferrer" className="w-8 h-8 rounded-full bg-[#E4405F]/20 flex items-center justify-center text-[#E4405F] hover:bg-[#E4405F]/30 transition-colors">
                         <InstagramIcon />
                       </a>
                     )}
@@ -834,12 +831,11 @@ export default function ArtistAccountPage() {
               </div>
             </div>
 
-            {/* Save Button Card */}
             <div className="rounded-[20px] border border-white/10 bg-[#0e0a0a]/40 p-6 backdrop-blur-sm">
               <h4 className="text-[14px] uppercase tracking-wider text-[#8d7b77] mb-4 font-semibold">Actions</h4>
               <button
                 type="button"
-                disabled={saving}
+                disabled={saving || loading || Boolean(imageUploading)}
                 onClick={save}
                 className="w-full h-[52px] rounded-xl bg-gradient-to-r from-secondary to-[#a85d3c] text-white font-semibold text-[15px] shadow-lg shadow-secondary/25 hover:shadow-secondary/40 hover:from-[#d48a64] hover:to-[#b86d4c] active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
