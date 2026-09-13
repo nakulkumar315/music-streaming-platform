@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/react-native';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 import { api, setUnauthorizedHandler } from '../services/api';
+import { releaseActivePlaybackLease } from '../services/streamService';
 import {
   clearAuthCredential,
   readAuthCredential,
@@ -80,6 +81,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const isAuthenticated = Boolean(token && token.trim().length > 0 && userAccountStatus === 'ACTIVE');
 
   const clearLocalSession = useCallback(async () => {
+    // When a valid auth token is still present, best-effort release the server
+    // playback lease before deleting local credentials. If this clear was
+    // triggered by a 401, the request can fail safely and server TTL cleanup
+    // remains the fallback.
+    await releaseActivePlaybackLease().catch(() => false);
+
     setTokenState(null);
     setUser(null);
     setUserAccountStatusState('UNKNOWN');
@@ -195,6 +202,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     try {
       if (token) {
+        // Terminate media access while the current auth session can still
+        // authorize /stream/terminate, then revoke the auth session itself.
+        await releaseActivePlaybackLease().catch(() => false);
         await api.post('/auth/logout');
       }
     } catch {
