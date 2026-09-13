@@ -59,6 +59,40 @@ export function validateMobileHttpUrl(key: string, rawValue: string | undefined)
   return parsed.toString().replace(/\/+$/, '');
 }
 
+/**
+ * A Sentry DSN is not a normal service URL: its public project key is encoded
+ * in URL user-info (`https://<public-key>@host/project-id`). That public key is
+ * expected and is not an application secret. Keep API/web URL validation strict
+ * while accepting the canonical Sentry DSN shape separately.
+ */
+export function validateSentryDsn(rawValue: string | undefined): string {
+  const raw = String(rawValue || '').trim();
+  if (!raw) throw new Error('Missing EXPO_PUBLIC_SENTRY_DSN.');
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('EXPO_PUBLIC_SENTRY_DSN must be a valid absolute URL.');
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('EXPO_PUBLIC_SENTRY_DSN must use https://.');
+  }
+  if (!parsed.username) {
+    throw new Error('EXPO_PUBLIC_SENTRY_DSN must include the Sentry public project key.');
+  }
+  if (parsed.password) {
+    throw new Error('EXPO_PUBLIC_SENTRY_DSN must not include a secret/password component.');
+  }
+  if (!parsed.hostname || parsed.pathname === '/' || !parsed.pathname) {
+    throw new Error('EXPO_PUBLIC_SENTRY_DSN must include a host and project identifier.');
+  }
+
+  parsed.hash = '';
+  return parsed.toString();
+}
+
 export function isAllowedPlaybackUrl(rawValue: string): boolean {
   const raw = String(rawValue || '').trim();
   if (!raw) return false;
@@ -90,9 +124,7 @@ export const ARTIST_WEB_URL = validateMobileHttpUrl(
 );
 
 const sentryDsnRaw = String(process.env.EXPO_PUBLIC_SENTRY_DSN || '').trim();
-export const SENTRY_DSN = sentryDsnRaw
-  ? validateMobileHttpUrl('EXPO_PUBLIC_SENTRY_DSN', sentryDsnRaw)
-  : null;
+export const SENTRY_DSN = sentryDsnRaw ? validateSentryDsn(sentryDsnRaw) : null;
 
 export const SENTRY_RELEASE = String(process.env.EXPO_PUBLIC_SENTRY_RELEASE || '').trim() || null;
 if (IS_PRODUCTION_LIKE && SENTRY_DSN && !SENTRY_RELEASE) {
