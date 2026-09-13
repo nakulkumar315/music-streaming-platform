@@ -87,8 +87,10 @@ function testPlaybackAndAnalyticsContracts() {
   const streamRoutes = readBackend("modules/streaming/stream.routes.ts");
   const analyticsRoutes = readBackend("modules/analytics/analytics.routes.ts");
   const artistAnalytics = readBackend("modules/artist/artist-analytics.routes.ts");
+  const libraryRoutes = readBackend("modules/library/library.routes.ts");
   const app = readBackend("app.ts");
   const mobileHeartbeat = readRepo("mobile/apps/fan/src/services/heartbeatService.ts");
+  const mobileApp = readRepo("mobile/App.tsx");
 
   assert.match(sessions, /FOR UPDATE/);
   assert.match(sessions, /last_heartbeat_sequence/);
@@ -109,6 +111,7 @@ function testPlaybackAndAnalyticsContracts() {
   assert.match(mobileHeartbeat, /let heartbeatSessionId: number \| null = null/);
   assert.match(mobileHeartbeat, /function nextHeartbeatSequence/);
   assert.match(mobileHeartbeat, /if \(heartbeatSessionId !== sessionId\)/);
+  assert.match(mobileHeartbeat, /heartbeatInterval && currentContentId === contentId/);
   assert.match(mobileHeartbeat, /const sequence = nextHeartbeatSequence\(lease\.sessionId\)/);
   assert.match(mobileHeartbeat, /\n\s*sequence,\n\s*currentPosition:/);
   const stopStart = mobileHeartbeat.indexOf("export function stopHeartbeat");
@@ -117,6 +120,18 @@ function testPlaybackAndAnalyticsContracts() {
   const stopHeartbeatSource = mobileHeartbeat.slice(stopStart, stopEnd);
   assert.doesNotMatch(stopHeartbeatSource, /heartbeatSequence\s*=\s*0/);
   assert.doesNotMatch(stopHeartbeatSource, /heartbeatSessionId\s*=\s*null/);
+
+  // Heartbeat lifecycle is independent of UX playback-history de-duplication.
+  assert.match(mobileApp, /function PlaybackHeartbeatLifecycleBridge\(\)/);
+  assert.match(mobileApp, /!contentKey \|\| !state\.isPlaying/);
+  assert.match(mobileApp, /startHeartbeat\([\s\S]*?positionRef\.current[\s\S]*?durationRef\.current/);
+  assert.match(mobileApp, /<PlaybackHeartbeatLifecycleBridge \/>/);
+
+  // Library/history reads must not mutate schema or disclose reusable media URLs.
+  assert.doesNotMatch(libraryRoutes, /CREATE TABLE|ALTER TABLE|CREATE INDEX/i);
+  assert.doesNotMatch(libraryRoutes, /c\.media_url/);
+  assert.match(libraryRoutes, /mediaUrl:\s*null/);
+  assert.match(libraryRoutes, /useStreamAccess:\s*true/);
 
   assert.match(analyticsRoutes, /ON CONFLICT \(user_id, event_key\) DO NOTHING/);
   assert.match(analyticsRoutes, /isPlaybackSessionActive/);
