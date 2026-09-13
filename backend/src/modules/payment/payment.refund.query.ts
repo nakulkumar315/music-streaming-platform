@@ -16,7 +16,6 @@ export async function listPaymentsForRefundReview(limit = 50) {
             s.status AS subscription_status,
             s.artist_id,
             artist.name AS artist_name,
-            fan.email AS fan_email,
             r.id AS refund_request_id,
             r.status AS refund_request_status,
             r.provider_refund_id,
@@ -25,7 +24,6 @@ export async function listPaymentsForRefundReview(limit = 50) {
             r.updated_at AS refund_updated_at
        FROM payments p
        JOIN subscriptions s ON s.id = p.subscription_id
-       JOIN users fan ON fan.id = p.user_id
        JOIN users artist ON artist.id = s.artist_id
        LEFT JOIN transactions t ON t.razorpay_payment_id = p.razorpay_payment_id
        LEFT JOIN refund_requests r ON r.payment_id = p.id
@@ -38,7 +36,6 @@ export async function listPaymentsForRefundReview(limit = 50) {
     paymentId: String(row.payment_id),
     gatewayPaymentId: String(row.razorpay_payment_id),
     userId: Number(row.user_id),
-    fanEmail: String(row.fan_email),
     subscriptionId: Number(row.subscription_id),
     artistId: Number(row.artist_id),
     artistName: String(row.artist_name || "Artist"),
