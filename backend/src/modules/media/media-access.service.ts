@@ -26,6 +26,7 @@ import {
   createPlaybackSession,
   discardPlaybackSession,
   recordPlaybackStarted,
+  refreshPlaybackSessionLease,
 } from "../../shared/security/playback-session.service";
 import { createPlaybackToken } from "../../shared/security/signed-media-token.service";
 import {
@@ -37,6 +38,12 @@ import type { PlaybackAccessResponse } from "./media.types";
 export interface RequestPlaybackInput {
   contentId: number;
   userId: number;
+  /**
+   * Present only when refreshing the short-lived playback token for an already
+   * active playback. A supplied lease must belong to this user/content and must
+   * still be active; the service never silently allocates a replacement lease.
+   */
+  sessionId?: number;
   kind?: "audio" | "video";
   quality?: string;
   correlationId?: string;
@@ -54,12 +61,20 @@ export async function requestPlaybackAccess(
 ): Promise<PlaybackAccessResponse> {
   const contentId = positiveInteger(input.contentId);
   const userId = positiveInteger(input.userId);
+  const requestedSessionId =
+    input.sessionId === undefined ? null : positiveInteger(input.sessionId);
   const correlationId = input.correlationId || "-";
   if (!contentId) throw new MediaNotFoundException(String(input.contentId));
   if (!userId) {
     throw new MediaAccessDeniedException(
       "Authentication required",
       "AUTHENTICATION_REQUIRED"
+    );
+  }
+  if (input.sessionId !== undefined && !requestedSessionId) {
+    throw new MediaAccessDeniedException(
+      "Playback session is invalid or expired",
+      "PLAYBACK_SESSION_EXPIRED"
     );
   }
 
@@ -130,7 +145,26 @@ export async function requestPlaybackAccess(
   const config = getMediaConfig();
   const expiresInSeconds = Math.max(30, Math.min(config.mediaUrlTtlSeconds, 300));
 
-  const sessionId = await createPlaybackSession(userId, contentId);
+  let sessionId: number;
+  let createdNewSession = false;
+  if (requestedSessionId) {
+    const refreshed = await refreshPlaybackSessionLease({
+      sessionId: requestedSessionId,
+      userId,
+      contentId,
+    });
+    if (!refreshed) {
+      throw new MediaAccessDeniedException(
+        "Playback session is no longer active. Start playback again.",
+        "PLAYBACK_SESSION_EXPIRED"
+      );
+    }
+    sessionId = requestedSessionId;
+  } else {
+    sessionId = await createPlaybackSession(userId, contentId);
+    createdNewSession = true;
+  }
+
   try {
     const token = createPlaybackToken(
       contentId,
@@ -158,9 +192,20 @@ export async function requestPlaybackAccess(
       throw new DeliveryFailedException("Protected playback URL was not generated");
     }
 
-    void recordPlaybackStarted(userId, contentId);
+    // A short-lived token refresh is not a new play and must not inflate play
+    // analytics. Record only when the server actually allocates a new lease.
+    if (createdNewSession) {
+      void recordPlaybackStarted(userId, contentId);
+    }
     logger.info(
-      { userId, contentId, sessionId, storageProvider, correlationId },
+      {
+        userId,
+        contentId,
+        sessionId,
+        sessionReused: !createdNewSession,
+        storageProvider,
+        correlationId,
+      },
       "[Playback] Access granted"
     );
 
@@ -173,7 +218,12 @@ export async function requestPlaybackAccess(
       contentLength: access.contentLength,
     };
   } catch (error) {
-    await discardPlaybackSession(sessionId, userId, contentId).catch(() => undefined);
+    // If this command allocated a brand-new lease but failed to issue access,
+    // release it immediately. Never discard an already-active lease just
+    // because one token refresh attempt failed.
+    if (createdNewSession) {
+      await discardPlaybackSession(sessionId, userId, contentId).catch(() => undefined);
+    }
     throw error;
   }
 }
