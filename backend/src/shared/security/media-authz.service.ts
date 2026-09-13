@@ -36,11 +36,6 @@ const VALID_QUALITIES: VideoQuality[] = [
   "Auto",
 ];
 
-/**
- * Quality is currently a delivery preference, not a billing entitlement.
- * Phase-1 has artist subscriptions only; platform-quality gating was scope
- * drift. Invalid values normalize to Auto instead of changing authorization.
- */
 export async function validateQualityAccess(
   _userId: number | null,
   requestedQuality?: string
@@ -62,13 +57,6 @@ export async function validateQualityAccess(
   return { authorized: true, quality, maxAllowedQuality: "1080p" };
 }
 
-/**
- * Server-owned entitlement decision.
- *
- * subscription_required=true always requires an active artist subscription,
- * even if visibility was accidentally configured PUBLIC. This prevents a
- * metadata mistake from exposing paid content.
- */
 export async function checkMediaEntitlement(
   userId: number | null,
   artistId: number,
@@ -112,6 +100,7 @@ export interface ContentForAccess {
   status: string;
   lifecycle_state: string;
   is_approved: boolean;
+  is_taken_down: boolean;
   subscription_required: boolean;
   mime_type: string | null;
   file_size_bytes: number | null;
@@ -139,10 +128,11 @@ export async function getContentForAccess(
             video_provider_asset_id,
             thumbnail_provider_asset_id,
             COALESCE(visibility, 'PROTECTED') AS visibility,
-            COALESCE(status, lifecycle_state, 'DRAFT') AS status,
-            COALESCE(lifecycle_state, 'DRAFT') AS lifecycle_state,
-            COALESCE(is_approved, false) AS is_approved,
-            COALESCE(subscription_required, true) AS subscription_required,
+            status,
+            lifecycle_state,
+            is_approved,
+            is_taken_down,
+            subscription_required,
             mime_type,
             file_size_bytes,
             media_url,
