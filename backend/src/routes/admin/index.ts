@@ -15,6 +15,7 @@ import { requireRoles } from "../../common/auth/requireRoles";
 import { adminArtistValidationRouter } from "../../modules/admin/admin-artist.validation";
 import adminGovernanceConfigRoutes from "../../modules/admin/admin-governance-config.routes";
 import adminArtistGovernanceRoutes from "../../modules/admin/admin-artist-governance.routes";
+import adminArtistAgreementRoutes from "../../modules/admin/admin-artist-agreement.routes";
 
 const router = Router();
 
@@ -24,14 +25,20 @@ router.use("/", adminAccountSecurityRoutes);
 router.use("/", requireAuth, requireRoles("ADMIN"), adminArtistApprovalsRoutes);
 router.use("/analytics", requireAuth, requireRoles("ADMIN"), adminAnalyticsRoutes);
 
-// Phase 08 authoritative pricing/commission + Terms mutations are mounted
-// before the legacy artist-management router so config changes commit together
-// with durable append-only audit records.
+// Phase 08 authoritative commission + Terms mutations are mounted before the
+// legacy artist-management router so config changes commit together with
+// durable append-only audit records.
 router.use(
   "/artists",
   requireAuth,
   requireRoles("ADMIN"),
   adminGovernanceConfigRoutes
+);
+router.use(
+  "/artists",
+  requireAuth,
+  requireRoles("ADMIN"),
+  adminArtistAgreementRoutes
 );
 router.use(
   "/artists",
