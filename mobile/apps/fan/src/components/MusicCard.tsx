@@ -12,7 +12,7 @@ interface MusicCardProps {
     title: string;
     artistName: string;
     artwork: any;
-    duration: string;
+    duration?: string;
     badge?: 'EARLY_ACCESS' | 'PREMIUM' | 'NEW';
   };
   onAction: () => void;
@@ -96,7 +96,7 @@ export default function MusicCard({ track, onAction }: MusicCardProps) {
           <Text style={styles.artist} numberOfLines={1}>
             {track.artistName}
           </Text>
-          <Text style={styles.duration}>{track.duration}</Text>
+          {track.duration ? <Text style={styles.duration}>{track.duration}</Text> : null}
         </View>
       </Animated.View>
     </Pressable>
