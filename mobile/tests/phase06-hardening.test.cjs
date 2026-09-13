@@ -61,12 +61,13 @@ test('production guest experience has no committed mock catalog or diagnostics s
   assert.match(guestHome, /api|contentApi|searchApi/);
 });
 
-test('subscription success is backend ACTIVE-gated and artist navigation strips local entitlement', () => {
+test('subscription success is backend ACTIVE-gated with no client entitlement navigation hint', () => {
   const flow = read('apps/fan/src/screens/SubscriptionFlowScreen.tsx');
   assert.match(flow, /subscriptionStatus === "ACTIVE"/);
   assert.match(flow, /apiV1\.get\(`\/subscriptions\/\$\{id\}`\)/);
   assert.match(flow, /Verified webhook state remains authoritative/);
   assert.doesNotMatch(flow, /set(?:Is)?Unlocked\s*\(/);
+  assert.doesNotMatch(flow, /unlocked\s*:\s*true/);
 
   const authoritativeArtist = read('apps/fan/src/navigation/AuthoritativeArtistScreen.tsx');
   assert.match(authoritativeArtist, /unlocked: _ignoredClientEntitlement/);
@@ -99,6 +100,10 @@ test('durable auth credentials use SecureStore with verified legacy migration', 
   assert.match(api, /readAuthCredential/);
   assert.match(api, /saveAuthCredential\(rotatedToken\)/);
   assert.match(api, /clearAuthCredential/);
+  assert.match(api, /__authCredentialUsed/);
+  assert.match(api, /responseMatchesCurrentCredential/);
+  assert.match(api, /status === 401 && \(await responseMatchesCurrentCredential\(config\)\)/);
+  assert.match(api, /if \(await responseMatchesCurrentCredential\(config\)\) \{\s*await saveAuthCredential\(rotatedToken\)/s);
   assert.doesNotMatch(api, /AsyncStorage\.setItem\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
 
   const authStore = read('apps/fan/src/store/authStore.ts');
@@ -106,6 +111,16 @@ test('durable auth credentials use SecureStore with verified legacy migration', 
   assert.match(authStore, /saveAuthCredential\(next, 'fresh-auth'\)/);
   assert.match(authStore, /clearAuthCredential/);
   assert.doesNotMatch(authStore, /AsyncStorage\.(?:getItem|setItem)\((?:USER_TOKEN_STORAGE_KEY|JWT_STORAGE_KEY)/);
+});
+
+test('iOS native lock includes SecureStore and Metro is Sentry-aware', () => {
+  const podLock = read('ios/Podfile.lock');
+  assert.match(podLock, /ExpoSecureStore/);
+
+  assert.equal(exists('metro.config.js'), true);
+  const metro = read('metro.config.js');
+  assert.match(metro, /getSentryExpoConfig/);
+  assert.match(metro, /@sentry\/react-native\/metro/);
 });
 
 test('mobile tests are executable rather than a typecheck alias', () => {
