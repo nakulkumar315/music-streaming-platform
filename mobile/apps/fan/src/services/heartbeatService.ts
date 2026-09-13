@@ -1,39 +1,36 @@
 import { apiV1 } from './api';
+import { getActivePlaybackLease } from './streamService';
 import logger from '../utils/logger';
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let currentSessionId: number | null = null;
 let currentContentId: string | null = null;
 
 /**
- * Start sending heartbeats for one exact server playback lease.
- * The backend requires both sessionId and contentId; sending only contentId
- * cannot renew the lease and eventually invalidates the signed playback token.
+ * Start sending heartbeats for the exact server playback lease currently owned
+ * by the global player. The lease id is resolved from streamService so token
+ * refresh can rotate URLs without allocating or heartbeating a different slot.
  */
 export function startHeartbeat(
-  sessionId: number,
   contentId: string,
   getPosition?: () => number,
   getDuration?: () => number
 ) {
   stopHeartbeat(); // Clear any existing heartbeat
-
-  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
-    logger.warn('[Heartbeat] Refusing to start without a valid playback session');
-    return;
-  }
-
-  currentSessionId = sessionId;
   currentContentId = contentId;
 
-  // Send an immediate heartbeat right when playback starts.
   const sendBeat = async () => {
     try {
+      const lease = getActivePlaybackLease(contentId);
+      if (!lease) {
+        logger.warn('[Heartbeat] No active playback lease for content:', contentId);
+        return;
+      }
+
       const currentPosition = getPosition ? getPosition() : 0;
       const duration = getDuration ? getDuration() : 0;
 
       const response = await apiV1.post('/stream/heartbeat', {
-        sessionId,
+        sessionId: lease.sessionId,
         contentId: Number(contentId),
         currentPosition: Math.round(currentPosition),
         duration: Math.round(duration),
@@ -49,26 +46,25 @@ export function startHeartbeat(
     }
   };
 
+  // Fire immediately once the player enters playing state, then remain well
+  // inside the backend's five-minute lease window.
   void sendBeat();
-
-  // Then every 30 seconds; comfortably inside the five-minute server lease.
   heartbeatInterval = setInterval(() => {
     void sendBeat();
   }, 30000);
 
-  logger.log('[Heartbeat] Started', { sessionId, contentId });
+  logger.log('[Heartbeat] Started for content:', contentId);
 }
 
-/** Stop sending heartbeats for the local active lease. */
+/** Stop sending heartbeats. Pausing does not terminate the server lease. */
 export function stopHeartbeat() {
   if (heartbeatInterval) {
     clearInterval(heartbeatInterval);
     heartbeatInterval = null;
   }
-  if (currentSessionId !== null || currentContentId !== null) {
+  if (currentContentId !== null) {
     logger.log('[Heartbeat] Stopped');
   }
-  currentSessionId = null;
   currentContentId = null;
 }
 
