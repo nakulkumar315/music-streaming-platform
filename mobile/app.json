@@ -35,7 +35,7 @@
     "android": {
       "package": "com.moinimran.fanapp",
       "softwareKeyboardLayoutMode": "resize",
-      "usesCleartextTraffic": true,
+      "usesCleartextTraffic": false,
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
@@ -49,7 +49,7 @@
       "infoPlist": {
         "UIBackgroundModes": ["audio", "fetch"],
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": true
+          "NSAllowsArbitraryLoads": false
         }
       }
     }
