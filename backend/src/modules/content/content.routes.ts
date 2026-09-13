@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "../../common/db";
 import { optionalAuth } from "../../common/auth/requireAuth";
+import { publicAppUrl } from "../../common/http/public-url";
 
 const router = Router();
 
@@ -15,11 +16,11 @@ function boundedInt(value: unknown, fallback: number, min: number, max: number) 
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-function thumbnailUrl(req: any, contentId: number) {
-  return `${req.protocol}://${req.get("host")}/api/v1/fan/stream/thumbnail/${contentId}`;
+function thumbnailUrl(contentId: number) {
+  return publicAppUrl(`/api/v1/fan/stream/thumbnail/${contentId}`);
 }
 
-function mapContent(req: any, row: any) {
+function mapContent(row: any) {
   const type = String(row.type || "AUDIO").toUpperCase();
   const subscriptionRequired = Boolean(row.subscription_required);
   const hasSubscription = Boolean(row.has_subscription);
@@ -33,8 +34,8 @@ function mapContent(req: any, row: any) {
     genre: row.genre ? String(row.genre) : null,
     artistId: Number(row.artist_id),
     artistName: row.artist_name ? String(row.artist_name) : null,
-    thumbnailUrl: thumbnailUrl(req, Number(row.id)),
-    artwork: thumbnailUrl(req, Number(row.id)),
+    thumbnailUrl: thumbnailUrl(Number(row.id)),
+    artwork: thumbnailUrl(Number(row.id)),
     mediaUrl: null,
     fileUrl: null,
     audioUrl: null,
@@ -90,6 +91,15 @@ router.get("/", optionalAuth, async (req: any, res: any) => {
   const cursor = cursorRaw ? new Date(cursorRaw) : null;
   const useCursor = Boolean(cursor && !Number.isNaN(cursor.getTime()));
 
+  if (cursorRaw && !useCursor) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_CURSOR",
+      message: "cursor must be a valid ISO timestamp",
+      correlationId,
+    });
+  }
+
   try {
     const params: any[] = [userId];
     let cursorClause = "";
@@ -118,12 +128,12 @@ router.get("/", optionalAuth, async (req: any, res: any) => {
          JOIN users u ON u.id = c.artist_id
         WHERE ${GOVERNED_CONTENT_WHERE}
           ${cursorClause}
-        ORDER BY c.created_at DESC
+        ORDER BY c.created_at DESC, c.id DESC
         LIMIT ${limitRef} ${offsetClause}`,
       params
     );
 
-    const items = result.rows.map((row: any) => mapContent(req, row));
+    const items = result.rows.map((row: any) => mapContent(row));
     const last = items[items.length - 1];
     return res.json({
       success: true,
@@ -150,6 +160,8 @@ router.get("/artist/:artistId", optionalAuth, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const artistId = positiveInteger(req.params.artistId);
   const userId = positiveInteger(req.user?.id);
+  const limit = boundedInt(req.query?.limit, 50, 1, 100);
+  const offset = boundedInt(req.query?.offset, 0, 0, 100_000);
   if (!artistId) {
     return res.status(400).json({
       success: false,
@@ -175,14 +187,15 @@ router.get("/artist/:artistId", optionalAuth, async (req: any, res: any) => {
          JOIN users u ON u.id = c.artist_id
         WHERE c.artist_id = $1
           AND ${GOVERNED_CONTENT_WHERE}
-        ORDER BY c.created_at DESC
-        LIMIT 500`,
-      [artistId, userId]
+        ORDER BY c.created_at DESC, c.id DESC
+        LIMIT $3 OFFSET $4`,
+      [artistId, userId, limit, offset]
     );
 
     return res.json({
       success: true,
-      items: result.rows.map((row: any) => mapContent(req, row)),
+      items: result.rows.map((row: any) => mapContent(row)),
+      page: { limit, offset, count: result.rows.length },
       correlationId,
     });
   } catch {
@@ -240,7 +253,7 @@ router.get("/:id", optionalAuth, async (req: any, res: any) => {
 
     return res.json({
       success: true,
-      content: mapContent(req, row),
+      content: mapContent(row),
       correlationId,
     });
   } catch {
