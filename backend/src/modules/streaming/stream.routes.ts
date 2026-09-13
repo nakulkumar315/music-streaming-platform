@@ -8,10 +8,16 @@ import {
 } from "../../common/security/rateLimit";
 import { getMediaConfig } from "../../config/media.config";
 import { requestPlaybackAccess } from "../media/media-access.service";
-import { isContentEligibleForPlayback } from "../media/media-policy.service";
+import {
+  isContentEligibleForPlayback,
+  normalizeVisibilityForPlayback,
+} from "../media/media-policy.service";
 import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
 import { resolveMediaIdentity } from "../../shared/media/media-asset-locator";
-import { getContentForAccess } from "../../shared/security/media-authz.service";
+import {
+  checkMediaEntitlement,
+  getContentForAccess,
+} from "../../shared/security/media-authz.service";
 import {
   heartbeatPlaybackSession,
   terminatePlaybackSession,
@@ -24,6 +30,45 @@ const requireFan = requireRoles("FAN");
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function heartbeatEntitlementAllowed(userId: number, contentId: number) {
+  const content = await getContentForAccess(contentId);
+  if (!content) {
+    return { allowed: false as const, code: "PLAYBACK_SESSION_REVOKED", message: "Playback content is no longer available." };
+  }
+
+  if (
+    !isContentEligibleForPlayback({
+      technicalStatus: String(content.status || ""),
+      lifecycleState: String(content.lifecycle_state || ""),
+      isApproved: Boolean(content.is_approved),
+      isTakenDown: Boolean(content.is_taken_down),
+    })
+  ) {
+    return { allowed: false as const, code: "PLAYBACK_SESSION_REVOKED", message: "Playback content is no longer authorized." };
+  }
+
+  const visibility = normalizeVisibilityForPlayback(content.visibility || "PROTECTED");
+  if (!visibility) {
+    return { allowed: false as const, code: "PLAYBACK_SESSION_REVOKED", message: "Playback content visibility is invalid." };
+  }
+
+  const entitlement = await checkMediaEntitlement(
+    userId,
+    Number(content.artist_id),
+    visibility,
+    Boolean(content.subscription_required)
+  );
+  if (!entitlement.allowed) {
+    return {
+      allowed: false as const,
+      code: entitlement.code || "PLAYBACK_SESSION_REVOKED",
+      message: entitlement.reason || "Playback entitlement is no longer active.",
+    };
+  }
+
+  return { allowed: true as const };
 }
 
 router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (req: any, res: any) => {
@@ -81,8 +126,6 @@ router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (re
       throw new Error("Protected playback URL is invalid");
     }
 
-    // Local/private delivery URLs must remain on the trusted configured public
-    // origin. Never rewrite them from Host/X-Forwarded-Host request headers.
     if (parsed.pathname.startsWith(streamRoute) && parsed.origin !== configuredBase.origin) {
       throw new Error("Protected playback URL origin does not match APP_BASE_URL");
     }
@@ -124,27 +167,39 @@ router.post("/heartbeat", requireAuth, requireFan, playbackHeartbeatLimiter, asy
   const userId = positiveInteger(req.user?.id);
   const sessionId = positiveInteger(req.body?.sessionId);
   const contentId = positiveInteger(req.body?.contentId);
+  const sequence = positiveInteger(req.body?.sequence);
 
   if (!userId) return res.status(401).json({ success: false, message: "Unauthorized", correlationId });
-  if (!sessionId || !contentId) {
+  if (!sessionId || !contentId || !sequence) {
     return res.status(400).json({
       success: false,
-      code: "INVALID_PLAYBACK_SESSION",
-      message: "sessionId and contentId are required",
+      code: "INVALID_PLAYBACK_HEARTBEAT",
+      message: "sessionId, contentId and positive sequence are required",
       correlationId,
     });
   }
 
   try {
-    const lastSeen = await heartbeatPlaybackSession({
+    const entitlement = await heartbeatEntitlementAllowed(userId, contentId);
+    if (!entitlement.allowed) {
+      return res.status(403).json({
+        success: false,
+        code: entitlement.code,
+        message: entitlement.message,
+        correlationId,
+      });
+    }
+
+    const heartbeat = await heartbeatPlaybackSession({
       sessionId,
       userId,
       contentId,
+      sequence,
       currentPosition: req.body?.currentPosition,
       duration: req.body?.duration,
     });
 
-    if (!lastSeen) {
+    if (!heartbeat) {
       return res.status(409).json({
         success: false,
         code: "PLAYBACK_SESSION_EXPIRED",
@@ -156,11 +211,19 @@ router.post("/heartbeat", requireAuth, requireFan, playbackHeartbeatLimiter, asy
     return res.json({
       success: true,
       sessionId,
-      lastSeen: lastSeen.toISOString(),
+      lastSeen: heartbeat.lastSeen.toISOString(),
+      acceptedSeconds: heartbeat.acceptedSeconds,
+      totalTrustedSeconds: heartbeat.totalTrustedSeconds,
+      playCounted: heartbeat.playCounted,
+      duplicateOrReplay: heartbeat.duplicateOrReplay,
+      acceptanceReason: heartbeat.acceptanceReason,
       correlationId,
     });
   } catch (error: any) {
-    logger.error({ error, userId, sessionId, contentId, correlationId }, "[stream/heartbeat] failed");
+    logger.error(
+      { error, userId, sessionId, contentId, sequence, correlationId },
+      "[stream/heartbeat] failed"
+    );
     return res.status(500).json({
       success: false,
       code: "PLAYBACK_HEARTBEAT_FAILED",
@@ -200,11 +263,6 @@ router.post("/terminate", requireAuth, requireFan, playbackHeartbeatLimiter, asy
   }
 });
 
-/**
- * Artwork may be public, but only for content that is currently eligible for
- * fan discovery/playback. The canonical access record also enforces the
- * owning artist's current approval/account state.
- */
 router.get("/thumbnail/:contentId", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   const contentId = positiveInteger(req.params?.contentId);
