@@ -1,4 +1,9 @@
-import TrackPlayer, { Event, State } from 'react-native-track-player';
+import TrackPlayer, {
+  AppKilledPlaybackBehavior,
+  Capability,
+  Event,
+  State,
+} from 'react-native-track-player';
 import { Platform } from 'react-native';
 import logger from '../utils/logger';
 
@@ -19,6 +24,39 @@ let resumeAfterTemporaryDuck = false;
  */
 export default async function playbackService() {
   logger.log('[PlaybackService] Starting background playback service');
+
+  // Re-assert the production-safe system capability contract when the native
+  // service starts. The foreground provider may be initialized first, but no
+  // notification/lock-screen action should advertise a queue operation that
+  // the native player cannot execute independently while React is suspended.
+  try {
+    await TrackPlayer.updateOptions({
+      android: {
+        appKilledPlaybackBehavior:
+          AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification,
+        alwaysPauseOnInterruption: false,
+        stopForegroundGracePeriod: 0,
+      },
+      capabilities: [
+        Capability.Play,
+        Capability.Pause,
+        Capability.SeekTo,
+        Capability.JumpForward,
+        Capability.JumpBackward,
+        Capability.Stop,
+      ],
+      compactCapabilities: [Capability.Play, Capability.Pause],
+      notificationCapabilities: [
+        Capability.Play,
+        Capability.Pause,
+        Capability.SeekTo,
+        Capability.Stop,
+      ],
+      progressUpdateEventInterval: 1,
+    });
+  } catch (error) {
+    logger.error('[PlaybackService] Failed to enforce remote capabilities:', error);
+  }
 
   TrackPlayer.addEventListener(Event.RemotePlay, async () => {
     try {
