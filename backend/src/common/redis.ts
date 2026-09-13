@@ -1,188 +1,78 @@
 import Redis from "ioredis";
 
-import dotenv from "dotenv";
+export let redis: Redis | null = null;
 
-
-
-dotenv.config();
-
-
-
-const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
-
-
-
-// Disable Redis completely if REDIS_URL is not set or is disabled
-const redisEnabled = process.env.REDIS_URL && process.env.REDIS_URL !== "" && process.env.REDIS_URL !== "disabled";
-
-export const redis = redisEnabled ? new Redis(redisUrl, {
-
-  // lazyConnect: true means we control when the first connection attempt happens.
-
-  // The module-level import will NOT attempt a connection on its own.
-
-  lazyConnect: true,
-
-  enableOfflineQueue: false,
-
-  maxRetriesPerRequest: 0,          // Don't retry individual commands — fail fast for cache
-
-  commandTimeout: 2000,
-
-  connectTimeout: 5000,
-
-  retryStrategy(times) {
-
-    // ioredis auto-reconnect: exponential backoff capped at 10s
-
-    const delay = Math.min(times * 500, 10_000);
-
-    // console.log(`[Redis] reconnect attempt #${times} in ${delay}ms`);
-
-    return delay;
-
-  },
-
-}) : null as any;
-
-
-
-// ── Event listeners must be attached BEFORE connect() is called ──
-
-if (redis) {
-
-  redis.on("connect", () => {
-
-    // console.log("[Redis] ✅ connected");
-
-  });
-
-
-
-  redis.on("ready", () => {
-
-    // console.log("[Redis] ✅ ready — cache operational");
-
-  });
-
-
-
-  redis.on("reconnecting", (delay: number) => {
-
-    // console.warn(`[Redis] ⚠️ reconnecting in ${delay}ms...`);
-
-  });
-
-
-
-  // Absorb all errors — never let an unhandled Redis error bubble to uncaughtException
-
-  redis.on("error", (err) => {
-
-    // console.warn("[Redis] ⚠️ error (cache bypassed, falling back to DB):", err.message);
-
-  });
-
-
-
-  redis.on("close", () => {
-
-    // console.warn("[Redis] connection closed");
-
-  });
-
+function attachRedisListeners(client: Redis): void {
+  // Redis is an optional cache. Errors are consumed here so they do not become
+  // unhandled EventEmitter errors; readiness/dependency initialization records
+  // configured connection failures explicitly.
+  client.on("error", () => undefined);
 }
-
-
 
 /**
-
- * Attempt to connect to Redis with bounded exponential backoff.
-
- * Resolves regardless — failure is non-fatal (app falls back to DB for uncached routes).
-
- *
-
- * @param maxAttempts Max connection attempts before giving up and running without cache
-
+ * Configure Redis exclusively from the already-validated runtime contract.
+ * No environment parsing or implicit localhost fallback is allowed here.
  */
-
-export async function connectRedisWithRetry(maxAttempts = 10): Promise<void> {
-
-  // If Redis is disabled, skip connection attempts entirely
-
-  if (!redis) {
-
-    return;
-
+export function configureRedis(redisUrl: string | null): Redis | null {
+  if (redis) {
+    redis.disconnect();
+    redis = null;
   }
 
-  const workerLabel = `[Redis][worker-${process.env.NODE_APP_INSTANCE ?? "?"}]`;
+  if (!redisUrl) return null;
 
-
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-
-    try {
-
-      // redis.status is "wait" on first call, "close" after a disconnect
-
-      if (redis.status === "ready") {
-
-        // console.log(`${workerLabel} already connected — skipping connect()`);
-
-        return;
-
-      }
-
-
-
-      await redis.connect();
-
-      await redis.ping();                                   // Verify the connection is actually live
-
-      // console.log(`${workerLabel} ✅ connected on attempt ${attempt}`);
-
-      return;
-
-
-
-    } catch (err: any) {
-
-      const isLastAttempt = attempt === maxAttempts;
-
-      const delay = Math.min(attempt * 500, 5_000);        // 500ms → 5s, capped
-
-
-
-      if (isLastAttempt) {
-
-        // console.warn(
-
-        //   `${workerLabel} ⚠️ could not connect after ${maxAttempts} attempts. ` +
-
-        //   `Server will start WITHOUT Redis cache — DB fallback active.`
-
-        // );
-
-        return;                                            // Non-fatal — never throw
-
-      }
-
-
-
-      // console.warn(
-
-        // `${workerLabel} ⚠️ connect attempt ${attempt}/${maxAttempts} failed ` +
-
-        // `(${err.message}). Retrying in ${delay}ms...`
-        // );
-
-      await new Promise((resolve) => setTimeout(resolve, delay));
-
-    }
-
-  }
-
+  redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    enableOfflineQueue: false,
+    maxRetriesPerRequest: 0,
+    commandTimeout: 2000,
+    connectTimeout: 5000,
+    retryStrategy(times) {
+      return Math.min(times * 500, 10_000);
+    },
+  });
+  attachRedisListeners(redis);
+  return redis;
 }
 
+/**
+ * Connect an explicitly configured Redis cache with bounded retries.
+ * The caller decides whether failure is fatal or a degraded optional cache.
+ */
+export async function connectRedisWithRetry(maxAttempts = 3): Promise<void> {
+  if (!redis) return;
+
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (redis.status === "ready") return;
+      if (redis.status === "wait" || redis.status === "close") {
+        await redis.connect();
+      }
+      await redis.ping();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(attempt * 500, 2_000)));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Redis connection failed");
+}
+
+export async function closeRedis(): Promise<void> {
+  const client = redis;
+  redis = null;
+  if (!client) return;
+
+  try {
+    if (client.status === "ready" || client.status === "connect" || client.status === "connecting") {
+      await client.quit();
+      return;
+    }
+  } catch {
+    // Fall through to an immediate disconnect during shutdown.
+  }
+  client.disconnect();
+}
