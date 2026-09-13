@@ -3,31 +3,35 @@ import { MediaProvider, PlayerUrlResult, UploadResult } from './interfaces/Media
 import { normalizePublicId, isValidPublicId, logPublicIdNormalization } from '../../shared/utils/cloudinary.utils';
 import type { VideoQuality } from '../../shared/delivery/interfaces/media-delivery-strategy.interface';
 
-// Validate Cloudinary configuration on startup
-function validateCloudinaryConfig(): void {
+let isCloudinaryConfigured = false;
+
+function ensureCloudinaryConfigured(): void {
+  if (isCloudinaryConfigured) return;
   const required = ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
   const missing = required.filter(key => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(`Cloudinary configuration incomplete. Missing: ${missing.join(', ')}`);
   }
+
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true,
+    // Disable auto-appended analytics (?_a=...) token — it can confuse iOS AVPlayer
+    // and is not needed for server-side URL generation.
+    urlAnalytics: false,
+    analytics: false,
+  });
+
+  console.log('[CloudinaryProvider] Configuration loaded successfully');
+  isCloudinaryConfigured = true;
 }
 
-// Initialize cloudinary once from environment
-validateCloudinaryConfig();
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true,
-  // Disable auto-appended analytics (?_a=...) token — it can confuse iOS AVPlayer
-  // and is not needed for server-side URL generation.
-  urlAnalytics: false,
-  analytics: false,
-});
-
-console.log('[CloudinaryProvider] Configuration loaded successfully');
-
 export class CloudinaryProvider implements MediaProvider {
+  constructor() {
+    ensureCloudinaryConfigured();
+  }
   /**
    * Upload file to Cloudinary mapping logic to authenticated delivery except thumbnails
    */

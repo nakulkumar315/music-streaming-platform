@@ -1,3 +1,4 @@
+import "dotenv/config";
 import assert from "node:assert/strict";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
@@ -308,9 +309,9 @@ async function main() {
         401,
         "A login that authenticated with the old password before rotation must be revoked by rotation"
       );
-    } else {
+    } else if ("error" in raceLoginResult) {
       assert.equal(
-        (raceLoginResult as any).error?.code,
+        raceLoginResult.error?.code,
         "INVALID_CREDENTIALS",
         "If password rotation wins the lock, the old-password login must be rejected"
       );

@@ -10,7 +10,7 @@ export const MEDIA_STATUS = {
   FAILED: "FAILED",
 } as const;
 
-export const PLAYABLE_STATUSES = new Set([MEDIA_STATUS.READY]);
+export const PLAYABLE_STATUSES: ReadonlySet<string> = new Set([MEDIA_STATUS.READY]);
 
 export const VISIBILITY = {
   PUBLIC: "PUBLIC",

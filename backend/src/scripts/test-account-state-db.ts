@@ -1,3 +1,4 @@
+import "dotenv/config";
 import assert from "node:assert/strict";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
@@ -160,10 +161,9 @@ async function main() {
         401,
         "A login that wins before deletion must still be revoked by deletion"
       );
-    } else {
-      const errorCode = (loginResult as any).error?.code;
+    } else if ("error" in loginResult) {
       assert.ok(
-        errorCode === "ACCOUNT_INACTIVE" || errorCode === "INVALID_CREDENTIALS",
+        loginResult.error?.code === "ACCOUNT_INACTIVE" || loginResult.error?.code === "INVALID_CREDENTIALS",
         "If deletion wins first, concurrent login must fail closed"
       );
     }

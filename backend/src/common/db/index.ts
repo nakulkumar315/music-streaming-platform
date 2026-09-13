@@ -1,11 +1,7 @@
 import "dotenv/config";
 import { Pool } from "pg";
 
-const databaseUrl =
-  process.env.DATABASE_URL ||
-  (process.env.NODE_ENV !== "production"
-    ? "postgresql://localhost:5432/music_platform_dev"
-    : undefined);
+const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   throw new Error(
     "DATABASE_URL environment variable is required. Database configuration must be present before the backend starts."

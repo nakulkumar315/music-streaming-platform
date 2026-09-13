@@ -104,12 +104,12 @@ function main() {
   assert.equal(paymentController.includes('case "refund.failed"'), true, "Provider failed refund webhook must be tracked");
   assert.equal(paymentController.includes("processVerifiedRefundEvent(client"), true, "Refund webhooks must pass through the anomaly-aware canonical refund boundary");
   assert.equal(
-    entitlement.includes("s.status = 'ACTIVE'") || entitlement.includes('status === "ACTIVE"'),
+    entitlement.includes('status === "ACTIVE"'),
     true,
     "Refund/cancellation status transition must revoke Phase-02 entitlement"
   );
   assert.equal(
-    entitlement.includes("s.next_billing_date > now()") || entitlement.includes("expiryMs > Date.now()"),
+    entitlement.includes("expiryMs > Date.now()"),
     true,
     "Entitlement remains time-bound as well as state-bound"
   );
