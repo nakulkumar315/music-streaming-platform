@@ -25,26 +25,16 @@ router.use("/", adminAccountSecurityRoutes);
 router.use("/", requireAuth, requireRoles("ADMIN"), adminArtistApprovalsRoutes);
 router.use("/analytics", requireAuth, requireRoles("ADMIN"), adminAnalyticsRoutes);
 
-// Phase 08 authoritative commission + Terms mutations are mounted before the
-// legacy artist-management router so config changes commit together with
-// durable append-only audit records.
-router.use(
-  "/artists",
-  requireAuth,
-  requireRoles("ADMIN"),
-  adminGovernanceConfigRoutes
-);
-router.use(
-  "/artists",
-  requireAuth,
-  requireRoles("ADMIN"),
-  adminArtistAgreementRoutes
-);
+// Preserve the Phase 07 validation boundary before every Phase 08 artist/config
+// command. The strict governance routers then persist mutation + audit in one
+// transaction, and the historical router remains only as a compatibility tail.
 router.use(
   "/artists",
   requireAuth,
   requireRoles("ADMIN"),
   adminArtistValidationRouter,
+  adminGovernanceConfigRoutes,
+  adminArtistAgreementRoutes,
   adminArtistGovernanceRoutes,
   adminArtistsRoutes
 );
