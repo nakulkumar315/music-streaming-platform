@@ -17,6 +17,10 @@ import {
   savePlaybackProgress,
   type PlaybackProgress,
 } from './apps/fan/src/services/playbackProgressService';
+import {
+  startHeartbeat,
+  stopHeartbeat,
+} from './apps/fan/src/services/heartbeatService';
 import { releaseActivePlaybackLease } from './apps/fan/src/services/streamService';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -198,6 +202,42 @@ function PlaybackProgressLifecycleBridge() {
 }
 
 /**
+ * Owns trusted heartbeat start/stop from canonical player state. This is kept
+ * separate from playback-history recording so a pause/resume of the same item
+ * cannot be suppressed by the UX-history de-duplication in MediaPlayerProvider.
+ */
+function PlaybackHeartbeatLifecycleBridge() {
+  const { currentItem, state } = useMediaPlayer();
+  const { isAuthenticated, isRestoring } = useAuth();
+  const rawContentId = currentItem?.contentId ?? currentItem?.id ?? null;
+  const contentKey = rawContentId === null ? null : String(rawContentId);
+  const positionRef = useRef(0);
+  const durationRef = useRef(0);
+
+  positionRef.current = Math.max(0, Math.floor(state.positionMs || 0));
+  durationRef.current = Math.max(0, Math.floor(state.durationMs || 0));
+
+  useEffect(() => {
+    if (!isAuthenticated || isRestoring || !contentKey || !state.isPlaying) {
+      stopHeartbeat();
+      return;
+    }
+
+    startHeartbeat(
+      contentKey,
+      () => positionRef.current,
+      () => durationRef.current
+    );
+
+    return () => {
+      stopHeartbeat();
+    };
+  }, [contentKey, isAuthenticated, isRestoring, state.isPlaying]);
+
+  return null;
+}
+
+/**
  * Keeps native playback and the server playback lease aligned with player and
  * authentication lifecycle. Pause intentionally preserves the lease so Resume
  * remains the same playback session.
@@ -246,6 +286,7 @@ export default function App() {
             <ConnectivityProvider>
               <MediaPlayerProvider>
                 <PlaybackProgressLifecycleBridge />
+                <PlaybackHeartbeatLifecycleBridge />
                 <PlaybackLeaseLifecycleBridge />
                 <AppNavigator />
               </MediaPlayerProvider>
