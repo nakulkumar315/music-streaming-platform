@@ -251,12 +251,45 @@ function testFinancialAndUiContracts() {
   assert.match(artistUi, /Payment ledger; not payout estimate/);
 }
 
+function testTelemetryRedactionContracts() {
+  const backendLogger = readBackend("common/logger.ts");
+  const backendSentry = readBackend("common/sentry.ts");
+  const mobileLogger = readRepo("mobile/apps/fan/src/utils/logger.ts");
+  const mobileSentry = readRepo("mobile/apps/fan/src/utils/sentrySanitizer.ts");
+  const mobileApp = readRepo("mobile/App.tsx");
+  const adminSentry = readRepo("web-admin/src/services/sentrySanitizer.ts");
+  const adminMain = readRepo("web-admin/src/main.tsx");
+  const artistSentry = readRepo("web-artist/src/services/sentrySanitizer.ts");
+  const artistMain = readRepo("web-artist/src/main.tsx");
+
+  assert.match(backendLogger, /split\('\?'\)\[0\]/);
+  assert.doesNotMatch(backendLogger, /query:\s*req\.query/);
+  assert.match(backendSentry, /request\.query_string = undefined/);
+  assert.match(backendSentry, /request\.data = undefined/);
+  assert.match(backendSentry, /SENSITIVE_HEADER/);
+
+  assert.match(mobileLogger, /SENSITIVE_KEY/);
+  assert.match(mobileLogger, /REDACTED_JWT/);
+  assert.match(mobileSentry, /request\.query_string = undefined/);
+  assert.match(mobileSentry, /request\.data = undefined/);
+  assert.match(mobileApp, /beforeSend\(event\)/);
+  assert.match(mobileApp, /sanitizeSentryEvent\(event\)/);
+
+  assert.match(adminSentry, /request\.query_string = undefined/);
+  assert.match(adminMain, /beforeSend\(event\)/);
+  assert.match(adminMain, /sanitizeSentryEvent\(event\)/);
+  assert.match(artistSentry, /request\.query_string = undefined/);
+  assert.match(artistMain, /beforeSend\(event\)/);
+  assert.match(artistMain, /sanitizeSentryEvent\(event\)/);
+}
+
 function run() {
   testHeartbeatPolicy();
   testPlaybackAndAnalyticsContracts();
   testAuditDurabilityContracts();
   testJobsAndSchemaContracts();
   testFinancialAndUiContracts();
+  testTelemetryRedactionContracts();
   console.log("Phase 08 operational integrity checks passed.");
 }
 
