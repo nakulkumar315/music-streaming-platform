@@ -24,7 +24,6 @@
           "supportsPictureInPicture": true
         }
       ],
-      "expo-notifications",
       "expo-asset",
       "@react-native-community/datetimepicker"
     ],
@@ -54,6 +53,7 @@
       },
       "infoPlist": {
         "UIBackgroundModes": ["audio"],
+        "NSPhotoLibraryUsageDescription": "Allow FanApp to select artwork and profile images from your photo library.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false
         }
