@@ -30,21 +30,17 @@ export interface EnvValidationResult {
   appBaseUrl: string;
   localStorageRoot: string;
   localPrivateStreamRoute: string;
-  // Firebase (required when provider === 'firebase')
   firebaseProjectId: string;
   firebaseClientEmail: string;
   firebasePrivateKey: string;
   firebaseStorageBucket: string;
-  // AWS S3 (required when provider === 's3')
   awsAccessKeyId: string;
   awsSecretAccessKey: string;
   awsRegion: string;
   awsS3Bucket: string;
   awsS3SignedUrlExpiresIn: number;
-  // Media security
   mediaSignedTokenSecret: string;
   mediaUrlTtlSeconds: number;
-  // Upload limits (MB)
   maxUploadAudioMb: number;
   maxUploadVideoMb: number;
   maxUploadImageMb: number;
@@ -60,19 +56,24 @@ export function resetEnvCache() {
 export function validateEnv(): EnvValidationResult {
   if (cached) return cached;
 
-  // Authentication and sensitive signing/encryption must never fall back to
-  // repository constants. This is a greenfield system, so invalid environments
-  // fail before the HTTP server starts accepting traffic.
   envStr("JWT_SECRET");
   envStr("SIGNATURE_ENCRYPTION_KEY");
 
-  const rawProvider = (process.env.STORAGE_PROVIDER || "local").trim().toLowerCase();
+  const nodeEnv = String(process.env.NODE_ENV || "development").trim().toLowerCase();
+  const configuredProvider = String(process.env.STORAGE_PROVIDER || "").trim().toLowerCase();
+  if (!configuredProvider && nodeEnv === "production") {
+    throw new Error("[env] STORAGE_PROVIDER is required in production");
+  }
+  const rawProvider = configuredProvider || "local";
   if (!STORAGE_PROVIDERS.includes(rawProvider as StorageProviderType)) {
     throw new Error(
       `[env] STORAGE_PROVIDER must be one of: ${STORAGE_PROVIDERS.join(", ")}. Got: ${rawProvider}`
     );
   }
   const storageProvider = rawProvider as StorageProviderType;
+  if (nodeEnv === "production" && storageProvider === "local") {
+    throw new Error("[env] STORAGE_PROVIDER=local is development/test only and is forbidden in production");
+  }
 
   const appBaseUrl = envStr("APP_BASE_URL", "http://localhost:3000");
   const localStorageRoot = envStr("LOCAL_STORAGE_ROOT", "./storage");
@@ -104,12 +105,25 @@ export function validateEnv(): EnvValidationResult {
     if (!awsS3Bucket) throw new Error("[env] AWS_S3_BUCKET is required when STORAGE_PROVIDER=s3");
   }
 
+  if (storageProvider === "cloudinary") {
+    envStr("CLOUDINARY_CLOUD_NAME");
+    envStr("CLOUDINARY_API_KEY");
+    envStr("CLOUDINARY_API_SECRET");
+    // Phase 1 includes video; Cloudinary video eager processing therefore needs
+    // an authenticated callback path before the service is considered ready.
+    envStr("CLOUDINARY_WEBHOOK_URL");
+  }
+
   const mediaSignedTokenSecret = envStr("MEDIA_SIGNED_TOKEN_SECRET");
   const mediaUrlTtlSeconds = envInt("MEDIA_URL_TTL_SECONDS", 300);
   const maxUploadAudioMb = envInt("MAX_UPLOAD_AUDIO_MB", 50);
   const maxUploadVideoMb = envInt("MAX_UPLOAD_VIDEO_MB", 500);
   const maxUploadImageMb = envInt("MAX_UPLOAD_IMAGE_MB", 10);
   const subscriptionEnabled = process.env.SUBSCRIPTION_ENABLED?.toLowerCase() !== "false";
+
+  if (maxUploadAudioMb <= 0 || maxUploadVideoMb <= 0 || maxUploadImageMb <= 0) {
+    throw new Error("[env] Upload limits must be positive integers");
+  }
 
   cached = {
     storageProvider,
@@ -130,7 +144,7 @@ export function validateEnv(): EnvValidationResult {
     maxUploadAudioMb,
     maxUploadVideoMb,
     maxUploadImageMb,
-    subscriptionEnabled
+    subscriptionEnabled,
   };
   return cached;
 }
