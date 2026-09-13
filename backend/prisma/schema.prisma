@@ -109,6 +109,7 @@ model content_items {
   genre                    String?   @db.VarChar(80)
   lifecycle_state          String    @default("DRAFT") @db.VarChar(20)
   is_approved              Boolean   @default(false)
+  is_taken_down            Boolean   @default(false)
   rejection_reason         String?
   reportCount              Int       @default(0) @map("report_count")
   created_at               DateTime  @default(now()) @db.Timestamptz(6)
@@ -117,8 +118,8 @@ model content_items {
   storage_provider         String?   @map("storage_provider") @db.VarChar(20)
   storage_key              String?   @map("storage_key")
   thumbnail_storage_key    String?   @map("thumbnail_storage_key")
-  visibility               String?   @default("PROTECTED") @db.VarChar(30)
-  status                   String?   @default("PENDING_REVIEW") @db.VarChar(20)
+  visibility               String    @default("PROTECTED") @db.VarChar(30)
+  status                   String    @default("UPLOADING") @db.VarChar(20)
   mime_type                String?   @map("mime_type") @db.VarChar(100)
   file_size_bytes          Int?      @map("file_size_bytes")
   original_file_name       String?   @map("original_file_name") @db.VarChar(255)
@@ -134,6 +135,8 @@ model content_items {
   @@index([storage_provider], map: "idx_content_items_storage_provider")
   @@index([thumbnailProviderAssetId], map: "idx_content_items_thumbnail_provider_asset_id")
   @@index([videoProviderAssetId], map: "idx_content_items_video_provider_asset_id")
+  @@index([lifecycle_state, is_taken_down, status, created_at(sort: Desc)], map: "idx_content_items_moderation_queue")
+  @@index([is_taken_down, lifecycle_state, is_approved, status], map: "idx_content_items_playback_governance")
 }
 
 model reports {
