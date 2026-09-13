@@ -25,7 +25,6 @@ import {
 import {
   createPlaybackSession,
   discardPlaybackSession,
-  recordPlaybackStarted,
   refreshPlaybackSessionLease,
 } from "../../shared/security/playback-session.service";
 import { createPlaybackToken } from "../../shared/security/signed-media-token.service";
@@ -192,11 +191,9 @@ export async function requestPlaybackAccess(
       throw new DeliveryFailedException("Protected playback URL was not generated");
     }
 
-    // A short-lived token refresh is not a new play and must not inflate play
-    // analytics. Record only when the server actually allocates a new lease.
-    if (createdNewSession) {
-      void recordPlaybackStarted(userId, contentId);
-    }
+    // Issuing or refreshing a signed access URL is not proof that playback
+    // actually started. Phase 08 counts a play only after server-bounded forward
+    // progress is observed on this lease's trusted heartbeat path.
     logger.info(
       {
         userId,
@@ -218,9 +215,6 @@ export async function requestPlaybackAccess(
       contentLength: access.contentLength,
     };
   } catch (error) {
-    // If this command allocated a brand-new lease but failed to issue access,
-    // release it immediately. Never discard an already-active lease just
-    // because one token refresh attempt failed.
     if (createdNewSession) {
       await discardPlaybackSession(sessionId, userId, contentId).catch(() => undefined);
     }
