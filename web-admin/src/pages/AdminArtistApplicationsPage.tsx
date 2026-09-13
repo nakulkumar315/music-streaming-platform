@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { http } from "../services/http";
+import { http, toApiFailure } from "../services/http";
 import PageWrapper from "../components/PageWrapper";
 import {
   Users,
@@ -47,9 +46,16 @@ type PendingArtistsResponse = {
   message?: string;
 };
 
-export default function AdminArtistApplicationsPage() {
-  const navigate = useNavigate();
+function safeExternalUrl(raw: string): string | null {
+  try {
+    const parsed = new URL(String(raw || "").trim());
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
+export default function AdminArtistApplicationsPage() {
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<PendingItem[]>([]);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -63,30 +69,23 @@ export default function AdminArtistApplicationsPage() {
     setApiError(null);
     try {
       const res = await http.get<PendingArtistsResponse>("/api/v1/admin/pending-artists");
-      console.log("Pending artists response:", res.data);
       const next = Array.isArray(res.data?.items) ? (res.data.items as PendingItem[]) : [];
       setItems(next);
       setActive(next[0] ?? null);
-    } catch (e: any) {
-      console.error("Failed to load pending artists:", e);
-      const status = e?.response?.status;
-      if (status === 401 || status === 403) {
-        localStorage.removeItem("adminToken");
-        navigate("/admin/login", { replace: true });
-        return;
-      }
-      setApiError(e?.response?.data?.message || e?.message || "Failed to load pending applications");
+    } catch (error) {
+      const failure = toApiFailure(error);
+      setApiError(failure.message || "Failed to load pending applications");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    load();
+    void load();
   }, []);
 
   const resolve = async (action: "APPROVE" | "REJECT") => {
-    if (!active) return;
+    if (!active || resolveBusy) return;
 
     if (action === "REJECT" && !rejectReason.trim()) {
       setApiError("Rejection reason is required.");
@@ -107,12 +106,11 @@ export default function AdminArtistApplicationsPage() {
         return;
       }
 
-      const next = items.filter((x) => x.id !== active.id);
-      setItems(next);
-      setActive(next[0] ?? null);
       setRejectReason("");
-    } catch (e: any) {
-      setApiError(e?.response?.data?.message || e?.message || "Failed to resolve application");
+      await load();
+    } catch (error) {
+      const failure = toApiFailure(error);
+      setApiError(failure.message || "Failed to resolve application");
     } finally {
       setResolveBusy(false);
     }
@@ -387,19 +385,26 @@ export default function AdminArtistApplicationsPage() {
                 </div>
                 {active.portfolioLinks?.length ? (
                   <div className="space-y-2">
-                    {active.portfolioLinks.map((url, index) => (
-                      <a
-                        key={index}
-                        href={url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-2 p-3 rounded-xl bg-black/20 border border-white/5 hover:border-primary/30 hover:bg-white/5 transition-all group"
-                      >
-                        <ExternalLink size={14} className="text-[#8D7B77] group-hover:text-primary transition-colors" />
-                        <span className="text-sm text-[#B8A6A1] group-hover:text-white truncate flex-1">{url}</span>
-                        <ChevronRight size={14} className="text-[#8D7B77] group-hover:text-primary transition-colors" />
-                      </a>
-                    ))}
+                    {active.portfolioLinks.map((url, index) => {
+                      const href = safeExternalUrl(url);
+                      return href ? (
+                        <a
+                          key={index}
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 p-3 rounded-xl bg-black/20 border border-white/5 hover:border-primary/30 hover:bg-white/5 transition-all group"
+                        >
+                          <ExternalLink size={14} className="text-[#8D7B77] group-hover:text-primary transition-colors" />
+                          <span className="text-sm text-[#B8A6A1] group-hover:text-white truncate flex-1">{url}</span>
+                          <ChevronRight size={14} className="text-[#8D7B77] group-hover:text-primary transition-colors" />
+                        </a>
+                      ) : (
+                        <div key={index} className="p-3 rounded-xl bg-black/20 border border-white/5 text-sm text-[#8D7B77] break-all">
+                          {url}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="text-sm text-[#8D7B77]">No portfolio links provided</p>
