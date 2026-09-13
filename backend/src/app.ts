@@ -21,6 +21,7 @@ import { handleMediaWebhook } from "./controllers/media/WebhookController";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
 import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
+import artistAnalyticsRoutes from "./modules/artist/artist-analytics.routes";
 import { validateArtistPricingRequest } from "./modules/artist/artist-pricing.validation";
 import {
   artistAssetUploadRouter,
@@ -156,6 +157,11 @@ export function createApp(runtime: EnvValidationResult) {
   // persists them and rejects UI-only fields that are not authoritative state.
   app.patch("/api/v1/artist/pricing", validateArtistPricingRequest);
 
+  // Phase 08 moves all artist analytics/dashboard metrics onto a strict,
+  // ownership-scoped boundary before the legacy artist router. Query failures
+  // remain visible and earnings are sourced only from captured payment ledger
+  // rows; listening analytics never becomes a payout authority.
+  app.use("/api/v1/artist", artistAnalyticsRoutes);
   app.use("/api/v1/artist", artistRoutes);
   app.use("/api/v1/admin", adminRoutes);
   app.use("/api/v1/auth", authRoutes);
