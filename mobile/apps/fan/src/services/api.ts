@@ -22,6 +22,11 @@ const DEFAULT_TIMEOUT_MS = 30000;
 const SAFE_RETRY_METHODS = new Set(['get', 'head', 'options']);
 let unauthorizedHandler: (() => void | Promise<void>) | null = null;
 
+type AuthAwareRequestConfig = {
+  __retryCount?: number;
+  __authCredentialUsed?: string | null;
+};
+
 export type NormalizedApiError = {
   status: number | null;
   code: string;
@@ -66,6 +71,19 @@ async function getStoredToken() {
   return readAuthCredential();
 }
 
+async function responseMatchesCurrentCredential(config: AuthAwareRequestConfig | undefined) {
+  const credentialUsed = config?.__authCredentialUsed;
+  if (!credentialUsed) return false;
+
+  try {
+    return (await readAuthCredential()) === credentialUsed;
+  } catch {
+    // Never mutate session state from a response whose originating credential
+    // cannot be proven to still be current.
+    return false;
+  }
+}
+
 function isSafeRetry(config: any): boolean {
   const method = String(config?.method || 'get').toLowerCase();
   return SAFE_RETRY_METHODS.has(method);
@@ -75,6 +93,11 @@ function attachClientPolicy(client: AxiosInstance) {
   client.interceptors.request.use(async (config) => {
     const token = await getStoredToken();
     const deviceId = await getOrCreateDeviceId();
+
+    // Keep an in-memory request snapshot only. It is not sent to the backend or
+    // logs, and lets response handlers reject stale 401/rotation side effects
+    // after logout or a later login has replaced the credential.
+    (config as typeof config & AuthAwareRequestConfig).__authCredentialUsed = token;
 
     const headers =
       config.headers instanceof AxiosHeaders
@@ -100,19 +123,25 @@ function attachClientPolicy(client: AxiosInstance) {
   client.interceptors.response.use(
     async (res) => {
       // Security-sensitive operations may rotate the backend session. Persist
-      // the replacement token before the next API call so pre-rotation tokens
-      // are never reused by the client.
+      // the replacement only if this response belongs to the credential that is
+      // still current. A late pre-logout/pre-login response must not resurrect
+      // or overwrite a newer session.
       const rotatedToken = res.data?.sessionRotated ? res.data?.token : null;
       if (typeof rotatedToken === 'string' && rotatedToken.length > 0) {
-        await saveAuthCredential(rotatedToken);
+        const config = res.config as typeof res.config & AuthAwareRequestConfig;
+        if (await responseMatchesCurrentCredential(config)) {
+          await saveAuthCredential(rotatedToken);
+        }
       }
       return res;
     },
     async (error) => {
-      const config = error?.config as (typeof error.config & { __retryCount?: number }) | undefined;
+      const config = error?.config as
+        | (typeof error.config & AuthAwareRequestConfig)
+        | undefined;
       const status = error?.response?.status;
 
-      if (status === 401) {
+      if (status === 401 && (await responseMatchesCurrentCredential(config))) {
         try {
           await clearAuthCredential();
         } catch (storageError) {
