@@ -1,7 +1,7 @@
 import 'react-native-gesture-handler';
 
-import React, { useEffect, useRef } from 'react';
-import { Platform } from 'react-native';
+import React, { useCallback, useEffect, useRef } from 'react';
+import { AppState, Platform } from 'react-native';
 import * as Sentry from '@sentry/react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import AppNavigator from './apps/fan/src/navigation/AppNavigator';
@@ -11,6 +11,12 @@ import {
   MediaPlayerProvider,
   useMediaPlayer,
 } from './apps/fan/src/providers/MediaPlayerProvider';
+import {
+  fetchPlaybackProgress,
+  resolveResumePosition,
+  savePlaybackProgress,
+  type PlaybackProgress,
+} from './apps/fan/src/services/playbackProgressService';
 import { releaseActivePlaybackLease } from './apps/fan/src/services/streamService';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -42,6 +48,155 @@ const queryClient = new QueryClient({
   },
 });
 
+const PROGRESS_SAVE_INTERVAL_MS = 20_000;
+
+type ProgressSnapshot = {
+  key: string;
+  contentId: string | number;
+  positionMs: number;
+  durationMs: number;
+  isPlaying: boolean;
+};
+
+/**
+ * Persists bounded account-level resume state without ever persisting or
+ * reusing a signed media URL. Playback authorization remains server-side.
+ */
+function PlaybackProgressLifecycleBridge() {
+  const { currentItem, state, seekTo } = useMediaPlayer();
+  const { isAuthenticated, isRestoring } = useAuth();
+  const rawContentId = currentItem?.contentId ?? currentItem?.id ?? null;
+  const contentKey = rawContentId === null ? null : String(rawContentId);
+
+  const snapshotsRef = useRef<Map<string, ProgressSnapshot>>(new Map());
+  const hydratedKeyRef = useRef<string | null>(null);
+  const pendingResumeRef = useRef<{ key: string; progress: PlaybackProgress | null } | null>(null);
+  const resumeAppliedKeyRef = useRef<string | null>(null);
+  const previousPlayingRef = useRef(false);
+
+  const flushSnapshot = useCallback(async (snapshot: ProgressSnapshot | null | undefined) => {
+    if (!snapshot || hydratedKeyRef.current !== snapshot.key) return;
+    try {
+      await savePlaybackProgress({
+        contentId: snapshot.contentId,
+        positionMs: snapshot.positionMs,
+        durationMs: snapshot.durationMs > 0 ? snapshot.durationMs : null,
+      });
+    } catch (error) {
+      Sentry.captureException(error, {
+        tags: { area: 'playback-progress', action: 'save' },
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!contentKey || rawContentId === null) return;
+    snapshotsRef.current.set(contentKey, {
+      key: contentKey,
+      contentId: rawContentId,
+      positionMs: Math.max(0, Math.floor(state.positionMs || 0)),
+      durationMs: Math.max(0, Math.floor(state.durationMs || 0)),
+      isPlaying: state.isPlaying,
+    });
+  }, [contentKey, rawContentId, state.positionMs, state.durationMs, state.isPlaying]);
+
+  useEffect(() => {
+    if (!contentKey || rawContentId === null || !isAuthenticated || isRestoring) {
+      hydratedKeyRef.current = null;
+      pendingResumeRef.current = null;
+      resumeAppliedKeyRef.current = null;
+      return;
+    }
+
+    let active = true;
+    hydratedKeyRef.current = null;
+    pendingResumeRef.current = null;
+    resumeAppliedKeyRef.current = null;
+
+    void fetchPlaybackProgress(rawContentId)
+      .then((progress) => {
+        if (!active) return;
+        hydratedKeyRef.current = contentKey;
+        pendingResumeRef.current = { key: contentKey, progress };
+      })
+      .catch((error) => {
+        if (!active) return;
+        // Playback itself must not fail because the optional resume lookup did.
+        hydratedKeyRef.current = contentKey;
+        pendingResumeRef.current = { key: contentKey, progress: null };
+        Sentry.captureException(error, {
+          tags: { area: 'playback-progress', action: 'load' },
+        });
+      });
+
+    return () => {
+      active = false;
+      const snapshot = snapshotsRef.current.get(contentKey);
+      if (snapshot && hydratedKeyRef.current === contentKey) {
+        void flushSnapshot(snapshot);
+      }
+    };
+  }, [contentKey, rawContentId, isAuthenticated, isRestoring, flushSnapshot]);
+
+  useEffect(() => {
+    if (!contentKey || hydratedKeyRef.current !== contentKey) return;
+    if (resumeAppliedKeyRef.current === contentKey) return;
+
+    const pending = pendingResumeRef.current;
+    if (!pending || pending.key !== contentKey) return;
+
+    // Wait until the native player has started or exposed duration so seekTo
+    // cannot race an unloaded TrackPlayer/VideoPlayer instance.
+    if (!state.isPlaying && state.durationMs <= 0) return;
+
+    const itemDuration = Math.max(0, Math.floor(Number(currentItem?.duration) || 0));
+    const target = resolveResumePosition(
+      pending.progress,
+      state.durationMs > 0 ? state.durationMs : itemDuration
+    );
+    resumeAppliedKeyRef.current = contentKey;
+    pendingResumeRef.current = null;
+
+    if (target > 0 && Math.abs(target - state.positionMs) > 1_000) {
+      void seekTo(target).catch((error) => {
+        Sentry.captureException(error, {
+          tags: { area: 'playback-progress', action: 'resume-seek' },
+        });
+      });
+    }
+  }, [contentKey, currentItem?.duration, seekTo, state.durationMs, state.isPlaying, state.positionMs]);
+
+  useEffect(() => {
+    const wasPlaying = previousPlayingRef.current;
+    previousPlayingRef.current = state.isPlaying;
+    if (!wasPlaying || state.isPlaying || !contentKey) return;
+    void flushSnapshot(snapshotsRef.current.get(contentKey));
+  }, [contentKey, state.isPlaying, flushSnapshot]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const timer = setInterval(() => {
+      if (!contentKey || hydratedKeyRef.current !== contentKey) return;
+      const snapshot = snapshotsRef.current.get(contentKey);
+      if (snapshot?.isPlaying) void flushSnapshot(snapshot);
+    }, PROGRESS_SAVE_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [contentKey, isAuthenticated, flushSnapshot]);
+
+  useEffect(() => {
+    let previousState = AppState.currentState;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (previousState === 'active' && nextState !== 'active' && contentKey) {
+        void flushSnapshot(snapshotsRef.current.get(contentKey));
+      }
+      previousState = nextState;
+    });
+    return () => subscription.remove();
+  }, [contentKey, flushSnapshot]);
+
+  return null;
+}
+
 /**
  * Keeps native playback and the server playback lease aligned with player and
  * authentication lifecycle. Pause intentionally preserves the lease so Resume
@@ -59,8 +214,6 @@ function PlaybackLeaseLifecycleBridge() {
     }
     if (isRestoring || !hadAuthenticatedSessionRef.current) return;
 
-    // A remote revocation/401 can clear auth without going through the explicit
-    // logout button. Stop native playback and release the lease immediately.
     hadAuthenticatedSessionRef.current = false;
     void close().finally(() => releaseActivePlaybackLease());
   }, [close, isAuthenticated, isRestoring]);
@@ -92,6 +245,7 @@ export default function App() {
           <AuthProvider>
             <ConnectivityProvider>
               <MediaPlayerProvider>
+                <PlaybackProgressLifecycleBridge />
                 <PlaybackLeaseLifecycleBridge />
                 <AppNavigator />
               </MediaPlayerProvider>
