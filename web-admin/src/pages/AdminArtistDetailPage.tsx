@@ -549,7 +549,7 @@ export default function AdminArtistDetailPage() {
     setRevenueModalBusy(true);
     setSaveError(null);
     try {
-      await http.patch("/api/v1/admin/revenue-share-config", {
+      await http.patch("/api/v1/admin/artists/revenue-share-config", {
         artistShare,
         platformShare,
       });
@@ -567,7 +567,7 @@ export default function AdminArtistDetailPage() {
     setTermsModalBusy(true);
     setSaveError(null);
     try {
-      await http.post("/api/v1/admin/terms-versions", { content });
+      await http.post("/api/v1/admin/artists/terms-versions", { content });
       setNewTermsContent("");
       setShowTermsModal(false);
     } catch (error: unknown) {
