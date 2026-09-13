@@ -42,17 +42,14 @@ async function quarantineUnsupportedProviderRefund(
     provider_status: providerStatus,
   };
 
-  if (existing) {
+  if (existing && String(existing.status).toUpperCase() !== "COMPLETED") {
     const existingProviderRefundId = existing.provider_refund_id
       ? String(existing.provider_refund_id)
       : null;
 
     await client.query(
       `UPDATE refund_requests
-          SET status = CASE
-                WHEN status = 'COMPLETED' THEN status
-                ELSE 'RECONCILIATION_REQUIRED'
-              END,
+          SET status = 'RECONCILIATION_REQUIRED',
               provider_refund_id = COALESCE(provider_refund_id, $2),
               provider_status = $3,
               provider_snapshot = $4,
@@ -70,7 +67,7 @@ async function quarantineUnsupportedProviderRefund(
         snapshot,
       ]
     );
-  } else {
+  } else if (!existing) {
     await client.query(
       `INSERT INTO refund_requests (
          payment_id, subscription_id, user_id, razorpay_payment_id,
@@ -103,6 +100,9 @@ async function quarantineUnsupportedProviderRefund(
     );
   }
 
+  // A completed refund row is immutable financial history. A later conflicting
+  // provider event is retained only as append-only audit evidence rather than
+  // rewriting the completed ledger row.
   await writeSubscriptionAudit(
     client,
     Number(payment.user_id),
@@ -110,11 +110,14 @@ async function quarantineUnsupportedProviderRefund(
     "REFUND_RECONCILIATION_REQUIRED",
     {
       payment_id: input.paymentId,
+      refund_request_id: existing?.id ?? null,
       refund_id: input.refundId,
       failure_code: "UNSUPPORTED_PARTIAL_REFUND_DETECTED",
       observed_refund_amount_paise: observedAmount,
       authoritative_payment_amount_paise: authoritativeAmount,
       provider_status: providerStatus,
+      completed_ledger_preserved:
+        String(existing?.status || "").toUpperCase() === "COMPLETED",
       entitlement_changed: false,
     }
   );
