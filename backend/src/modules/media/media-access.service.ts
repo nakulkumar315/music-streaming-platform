@@ -61,9 +61,20 @@ export async function requestPlaybackAccess(
   const content = await getContentForAccess(contentId);
   if (!content) throw new MediaNotFoundException(contentId);
 
-  const status = String(content.status || content.lifecycle_state || "DRAFT").toUpperCase();
-  if (!isContentEligibleForPlayback(status, Boolean(content.is_approved))) {
-    throw new MediaNotReadyException(contentId, status);
+  const technicalStatus = String(content.status || "").toUpperCase();
+  const lifecycleState = String(content.lifecycle_state || "").toUpperCase();
+  if (
+    !isContentEligibleForPlayback({
+      technicalStatus,
+      lifecycleState,
+      isApproved: Boolean(content.is_approved),
+      isTakenDown: Boolean(content.is_taken_down),
+    })
+  ) {
+    const reason = content.is_taken_down
+      ? "TAKEN_DOWN"
+      : `${lifecycleState || "UNKNOWN"}/${technicalStatus || "UNKNOWN"}`;
+    throw new MediaNotReadyException(contentId, reason);
   }
 
   const visibility = normalizeVisibilityForPlayback(content.visibility || "PROTECTED");
@@ -117,9 +128,6 @@ export async function requestPlaybackAccess(
       expiresInSeconds
     );
 
-    // Deliberately use the local/proxy delivery strategy here for every storage
-    // provider. The protected stream endpoint revalidates the live session and
-    // entitlement before streaming locally or issuing a short provider redirect.
     const access = await generatePlaybackAccess({
       mediaId: contentId,
       storageProvider: "local",
