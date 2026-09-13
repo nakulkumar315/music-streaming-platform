@@ -1,49 +1,184 @@
-import { Request, Response } from 'express';
-import { pool } from '../../common/db';
+import type { Response } from "express";
+import { pool } from "../../common/db";
+import {
+  CloudinaryWebhookAuthError,
+  deriveCloudinaryEventId,
+  verifyCloudinaryWebhook,
+} from "../../modules/media/cloudinary-webhook.security";
 
-export const handleMediaWebhook = async (req: Request | any, res: Response) => {
-  const correlationId = req?.correlationId || "-";
+function parsePayload(rawBody: Buffer) {
   try {
-    const body = req.body;
-    
-    // Cloudinary sends `notification_type` to describe the event. 
-    // For our streaming profile, we look for `eager_ready` or `upload` if eager transform happened inline.
-    // `eager_ready` is dispatched when HLS generation completes for Video.
-    // `upload` is dispatched for instantaneous uploads like Audio where no async eager profile is running.
-    if (
-      body.notification_type === 'eager_ready' || 
-      (body.notification_type === 'upload' && body.format !== 'mp4' && body.format !== 'mov') 
-    ) {
-      const providerAssetId = body.public_id || body.asset_id;
-      const status = body.status || body.eager_status; // Cloudinary might emit eager_status depending on format
+    const parsed = JSON.parse(rawBody.toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("object required");
+    return parsed as Record<string, any>;
+  } catch {
+    const error: any = new Error("Cloudinary webhook body is invalid JSON");
+    error.statusCode = 400;
+    error.code = "CLOUDINARY_WEBHOOK_BODY_INVALID";
+    throw error;
+  }
+}
 
-      if (!providerAssetId) {
-        return res.status(400).json({ success: false, message: 'public_id missing from payload' });
-      }
+function eagerOutcome(body: Record<string, any>): "READY" | "FAILED" | null {
+  const top = String(body.status || body.eager_status || "").trim().toLowerCase();
+  const entries = Array.isArray(body.eager) ? body.eager : [];
+  const statuses = entries
+    .map((entry: any) => String(entry?.status || entry?.state || "").trim().toLowerCase())
+    .filter(Boolean);
 
-      // If it's a notification from upload and status isn't explicitly defined, it typically means it synchronously succeeded
-      const technicalStatus = (status === 'success' || status === 'completed' || !status) ? 'READY' : 'FAILED';
-      
-      const updateQuery = `
-        UPDATE content_items 
-        SET technical_status = $1 
-        WHERE provider_asset_id = $2 AND technical_status != 'READY'
-        RETURNING id
-      `;
+  if (top === "failed" || statuses.some((status: string) => status === "failed" || status === "error")) {
+    return "FAILED";
+  }
+  if (["success", "succeeded", "complete", "completed", "ready"].includes(top)) {
+    return "READY";
+  }
+  if (
+    statuses.length > 0 &&
+    statuses.every((status: string) => ["success", "succeeded", "complete", "completed"].includes(status))
+  ) {
+    return "READY";
+  }
+  return null;
+}
 
-      const dbResult = await pool.query(updateQuery, [technicalStatus, providerAssetId]);
-      
-      if (dbResult.rows.length > 0) {
-        console.log(`[WebhookController] Media ${providerAssetId} status updated to ${technicalStatus}`);
-      }
+export const handleMediaWebhook = async (req: any, res: Response) => {
+  const correlationId = req?.correlationId || "-";
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!rawBody) {
+    return res.status(400).json({
+      success: false,
+      code: "CLOUDINARY_RAW_BODY_REQUIRED",
+      message: "Cloudinary webhook requires the exact raw request body",
+      correlationId,
+    });
+  }
+
+  const signature = String(req.headers["x-cld-signature"] || "").trim();
+  const timestamp = String(req.headers["x-cld-timestamp"] || "").trim();
+
+  try {
+    verifyCloudinaryWebhook({ rawBody, signature, timestamp });
+    const body = parsePayload(rawBody);
+    const eventId = deriveCloudinaryEventId(rawBody, timestamp, signature);
+    const notificationType = String(body.notification_type || "").trim().toLowerCase();
+
+    // Valid but unrelated Cloudinary notifications are acknowledged only after
+    // signature verification. They never mutate content state.
+    if (notificationType !== "eager") {
+      return res.status(200).json({ received: true, ignored: true, correlationId });
     }
-    
-    // Always respond 200 OK so Cloudinary knows we got it, even if ignored
-    return res.status(200).json({ received: true });
 
+    const providerAssetId = String(body.public_id || "").trim();
+    if (!providerAssetId) {
+      return res.status(400).json({
+        success: false,
+        code: "CLOUDINARY_PUBLIC_ID_REQUIRED",
+        message: "Cloudinary eager notification is missing public_id",
+        correlationId,
+      });
+    }
+
+    const outcome = eagerOutcome(body);
+    if (!outcome) {
+      return res.status(200).json({
+        received: true,
+        ignored: true,
+        reason: "No terminal eager state",
+        correlationId,
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const marker = await client.query(
+        `INSERT INTO processed_webhook_events (event_id, provider, created_at)
+         VALUES ($1, 'cloudinary', now())
+         ON CONFLICT (event_id) DO NOTHING
+         RETURNING event_id`,
+        [eventId]
+      );
+      if (!marker.rowCount) {
+        await client.query("COMMIT");
+        return res.status(200).json({ received: true, duplicated: true, correlationId });
+      }
+
+      const contentResult = await client.query(
+        `SELECT id, status, lifecycle_state, is_approved, is_taken_down
+           FROM content_items
+          WHERE storage_provider = 'cloudinary'
+            AND (provider_asset_id = $1 OR video_provider_asset_id = $1)
+          LIMIT 1
+          FOR UPDATE`,
+        [providerAssetId]
+      );
+      const content = contentResult.rows[0];
+      if (!content) {
+        await client.query("COMMIT");
+        return res.status(200).json({ received: true, ignored: true, reason: "Unknown asset", correlationId });
+      }
+
+      const current = String(content.status || "").toUpperCase();
+      const legal = current === "UPLOADING" || current === "PROCESSING";
+      if (legal) {
+        await client.query(`UPDATE content_items SET status = $2 WHERE id = $1`, [content.id, outcome]);
+        await client.query(
+          `INSERT INTO audit_logs (
+             id, action, entity, entity_id, actor_id, actor_role, status,
+             correlation_id, metadata, created_at
+           ) VALUES (
+             gen_random_uuid(), 'content.media_status_changed', 'content', $1,
+             NULL, 'SYSTEM', 'success', NULL, $2, now()
+           )`,
+          [
+            String(content.id),
+            {
+              provider: "cloudinary",
+              provider_asset_id: providerAssetId,
+              from_status: current,
+              to_status: outcome,
+              notification_type: notificationType,
+            },
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+      return res.status(200).json({
+        received: true,
+        contentId: Number(content.id),
+        technicalStatus: legal ? outcome : current,
+        ignored: !legal,
+        correlationId,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error: any) {
-    console.error("[WebhookController] Webhook Error", correlationId, error);
-    // Returning 200 even on some internal failures to prevent webhook retries crashing the route.
-    return res.status(200).send("Processed with errors");
+    if (error instanceof CloudinaryWebhookAuthError) {
+      return res.status(error.code === "CLOUDINARY_WEBHOOK_NOT_CONFIGURED" ? 500 : 401).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        correlationId,
+      });
+    }
+    if (Number(error?.statusCode) === 400) {
+      return res.status(400).json({
+        success: false,
+        code: error?.code || "CLOUDINARY_WEBHOOK_INVALID",
+        message: error?.message || "Invalid Cloudinary webhook",
+        correlationId,
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      code: "CLOUDINARY_WEBHOOK_PROCESSING_FAILED",
+      message: "Cloudinary webhook processing failed",
+      correlationId,
+    });
   }
 };
