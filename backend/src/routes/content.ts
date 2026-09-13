@@ -5,7 +5,7 @@ import { requireRoles } from "../common/auth/requireRoles";
 
 const router = Router();
 const requireFan = requireRoles("FAN");
-const REPORT_REASON_MAX = 500;
+const REPORT_REASON_MAX = 80;
 
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
