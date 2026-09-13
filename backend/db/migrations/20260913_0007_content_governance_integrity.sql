@@ -11,7 +11,9 @@ ALTER TABLE content_items
   ALTER COLUMN is_approved SET DEFAULT FALSE,
   ALTER COLUMN is_approved SET NOT NULL,
   ALTER COLUMN status SET DEFAULT 'UPLOADING',
-  ALTER COLUMN status SET NOT NULL;
+  ALTER COLUMN status SET NOT NULL,
+  ALTER COLUMN visibility SET DEFAULT 'PROTECTED',
+  ALTER COLUMN visibility SET NOT NULL;
 
 ALTER TABLE content_items
   ADD CONSTRAINT content_items_lifecycle_state_valid
@@ -19,7 +21,9 @@ ALTER TABLE content_items
   ADD CONSTRAINT content_items_technical_status_valid
     CHECK (status IN ('UPLOADING', 'PROCESSING', 'READY', 'FAILED')),
   ADD CONSTRAINT content_items_approval_state_valid
-    CHECK (is_approved = FALSE OR lifecycle_state = 'EARLY_ACCESS');
+    CHECK (is_approved = FALSE OR lifecycle_state = 'EARLY_ACCESS'),
+  ADD CONSTRAINT content_items_visibility_valid
+    CHECK (visibility IN ('PUBLIC', 'PROTECTED', 'PRIVATE_INTERNAL'));
 
 CREATE INDEX idx_content_items_moderation_queue
   ON content_items (lifecycle_state, is_taken_down, status, created_at DESC);
