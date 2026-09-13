@@ -39,6 +39,7 @@ test('playback remains server-authoritative and handles typed denial codes', () 
     'SUBSCRIPTION_INACTIVE',
     'CONTENT_TAKEN_DOWN',
     'PLAYBACK_SESSION_LIMIT',
+    'PLAYBACK_SESSION_EXPIRED',
     'PLAYBACK_ACCESS_EXPIRED',
     'INVALID_PLAYBACK_TOKEN',
   ]) {
@@ -50,6 +51,32 @@ test('playback remains server-authoritative and handles typed denial codes', () 
   assert.match(provider, /presentation\.shouldStopPlayback/);
   assert.match(provider, /Alert\.alert\(presentation\.title, presentation\.message\)/);
   assert.doesNotMatch(provider, /Could not get playback URL\. Try again\./);
+});
+
+test('mobile playback keeps one server lease across heartbeats and token refresh', () => {
+  const stream = read('apps/fan/src/services/streamService.ts');
+  assert.match(stream, /let activePlaybackLease: ActivePlaybackLease \| null = null/);
+  assert.match(stream, /existing\?\.sessionId/);
+  assert.match(stream, /returnedSessionId !== sessionId/);
+  assert.match(stream, /PLAYBACK_SESSION_MISMATCH/);
+  assert.match(stream, /await releaseActivePlaybackLease\(\)/);
+  assert.match(stream, /apiV1\.post\('\/stream\/terminate'/);
+
+  const heartbeat = read('apps/fan/src/services/heartbeatService.ts');
+  assert.match(heartbeat, /getActivePlaybackLease\(contentId\)/);
+  assert.match(heartbeat, /sessionId: lease\.sessionId/);
+  assert.match(heartbeat, /apiV1\.post\('\/stream\/heartbeat'/);
+
+  const app = read('App.tsx');
+  assert.match(app, /PlaybackLeaseLifecycleBridge/);
+  assert.match(app, /releaseActivePlaybackLease/);
+
+  const provider = read('apps/fan/src/providers/MediaPlayerProvider.tsx');
+  assert.equal(
+    (provider.match(/preloadNextItem/g) || []).length,
+    1,
+    'protected playback preloading must stay inactive because access allocates a lease'
+  );
 });
 
 test('production guest experience has no committed mock catalog or diagnostics screen', () => {
