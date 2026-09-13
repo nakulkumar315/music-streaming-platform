@@ -1,48 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { http } from "../services/http";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import Skeleton from "../components/Skeleton";
-import PageWrapper from "../components/PageWrapper";
+import { useQueryClient } from "@tanstack/react-query";
 import {
+  Activity,
+  AlertTriangle,
   ArrowLeft,
-  User,
-  Mail,
-  Phone,
-  Music,
-  DollarSign,
   CheckCircle,
-  XCircle,
-  Edit,
-  Save,
-  Trash2,
-  RefreshCw,
-  Eye,
-  Play,
-  Volume2,
-  Calendar,
   Clock,
-  Users,
-  Award,
-  Crown,
-  Star,
+  Download,
+  FileText,
+  Mail,
+  Music,
+  Phone,
+  RefreshCw,
+  Save,
+  Settings,
   Shield,
   ShieldCheck,
-  Settings,
-  Download,
-  AlertTriangle,
-  Activity,
-  FileText,
-  Link2,
-  ExternalLink,
-  Image,
-  Video,
-  MoreHorizontal,
-  ChevronDown,
-  ChevronUp,
-  Zap,
-  Sparkles,
+  User,
+  UserCheck,
+  UserX,
+  XCircle,
 } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import PageWrapper from "../components/PageWrapper";
+import Skeleton from "../components/Skeleton";
+import { adminRuntimeConfig } from "../config/runtime";
+import { http } from "../services/http";
 
 type ArtistDetail = {
   id: number;
@@ -58,7 +41,7 @@ type ArtistDetail = {
   phone: string | null;
   genre: string | null;
   bio: string;
-  socialLinks: Record<string, any> | null;
+  socialLinks: Record<string, unknown> | null;
   revenueSharePercentage: number;
   adminRemarks: string | null;
   status: string;
@@ -84,88 +67,128 @@ type ArtistDetail = {
 type ArtistDetailResponse = {
   success: boolean;
   artist: ArtistDetail;
+  correlationId?: string;
 };
 
 type ContentHistoryItem = {
   id: number;
   title: string;
   type: string;
-  thumbnailUrl?: string | null;
-  mediaUrl?: string | null;
-  audioUrl?: string | null;
-  videoUrl?: string | null;
   isApproved: boolean;
   createdAt: string;
 };
 
 type ContentHistoryResponse = {
   success: boolean;
-  items?: ContentHistoryItem[];
-  message?: string;
-  correlationId?: string;
-};
-
-type DeleteResponse = {
-  success: boolean;
+  items?: Array<Record<string, unknown>>;
   message?: string;
   correlationId?: string;
 };
 
 type SoftDeleteResponse = {
   success: boolean;
-  artist?: {
-    id: number;
-    isDeleted?: boolean;
-    deletedAt?: string | null;
-    deletionReason?: string | null;
-  };
   message?: string;
   correlationId?: string;
 };
 
-function formatDateTime(v: string | null | undefined) {
-  if (!v) return "—";
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, {
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, {
     year: "numeric",
     month: "short",
     day: "2-digit",
     hour: "numeric",
     minute: "2-digit",
-    second: "2-digit",
   });
 }
 
-function formatJson(v: any) {
-  if (v === null || v === undefined) return "";
+function formatPrice(value: number) {
+  const amount = Number(value);
+  return `${new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(amount) ? amount : 0)} / month`;
+}
+
+function hasAtMostTwoDecimals(value: number) {
+  const paise = Math.round(value * 100);
+  return Number.isSafeInteger(paise) && Math.abs(value * 100 - paise) <= 1e-7;
+}
+
+function safeHttpUrl(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
   try {
-    return JSON.stringify(v, null, 2);
+    const parsed = raw.startsWith("/")
+      ? new URL(raw, `${adminRuntimeConfig.apiBaseUrl}/`)
+      : new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    if (parsed.username || parsed.password) return null;
+    return parsed.toString();
   } catch {
-    return "";
+    return null;
   }
 }
 
-function formatPrice(n: number) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return "$0.00";
-  return `$${v.toFixed(2)} / month`;
+function safeSignatureUrl(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  if (/^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=\s]+$/i.test(raw)) {
+    return raw;
+  }
+  return safeHttpUrl(raw);
+}
+
+function parseSocialLinks(raw: string): Record<string, string> | null | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return undefined;
+    const output: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const url = safeHttpUrl(value);
+      if (!url) return undefined;
+      output[key] = url;
+    }
+    return output;
+  } catch {
+    return undefined;
+  }
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  const value = error as {
+    response?: { data?: { message?: string; correlationId?: string } };
+    message?: string;
+  };
+  const message = value?.response?.data?.message || value?.message || fallback;
+  const correlationId = value?.response?.data?.correlationId;
+  return correlationId ? `${message} (Reference: ${correlationId})` : message;
 }
 
 function Toggle({
   checked,
+  disabled,
   onChange,
 }: {
   checked: boolean;
-  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  onChange: (value: boolean) => void;
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-[24px] w-[48px] items-center rounded-full transition-all ${
+      className={`relative inline-flex h-6 w-12 items-center rounded-full transition-all disabled:opacity-50 ${
         checked ? "bg-primary" : "bg-[#2A2A2A]"
-      }`}>
+      }`}
+    >
       <span
         className={`inline-block h-[18px] w-[18px] rounded-full bg-white shadow-lg transition-transform ${
           checked ? "translate-x-[26px]" : "translate-x-[3px]"
@@ -175,492 +198,416 @@ function Toggle({
   );
 }
 
-function StatusBadge({
-  status,
-  isDeleted,
-}: {
-  status: string;
-  isDeleted?: boolean;
-}) {
-  const isInactive = isDeleted || status === "SUSPENDED";
-
-  if (isInactive) {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
-        <XCircle size={12} />
-        Inactive
-      </span>
-    );
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-green-500/10 text-green-400 border border-green-500/20">
-      <CheckCircle size={12} />
-      Active
+function StatusBadge({ status, isDeleted }: { status: string; isDeleted?: boolean }) {
+  const inactive =
+    isDeleted || ["SUSPENDED", "INACTIVE"].includes(String(status).toUpperCase());
+  return inactive ? (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-red-500/20 bg-red-500/10 px-3 py-1 text-xs font-medium text-red-400">
+      <UserX size={12} /> Inactive
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-green-500/20 bg-green-500/10 px-3 py-1 text-xs font-medium text-green-400">
+      <UserCheck size={12} /> Active
     </span>
   );
 }
 
 function VerifiedBadge({ verified }: { verified: boolean }) {
-  if (verified) {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
-        <CheckCircle size={12} />
-        Verified
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-gray-500/10 text-[#8D7B77] border border-gray-500/20">
-      <XCircle size={12} />
-      Unverified
+  return verified ? (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-xs font-medium text-blue-400">
+      <CheckCircle size={12} /> Verified
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-gray-500/20 bg-gray-500/10 px-3 py-1 text-xs font-medium text-[#8D7B77]">
+      <XCircle size={12} /> Unverified
     </span>
   );
 }
 
 export default function AdminArtistDetailPage() {
   const navigate = useNavigate();
-  const params = useParams();
-  const artistId = params.id;
+  const { id: artistId } = useParams();
   const queryClient = useQueryClient();
-
-  const lastLoadedArtistIdRef = useRef<string | null>(null);
-  const artistFetchInFlightRef = useRef(false);
-  const historyFetchInFlightRef = useRef(false);
+  const artistFetchInFlight = useRef(false);
+  const historyFetchInFlight = useRef(false);
+  const lastLoadedArtistId = useRef<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [artist, setArtist] = useState<ArtistDetail | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [brokenSignature, setBrokenSignature] = useState(false);
+  const [activeTab, setActiveTab] = useState<"PROFILE" | "AGREEMENT">("PROFILE");
+
   const [draftName, setDraftName] = useState("");
   const [draftPhone, setDraftPhone] = useState("");
   const [draftGenre, setDraftGenre] = useState("");
   const [draftBio, setDraftBio] = useState("");
   const [draftRevenueShare, setDraftRevenueShare] = useState("90");
-  const [draftSubscriptionPrice, setDraftSubscriptionPrice] = useState("0");
+  const [draftSubscriptionPrice, setDraftSubscriptionPrice] = useState("");
   const [draftSocialLinks, setDraftSocialLinks] = useState("");
   const [draftAdminRemarks, setDraftAdminRemarks] = useState("");
 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyItems, setHistoryItems] = useState<ContentHistoryItem[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [historyBusyId, setHistoryBusyId] = useState<number | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<ContentHistoryItem | null>(
-    null
-  );
-  const [showRevenueModal, setShowRevenueModal] = useState(false);
-  const [futureArtistShare, setFutureArtistShare] = useState("55");
-  const [futurePlatformShare, setFuturePlatformShare] = useState("45");
-  const [revenueModalBusy, setRevenueModalBusy] = useState(false);
-  const [showTermsModal, setShowTermsModal] = useState(false);
-  const [newTermsContent, setNewTermsContent] = useState("");
-  const [termsModalBusy, setTermsModalBusy] = useState(false);
 
   const [softDeleteOpen, setSoftDeleteOpen] = useState(false);
   const [softDeleteReason, setSoftDeleteReason] = useState("");
   const [softDeleteBusy, setSoftDeleteBusy] = useState(false);
   const [softDeleteError, setSoftDeleteError] = useState<string | null>(null);
 
-  const [historyTab, setHistoryTab] = useState<"AUDIO" | "VIDEO">("AUDIO");
-  const [historyFilter, setHistoryFilter] = useState<
-    "ALL" | "AUDIO_ONLY" | "VIDEO_ONLY"
-  >("ALL");
-  const [activeDetailTab, setActiveDetailTab] = useState<"PROFILE" | "AGREEMENT">("PROFILE");
-  const [previewItem, setPreviewItem] = useState<ContentHistoryItem | null>(
-    null
-  );
+  const [showRevenueModal, setShowRevenueModal] = useState(false);
+  const [futureArtistShare, setFutureArtistShare] = useState("55");
+  const [futurePlatformShare, setFuturePlatformShare] = useState("45");
+  const [revenueModalBusy, setRevenueModalBusy] = useState(false);
 
-  const handleDownloadPdf = async () => {
-    if (!artist?.id) return;
-    try {
-      setBusy(true);
-      const res = await http.get(`/api/v1/admin/artists/${artist.id}/agreement-pdf`, {
-        responseType: "blob"
-      });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
-      const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute("download", `agreement-${artist.id}.pdf`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-    } catch (error) {
-      console.error("Failed to download PDF:", error);
-      alert("Failed to download PDF. Please try again.");
-    } finally {
-      setBusy(false);
-    }
+  const [showTermsModal, setShowTermsModal] = useState(false);
+  const [newTermsContent, setNewTermsContent] = useState("");
+  const [termsModalBusy, setTermsModalBusy] = useState(false);
+
+  const applyArtist = (next: ArtistDetail) => {
+    setArtist(next);
+    setDraftName(next.name ?? "");
+    setDraftPhone(next.phone ?? "");
+    setDraftGenre(next.genre ?? "");
+    setDraftBio(next.bio ?? "");
+    setDraftRevenueShare(String(next.revenueSharePercentage ?? 90));
+    setDraftSubscriptionPrice(
+      Number(next.subscriptionPrice) > 0 ? String(next.subscriptionPrice) : ""
+    );
+    setDraftSocialLinks(next.socialLinks ? JSON.stringify(next.socialLinks, null, 2) : "");
+    setDraftAdminRemarks(next.adminRemarks ?? "");
   };
-
-  const headerBannerStyle = useMemo(() => {
-    if (artist?.bannerImage) {
-      return {
-        backgroundImage: `url(${artist.bannerImage})`,
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-      } as const;
-    }
-    return {
-      backgroundImage:
-        "linear-gradient(135deg, rgba(30,18,18,0.95) 0%, rgba(10,8,8,0.6) 55%, rgba(10,8,8,0.3) 100%)",
-      backgroundSize: "cover",
-    } as const;
-  }, [artist?.bannerImage]);
 
   const fetchArtist = async (force = false) => {
     if (!artistId) return;
     if (!force) {
-      if (artistFetchInFlightRef.current) return;
-      if (lastLoadedArtistIdRef.current === artistId) return;
+      if (artistFetchInFlight.current) return;
+      if (lastLoadedArtistId.current === artistId) return;
     }
 
+    artistFetchInFlight.current = true;
     setBrokenSignature(false);
-    artistFetchInFlightRef.current = true;
     setLoading(true);
     try {
-      const res = await http.get<ArtistDetailResponse>(
+      const response = await http.get<ArtistDetailResponse>(
         `/api/v1/admin/artists/${artistId}`
       );
-      const a = res.data.artist;
-      setArtist(a);
-      setDraftName(a?.name ?? "");
-      setDraftPhone(a?.phone ?? "");
-      setDraftGenre(a?.genre ?? "");
-      setDraftBio(a?.bio ?? "");
-      setDraftRevenueShare(String(a?.revenueSharePercentage ?? 90));
-      setDraftSubscriptionPrice(String(a?.subscriptionPrice ?? 0));
-      setDraftSocialLinks(formatJson(a?.socialLinks ?? null));
-      setDraftAdminRemarks(a?.adminRemarks ?? "");
-    } catch (e: any) {
-      const status = e?.response?.status;
-      if (status === 401 || status === 403) {
-        localStorage.removeItem("adminToken");
-        navigate("/admin/login", { replace: true });
-        return;
+      if (!response.data?.success || !response.data.artist) {
+        throw new Error("Artist details are unavailable");
       }
+      applyArtist(response.data.artist);
+      lastLoadedArtistId.current = artistId;
+      setSaveError(null);
+    } catch (error: unknown) {
+      const status = (error as { response?: { status?: number } })?.response?.status;
       if (status === 404) {
         navigate("/admin/artists", { replace: true });
         return;
       }
+      setSaveError(errorMessage(error, "Failed to load artist details"));
     } finally {
       setLoading(false);
-      artistFetchInFlightRef.current = false;
-      lastLoadedArtistIdRef.current = artistId;
+      artistFetchInFlight.current = false;
     }
   };
 
-  const fetchContentHistory = async (force = false) => {
-    if (!artistId) return;
-    if (!force && historyFetchInFlightRef.current) return;
-
-    historyFetchInFlightRef.current = true;
+  const fetchContentHistory = async () => {
+    if (!artistId || historyFetchInFlight.current) return;
+    historyFetchInFlight.current = true;
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const res = await http.get<ContentHistoryResponse>(
+      const response = await http.get<ContentHistoryResponse>(
         "/api/v1/content/history",
-        {
-          params: { artistId },
-        }
+        { params: { artistId } }
       );
-
-      if (!res.data?.success) {
-        throw new Error(res.data?.message || "Failed to fetch content history");
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || "Failed to load content history");
       }
-
-      const raw = Array.isArray(res.data?.items)
-        ? (res.data.items as any[])
-        : [];
-      const next: ContentHistoryItem[] = raw.map((it: any) => ({
-        id: Number(it?.id),
-        title: (it?.title ?? "").toString(),
-        type: (it?.type ?? "").toString(),
-        thumbnailUrl: it?.thumbnailUrl ?? it?.thumbnail_url ?? null,
-        mediaUrl: it?.mediaUrl ?? it?.media_url ?? null,
-        audioUrl: it?.audioUrl ?? it?.audio_url ?? null,
-        videoUrl: it?.videoUrl ?? it?.video_url ?? null,
-        isApproved: Boolean(it?.isApproved ?? it?.is_approved),
-        createdAt: (it?.createdAt ?? it?.created_at ?? "").toString(),
-      }));
-
-      setHistoryItems(next.filter((x) => Number.isFinite(x.id) && x.id > 0));
-    } catch (e: any) {
-      setHistoryError(
-        e?.response?.data?.message ||
-          e?.message ||
-          "Failed to fetch content history"
+      const items = Array.isArray(response.data.items) ? response.data.items : [];
+      setHistoryItems(
+        items
+          .map((item) => ({
+            id: Number(item.id),
+            title: String(item.title ?? "Untitled"),
+            type: String(item.type ?? "CONTENT").toUpperCase(),
+            isApproved: Boolean(item.isApproved ?? item.is_approved),
+            createdAt: String(item.createdAt ?? item.created_at ?? ""),
+          }))
+          .filter((item) => Number.isSafeInteger(item.id) && item.id > 0)
       );
+    } catch (error: unknown) {
       setHistoryItems([]);
+      setHistoryError(errorMessage(error, "Failed to load content history"));
     } finally {
       setHistoryLoading(false);
-      historyFetchInFlightRef.current = false;
+      historyFetchInFlight.current = false;
     }
   };
 
   useEffect(() => {
-    lastLoadedArtistIdRef.current = null;
-    fetchArtist();
-    fetchContentHistory();
+    lastLoadedArtistId.current = null;
+    void fetchArtist(true);
+    void fetchContentHistory();
   }, [artistId]);
 
-  useEffect(() => {
-    if (!previewItem) return;
-    const exists = historyItems.some((x) => x.id === previewItem.id);
-    if (!exists) setPreviewItem(null);
-  }, [historyItems, previewItem]);
-
-  const baseUrl = useMemo(() => {
-    return (
-      (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:8000"
-    );
-  }, []);
-
-  const toAbsoluteUrl = (url: string | null | undefined) => {
-    if (!url) return null;
-    if (typeof url !== "string") return null;
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
-    return `${baseUrl}${url.startsWith("/") ? "" : "/"}${url}`;
-  };
-
-  const isAudioUrl = (url: string | null | undefined) => {
-    if (!url) return false;
-    if (typeof url !== "string") return false;
-    const u = url.toLowerCase();
-    return (
-      u.endsWith(".mp3") ||
-      u.endsWith(".wav") ||
-      u.endsWith(".m4a") ||
-      u.endsWith(".aac") ||
-      u.endsWith(".ogg")
-    );
-  };
-
-  const isVideoUrl = (url: string | null | undefined) => {
-    if (!url) return false;
-    if (typeof url !== "string") return false;
-    const u = url.toLowerCase();
-    return (
-      u.endsWith(".mp4") ||
-      u.endsWith(".webm") ||
-      u.endsWith(".mov") ||
-      u.endsWith(".mkv")
-    );
-  };
-
-  const hasAudioForItem = (item: ContentHistoryItem) => {
-    return Boolean(item.audioUrl) || isAudioUrl(item.mediaUrl);
-  };
-
-  const hasVideoForItem = (item: ContentHistoryItem) => {
-    return Boolean(item.videoUrl) || isVideoUrl(item.mediaUrl);
-  };
-
-  const getDisplayType = (item: ContentHistoryItem) => {
-    const hasAudio = hasAudioForItem(item);
-    const hasVideo = hasVideoForItem(item);
-    if (hasAudio && hasVideo) return "DUAL";
-    if (hasVideo) return "VIDEO";
-    return "AUDIO";
-  };
-
-  const filteredHistoryItems = useMemo(() => {
-    const tabKind = historyTab;
-    return historyItems.filter((it) => {
-      const hasAudio = hasAudioForItem(it);
-      const hasVideo = hasVideoForItem(it);
-      if (tabKind === "AUDIO" && !hasAudio) return false;
-      if (tabKind === "VIDEO" && !hasVideo) return false;
-      if (historyFilter === "AUDIO_ONLY") return hasAudio && !hasVideo;
-      if (historyFilter === "VIDEO_ONLY") return hasVideo && !hasAudio;
-      return true;
-    });
-  }, [historyFilter, historyItems, historyTab]);
-
-  const deleteContent = async (item: ContentHistoryItem) => {
-    setHistoryBusyId(item.id);
-    setHistoryError(null);
-    try {
-      const res = await http.delete<DeleteResponse>(
-        `/api/v1/content/${item.id}`
-      );
-      if (!res.data?.success) {
-        throw new Error(res.data?.message || "Delete failed");
-      }
-      setHistoryItems((prev) => prev.filter((x) => x.id !== item.id));
-      setArtist((a) => {
-        if (!a) return a;
-        const nextCount = Math.max(0, Number(a.totalContentCount ?? 0) - 1);
-        return { ...a, totalContentCount: nextCount };
-      });
-      setConfirmDelete(null);
-    } catch (e: any) {
-      setHistoryError(
-        e?.response?.data?.message || e?.message || "Failed to delete content"
-      );
-    } finally {
-      setHistoryBusyId(null);
-    }
-  };
-
-  const saveAll = async () => {
-    if (!artistId) return;
+  const runArtistCommand = async (
+    command: () => Promise<unknown>,
+    fallback: string
+  ) => {
+    if (busy) return;
     setBusy(true);
     setSaveError(null);
     try {
-      const socialLinksObj = (() => {
-        const raw = draftSocialLinks.trim();
-        if (!raw) return null;
-        try {
-          return JSON.parse(raw);
-        } catch {
-          return undefined;
-        }
-      })();
-
-      if (socialLinksObj === undefined) {
-        setSaveError("Social Links must be valid JSON");
-        return;
-      }
-
-      const res = await http.patch(`/api/v1/admin/artists/${artistId}`, {
-        name: draftName || null,
-        phone: draftPhone || null,
-        genre: draftGenre || null,
-        bio: draftBio || null,
-        revenueSharePercentage: draftRevenueShare,
-        subscriptionPrice: draftSubscriptionPrice,
-        socialLinks: socialLinksObj,
-        adminRemarks: draftAdminRemarks || null,
-      });
-
-      if (res.data?.artist) {
-        setArtist(res.data.artist);
-      }
-    } catch (e: any) {
-      const msg =
-        e?.response?.data?.message || e?.message || "Failed to save changes";
-      setSaveError(msg);
+      await command();
+      await fetchArtist(true);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "artists"], exact: false });
+    } catch (error: unknown) {
+      setSaveError(errorMessage(error, fallback));
     } finally {
       setBusy(false);
     }
   };
 
+  const saveAll = async () => {
+    if (!artistId || busy) return;
+
+    const subscriptionPrice = Number(draftSubscriptionPrice);
+    if (
+      !Number.isFinite(subscriptionPrice) ||
+      subscriptionPrice <= 0 ||
+      !hasAtMostTwoDecimals(subscriptionPrice)
+    ) {
+      setSaveError(
+        "Subscription price must be a positive INR amount with at most two decimal places."
+      );
+      return;
+    }
+
+    const revenueSharePercentage = Number(draftRevenueShare);
+    if (
+      !Number.isFinite(revenueSharePercentage) ||
+      revenueSharePercentage < 0 ||
+      revenueSharePercentage > 100
+    ) {
+      setSaveError("Revenue share percentage must be between 0 and 100.");
+      return;
+    }
+
+    const socialLinks = parseSocialLinks(draftSocialLinks);
+    if (socialLinks === undefined) {
+      setSaveError("Social Links must be a JSON object containing only valid http(s) URLs.");
+      return;
+    }
+
+    await runArtistCommand(
+      () =>
+        http.patch(`/api/v1/admin/artists/${artistId}`, {
+          name: draftName.trim() || null,
+          phone: draftPhone.trim() || null,
+          genre: draftGenre.trim() || null,
+          bio: draftBio.trim() || null,
+          revenueSharePercentage,
+          subscriptionPrice,
+          socialLinks,
+          adminRemarks: draftAdminRemarks.trim() || null,
+        }),
+      "Failed to save artist changes"
+    );
+  };
+
   const setVerified = async (next: boolean) => {
     if (!artistId) return;
-    setBusy(true);
-    try {
-      const res = await http.patch(
-        `/api/v1/admin/artists/${artistId}/verified`,
-        {
+    await runArtistCommand(
+      () =>
+        http.patch(`/api/v1/admin/artists/${artistId}/verified`, {
           isVerified: next,
-        }
+        }),
+      "Failed to update verification status"
+    );
+  };
+
+  const runAgreementAction = async (
+    path: string,
+    body: Record<string, unknown> | undefined,
+    fallback: string
+  ) => {
+    await runArtistCommand(
+      () => http.patch(path, body ?? {}),
+      fallback
+    );
+  };
+
+  const rejectAgreement = async () => {
+    if (!artistId) return;
+    const reason = window.prompt("Enter rejection reason (3–500 characters):")?.trim() || "";
+    if (!reason) return;
+    if (reason.length < 3 || reason.length > 500) {
+      setSaveError("Agreement rejection reason must be 3–500 characters.");
+      return;
+    }
+    await runAgreementAction(
+      `/api/v1/admin/artists/${artistId}/reject-agreement`,
+      { reason },
+      "Failed to reject agreement"
+    );
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!artist?.id || busy) return;
+    setBusy(true);
+    setSaveError(null);
+    let objectUrl: string | null = null;
+    try {
+      const response = await http.get(
+        `/api/v1/admin/artists/${artist.id}/agreement-pdf`,
+        { responseType: "blob" }
       );
-      setArtist((a) =>
-        a ? { ...a, isVerified: Boolean(res.data?.isVerified ?? next) } : a
-      );
+      objectUrl = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `agreement-${artist.id}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error: unknown) {
+      setSaveError(errorMessage(error, "Failed to download agreement PDF"));
     } finally {
+      if (objectUrl) window.URL.revokeObjectURL(objectUrl);
       setBusy(false);
     }
   };
 
   const submitSoftDelete = async () => {
-    if (!artistId) return;
+    if (!artistId || softDeleteBusy) return;
     const reason = softDeleteReason.trim();
-    if (!reason) {
-      setSoftDeleteError("Reason is required");
+    if (reason.length < 3 || reason.length > 500) {
+      setSoftDeleteError("Reason must be 3–500 characters.");
       return;
     }
 
     setSoftDeleteBusy(true);
     setSoftDeleteError(null);
     try {
-      const res = await http.patch<SoftDeleteResponse>(
+      const response = await http.patch<SoftDeleteResponse>(
         `/api/v1/admin/artists/${artistId}/soft-delete`,
         { reason }
       );
-      if (!res.data?.success) {
-        throw new Error(res.data?.message || "Soft delete failed");
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || "Deactivation failed");
       }
-      setArtist((a) => {
-        if (!a) return a;
-        return {
-          ...a,
-          isDeleted: Boolean(res.data?.artist?.isDeleted ?? true),
-          deletedAt: (res.data?.artist?.deletedAt ?? null) as any,
-          deletionReason: (res.data?.artist?.deletionReason ?? reason) as any,
-        };
-      });
+      await fetchArtist(true);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "artists"], exact: false });
       setSoftDeleteOpen(false);
       setSoftDeleteReason("");
-      queryClient.invalidateQueries({
-        queryKey: ["admin", "artists"],
-        exact: false,
-      });
-    } catch (e: any) {
-      setSoftDeleteError(
-        e?.response?.data?.message || e?.message || "Soft delete failed"
-      );
+    } catch (error: unknown) {
+      setSoftDeleteError(errorMessage(error, "Artist deactivation failed"));
     } finally {
       setSoftDeleteBusy(false);
     }
   };
 
   const reactivateArtist = async () => {
-    if (!artistId) return;
+    if (!artistId || softDeleteBusy) return;
     setSoftDeleteBusy(true);
     setSoftDeleteError(null);
     try {
-      const res = await http.patch<SoftDeleteResponse>(
+      const response = await http.patch<SoftDeleteResponse>(
         `/api/v1/admin/artists/${artistId}/reactivate`,
         {}
       );
-      if (!res.data?.success) {
-        throw new Error(res.data?.message || "Reactivation failed");
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || "Reactivation failed");
       }
-      setArtist((a) => {
-        if (!a) return a;
-        return {
-          ...a,
-          isDeleted: Boolean(res.data?.artist?.isDeleted ?? false),
-          deletedAt: (res.data?.artist?.deletedAt ?? null) as any,
-          deletionReason: (res.data?.artist?.deletionReason ?? null) as any,
-        };
-      });
-      queryClient.invalidateQueries({
-        queryKey: ["admin", "artists"],
-        exact: false,
-      });
-    } catch (e: any) {
-      setSoftDeleteError(
-        e?.response?.data?.message || e?.message || "Reactivation failed"
-      );
+      await fetchArtist(true);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "artists"], exact: false });
+    } catch (error: unknown) {
+      setSoftDeleteError(errorMessage(error, "Artist reactivation failed"));
     } finally {
       setSoftDeleteBusy(false);
     }
   };
 
-  const status = (artist?.status ?? "ACTIVE").toString().toUpperCase();
-  const isDeleted = Boolean((artist as any)?.isDeleted);
-  const isInactive = isDeleted || status === "SUSPENDED";
-  const statusLabel = isInactive ? "DEACTIVATED" : "ACTIVE";
+  const updateFutureRevenue = async () => {
+    const artistShare = Number(futureArtistShare);
+    const platformShare = Number(futurePlatformShare);
+    if (
+      !Number.isInteger(artistShare) ||
+      !Number.isInteger(platformShare) ||
+      artistShare < 0 ||
+      platformShare < 0 ||
+      artistShare > 100 ||
+      platformShare > 100 ||
+      artistShare + platformShare !== 100
+    ) {
+      setSaveError("Future revenue shares must be whole percentages that total 100%.");
+      return;
+    }
 
-  if (loading) {
+    setRevenueModalBusy(true);
+    setSaveError(null);
+    try {
+      await http.patch("/api/v1/admin/revenue-share-config", {
+        artistShare,
+        platformShare,
+      });
+      setShowRevenueModal(false);
+    } catch (error: unknown) {
+      setSaveError(errorMessage(error, "Failed to update future revenue configuration"));
+    } finally {
+      setRevenueModalBusy(false);
+    }
+  };
+
+  const publishTerms = async () => {
+    const content = newTermsContent.trim();
+    if (!content) return;
+    setTermsModalBusy(true);
+    setSaveError(null);
+    try {
+      await http.post("/api/v1/admin/terms-versions", { content });
+      setNewTermsContent("");
+      setShowTermsModal(false);
+    } catch (error: unknown) {
+      setSaveError(errorMessage(error, "Failed to publish terms version"));
+    } finally {
+      setTermsModalBusy(false);
+    }
+  };
+
+  const status = String(artist?.status ?? "ACTIVE").toUpperCase();
+  const inactive = Boolean(artist?.isDeleted) || ["SUSPENDED", "INACTIVE"].includes(status);
+  const signatureUrl = safeSignatureUrl(artist?.digitalSignature);
+  const profileUrl = safeHttpUrl(artist?.profileImage);
+  const bannerUrl = safeHttpUrl(artist?.bannerImage);
+  const agreementStatus = String(artist?.agreementStatus || "").toUpperCase();
+
+  const headerBannerStyle = useMemo(
+    () =>
+      bannerUrl
+        ? {
+            backgroundImage: `url(${JSON.stringify(bannerUrl).slice(1, -1)})`,
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+          }
+        : {
+            backgroundImage:
+              "linear-gradient(135deg, rgba(30,18,18,0.95) 0%, rgba(10,8,8,0.6) 55%, rgba(10,8,8,0.3) 100%)",
+            backgroundSize: "cover",
+          },
+    [bannerUrl]
+  );
+
+  if (loading && !artist) {
     return (
-      <PageWrapper
-        title="Artist Details"
-        subtitle="Loading artist information...">
+      <PageWrapper title="Artist Details" subtitle="Loading artist information...">
         <div className="space-y-4">
-          <Skeleton className="h-[240px] w-full rounded-2xl" />
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="space-y-4">
-              <Skeleton className="h-48 w-full rounded-2xl" />
-              <Skeleton className="h-48 w-full rounded-2xl" />
-            </div>
-            <div className="space-y-4">
-              <Skeleton className="h-64 w-full rounded-2xl" />
-              <Skeleton className="h-48 w-full rounded-2xl" />
-            </div>
+          <Skeleton className="h-60 w-full rounded-2xl" />
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Skeleton className="h-64 w-full rounded-2xl" />
+            <Skeleton className="h-64 w-full rounded-2xl" />
           </div>
         </div>
       </PageWrapper>
@@ -668,1530 +615,201 @@ export default function AdminArtistDetailPage() {
   }
 
   return (
-    <PageWrapper
-      title="Artist Details"
-      subtitle={`Managing ${artist?.name || "Artist"}`}>
-      {/* Back Button */}
-      <Link
-        to="/admin/artists"
-        className="inline-flex items-center gap-2 text-sm text-[#8D7B77] hover:text-white transition-all mb-6">
-        <ArrowLeft size={16} />
-        Back to Artists
+    <PageWrapper title="Artist Details" subtitle={`Managing ${artist?.name || "Artist"}`}>
+      <Link to="/admin/artists" className="mb-6 inline-flex items-center gap-2 text-sm text-[#8D7B77] transition-all hover:text-white">
+        <ArrowLeft size={16} /> Back to Artists
       </Link>
 
-      {/* Header Banner */}
+      {saveError && (
+        <div className="mb-5 flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">
+          <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+          <span className="flex-1">{saveError}</span>
+          <button type="button" onClick={() => void fetchArtist(true)} disabled={loading || busy} className="rounded-lg border border-red-300/20 px-2.5 py-1 text-xs disabled:opacity-50">Reload</button>
+        </div>
+      )}
+
       <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-surface">
-        <div className="h-[200px] w-full" style={headerBannerStyle} />
+        <div className="h-52 w-full" style={headerBannerStyle} />
         <div className="absolute inset-0 bg-gradient-to-b from-black/10 via-black/25 to-black/65" />
-
-        <div className="relative px-6 pb-6 -mt-12">
-          <div className="flex items-end gap-6">
-            <div className="h-[88px] w-[88px] rounded-2xl border-2 border-white/10 bg-background overflow-hidden shadow-xl">
-              {artist?.profileImage ? (
-                <img
-                  src={artist.profileImage}
-                  alt={artist.name ?? artist.email}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="h-full w-full flex items-center justify-center text-[#8D7B77]">
-                  <User size={32} />
-                </div>
-              )}
+        <div className="relative -mt-12 px-6 pb-6">
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-end">
+            <div className="h-[88px] w-[88px] shrink-0 overflow-hidden rounded-2xl border-2 border-white/10 bg-background shadow-xl">
+              {profileUrl ? <img src={profileUrl} alt={artist?.name ?? artist?.email ?? "Artist"} className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center text-[#8D7B77]"><User size={32} /></div>}
             </div>
-
-            <div className="flex-1 min-w-0 pb-2">
-              <div className="flex items-center gap-3 flex-wrap">
-                <h1 className="text-3xl sm:text-4xl font-bold text-white truncate">
-                  {artist?.name ?? "Unnamed Artist"}
-                </h1>
+            <div className="min-w-0 flex-1 pb-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <h1 className="truncate text-3xl font-bold text-white sm:text-4xl">{artist?.name ?? "Unnamed Artist"}</h1>
                 <VerifiedBadge verified={Boolean(artist?.isVerified)} />
-                <StatusBadge status={status} isDeleted={isDeleted} />
+                <StatusBadge status={status} isDeleted={artist?.isDeleted} />
               </div>
-              <div className="flex items-center gap-3 mt-1">
-                <Mail size={14} className="text-[#8D7B77]" />
-                <span className="text-sm text-[#8D7B77]">{artist?.email}</span>
-                {artist?.phone && (
-                  <>
-                    <span className="text-[#8D7B77]">•</span>
-                    <Phone size={14} className="text-[#8D7B77]" />
-                    <span className="text-sm text-[#8D7B77]">
-                      {artist.phone}
-                    </span>
-                  </>
-                )}
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[#8D7B77]">
+                <span className="flex items-center gap-1.5"><Mail size={14} />{artist?.email}</span>
+                {artist?.phone && <span className="flex items-center gap-1.5"><Phone size={14} />{artist.phone}</span>}
               </div>
             </div>
-
             <div className="flex items-center gap-3 pb-2">
-              <Toggle
-                checked={Boolean(artist?.isVerified)}
-                onChange={(v) => {
-                  if (!busy) setVerified(v);
-                }}
-              />
-              <span className="text-xs text-[#8D7B77]">
-                {Boolean(artist?.isVerified) ? "Verified" : "Verify"}
-              </span>
+              <Toggle checked={Boolean(artist?.isVerified)} disabled={busy} onChange={(value) => void setVerified(value)} />
+              <span className="text-xs text-[#8D7B77]">{artist?.isVerified ? "Verified" : "Verify"}</span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Tab Navigation */}
       <div className="mt-6 border-b border-white/10">
         <nav className="flex gap-1">
-          <button
-            onClick={() => setActiveDetailTab("PROFILE")}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeDetailTab === "PROFILE"
-                ? "border-primary text-primary"
-                : "border-transparent text-[#8D7B77] hover:text-white"
-            }`}>
-            <User size={18} />
-            Profile
-          </button>
-          <button
-            onClick={() => setActiveDetailTab("AGREEMENT")}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeDetailTab === "AGREEMENT"
-                ? "border-primary text-primary"
-                : "border-transparent text-[#8D7B77] hover:text-white"
-            }`}>
-            <FileText size={18} />
-            Agreement
-          </button>
+          <button type="button" onClick={() => setActiveTab("PROFILE")} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium ${activeTab === "PROFILE" ? "border-primary text-primary" : "border-transparent text-[#8D7B77] hover:text-white"}`}><User size={18} /> Profile</button>
+          <button type="button" onClick={() => setActiveTab("AGREEMENT")} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium ${activeTab === "AGREEMENT" ? "border-primary text-primary" : "border-transparent text-[#8D7B77] hover:text-white"}`}><FileText size={18} /> Agreement</button>
         </nav>
       </div>
 
-      {/* Main Content */}
-      {activeDetailTab === "PROFILE" && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-          {/* Left Column */}
+      {activeTab === "PROFILE" && (
+        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div className="space-y-6">
-            {/* Subscription Pricing */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-primary/10">
-                  <DollarSign size={18} className="text-primary" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Subscription Pricing
-                </h3>
-              </div>
+            <section className="rounded-2xl border border-white/5 bg-surface p-6">
+              <div className="mb-5 flex items-center gap-3"><div className="rounded-xl bg-primary/10 p-2"><Music size={18} className="text-primary" /></div><h2 className="text-sm font-semibold text-white">Subscription Pricing</h2></div>
+              <div className="rounded-xl border border-white/5 bg-black/20 p-3"><div className="text-xs text-[#8D7B77]">Current monthly price</div><div className="mt-1 text-lg font-bold text-white">{formatPrice(artist?.subscriptionPrice ?? 0)}</div></div>
+              <label className="mt-4 block text-xs uppercase tracking-wider text-[#8D7B77]">Update monthly INR price</label>
+              <input type="number" min="0.01" step="0.01" value={draftSubscriptionPrice} onChange={(event) => setDraftSubscriptionPrice(event.target.value)} disabled={busy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-4 text-white outline-none focus:border-primary/50 disabled:opacity-50" />
+            </section>
 
-              <div className="flex items-center justify-between p-3 rounded-xl bg-black/20 border border-white/5">
-                <span className="text-sm text-[#8D7B77]">Current Price</span>
-                <span className="text-lg font-bold text-white">
-                  {formatPrice(artist?.subscriptionPrice ?? 0)}
-                </span>
-              </div>
-
-              <div className="mt-4">
-                <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                  Update Price
-                </label>
-                <input
-                  value={draftSubscriptionPrice}
-                  onChange={(e) => setDraftSubscriptionPrice(e.target.value)}
-                  disabled={busy}
-                  className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                  placeholder="0"
-                  inputMode="decimal"
-                />
-              </div>
-            </div>
-
-            {/* Professional Info */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-blue-500/10">
-                  <Music size={18} className="text-blue-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Professional Info
-                </h3>
-              </div>
-
+            <section className="rounded-2xl border border-white/5 bg-surface p-6">
+              <div className="mb-5 flex items-center gap-3"><div className="rounded-xl bg-blue-500/10 p-2"><Settings size={18} className="text-blue-400" /></div><h2 className="text-sm font-semibold text-white">Artist Configuration</h2></div>
               <div className="space-y-4">
-                <div>
-                  <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                    Genre
-                  </label>
-                  <input
-                    value={draftGenre}
-                    onChange={(e) => setDraftGenre(e.target.value)}
-                    disabled={busy}
-                    className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                    placeholder="Hip-hop, Pop, Classical..."
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                    Revenue Share %
-                  </label>
-                  <input
-                    value={draftRevenueShare}
-                    onChange={(e) => setDraftRevenueShare(e.target.value)}
-                    disabled={busy}
-                    className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                    placeholder="90"
-                    inputMode="decimal"
-                  />
-                  {artist?.agreementAccepted && (
-                    <p className="text-xs text-[#8D7B77] mt-1.5">
-                      <span className="text-amber-400">Note:</span> Changes only apply to future agreements. Current agreement: {artist.artistRevenueShare}% artist / {artist.platformRevenueShare}% platform
-                    </p>
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setShowRevenueModal(true)}
-                  className="w-full h-[42px] rounded-xl border border-primary/30 bg-primary/10 text-sm text-primary hover:bg-primary/20 transition-all flex items-center justify-center gap-2">
-                  <Settings size={16} />
-                  Manage Future Revenue
-                </button>
-
-                <div>
-                  <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                    Social Links (JSON)
-                  </label>
-                  <textarea
-                    value={draftSocialLinks}
-                    onChange={(e) => setDraftSocialLinks(e.target.value)}
-                    disabled={busy}
-                    rows={4}
-                    className="mt-1.5 w-full rounded-xl bg-black/30 border border-white/10 px-4 py-2 text-sm text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50 resize-none"
-                    placeholder='{"instagram":"https://...","spotify":"https://..."}'
-                  />
-                </div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Name</label><input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={busy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-4 text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Phone</label><input value={draftPhone} onChange={(event) => setDraftPhone(event.target.value)} disabled={busy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-4 text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Genre</label><input value={draftGenre} onChange={(event) => setDraftGenre(event.target.value)} disabled={busy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-4 text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Bio</label><textarea value={draftBio} onChange={(event) => setDraftBio(event.target.value)} rows={3} disabled={busy} className="mt-1.5 w-full resize-none rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Revenue share %</label><input type="number" min="0" max="100" step="1" value={draftRevenueShare} onChange={(event) => setDraftRevenueShare(event.target.value)} disabled={busy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-4 text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Social Links (JSON http(s) URLs only)</label><textarea value={draftSocialLinks} onChange={(event) => setDraftSocialLinks(event.target.value)} rows={4} disabled={busy} className="mt-1.5 w-full resize-none rounded-xl border border-white/10 bg-black/30 px-4 py-3 font-mono text-sm text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
+                <div><label className="text-xs uppercase tracking-wider text-[#8D7B77]">Admin Remarks</label><textarea value={draftAdminRemarks} onChange={(event) => setDraftAdminRemarks(event.target.value)} rows={3} disabled={busy} className="mt-1.5 w-full resize-none rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none focus:border-primary/50 disabled:opacity-50" /></div>
               </div>
-            </div>
-
-            {/* Artist Status */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-purple-500/10">
-                  <Shield size={18} className="text-purple-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Artist Status
-                </h3>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  disabled={busy || softDeleteBusy || isInactive}
-                  onClick={() => {
-                    setSoftDeleteError(null);
-                    setSoftDeleteOpen(true);
-                  }}
-                  className={`flex-1 h-[42px] rounded-xl border text-sm font-medium transition-all ${
-                    isInactive
-                      ? "border-white/10 bg-white/5 text-[#8D7B77] cursor-not-allowed"
-                      : "border-red-500/20 bg-red-500/5 text-red-400 hover:bg-red-500/10"
-                  }`}>
-                  <Trash2 size={16} className="inline mr-2" />
-                  Deactivate
-                </button>
-
-                <button
-                  type="button"
-                  disabled={busy || softDeleteBusy || !isInactive}
-                  onClick={reactivateArtist}
-                  className={`flex-1 h-[42px] rounded-xl border text-sm font-medium transition-all ${
-                    isInactive
-                      ? "border-green-500/20 bg-green-500/5 text-green-400 hover:bg-green-500/10"
-                      : "border-white/10 bg-white/5 text-[#8D7B77] cursor-not-allowed"
-                  }`}>
-                  <RefreshCw size={16} className="inline mr-2" />
-                  Reactivate
-                </button>
-              </div>
-
-              <div className="mt-3 text-xs text-[#8D7B77]">
-                Current Status:{" "}
-                <span
-                  className={`font-medium ${
-                    isInactive ? "text-red-400" : "text-green-400"
-                  }`}>
-                  {statusLabel}
-                </span>
-              </div>
-
-              {isInactive && isDeleted && (
-                <div className="mt-3 p-3 rounded-xl bg-red-500/5 border border-red-500/20">
-                  <p className="text-xs text-red-400">Account deactivated</p>
-                  {(artist as any)?.deletedAt && (
-                    <p className="text-xs text-[#8D7B77] mt-1">
-                      Deleted: {formatDateTime((artist as any)?.deletedAt)}
-                    </p>
-                  )}
-                  {(artist as any)?.deletionReason && (
-                    <p className="text-xs text-[#8D7B77] mt-0.5">
-                      Reason: {(artist as any)?.deletionReason}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {softDeleteError && (
-                <div className="mt-2 text-xs text-red-400">{softDeleteError}</div>
-              )}
-            </div>
+              <button type="button" disabled={busy} onClick={() => void saveAll()} className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-primary to-secondary font-medium text-white disabled:opacity-50"><Save size={16} />{busy ? "Saving…" : "Save Changes"}</button>
+            </section>
           </div>
 
-          {/* Right Column */}
           <div className="space-y-6">
-            {/* Agreement Information */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-purple-500/10">
-                  <FileText size={18} className="text-purple-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Agreement Information
-                </h3>
+            <section className="rounded-2xl border border-white/5 bg-surface p-6">
+              <div className="mb-5 flex items-center gap-3"><div className="rounded-xl bg-purple-500/10 p-2"><Shield size={18} className="text-purple-400" /></div><h2 className="text-sm font-semibold text-white">Artist Status</h2></div>
+              <div className="text-sm text-[#B8A6A1]">Current status: <span className={inactive ? "font-semibold text-red-400" : "font-semibold text-green-400"}>{inactive ? "DEACTIVATED" : "ACTIVE"}</span></div>
+              {artist?.isDeleted && <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-[#B8A6A1]">Deactivated: {formatDateTime(artist.deletedAt)}{artist.deletionReason ? ` · ${artist.deletionReason}` : ""}</div>}
+              <div className="mt-4 flex gap-3">
+                <button type="button" disabled={busy || softDeleteBusy || inactive} onClick={() => { setSoftDeleteError(null); setSoftDeleteOpen(true); }} className="h-11 flex-1 rounded-xl border border-red-500/20 bg-red-500/5 text-sm font-medium text-red-400 disabled:opacity-40">Deactivate</button>
+                <button type="button" disabled={busy || softDeleteBusy || !inactive} onClick={() => void reactivateArtist()} className="h-11 flex-1 rounded-xl border border-green-500/20 bg-green-500/5 text-sm font-medium text-green-400 disabled:opacity-40"><RefreshCw size={15} className="mr-1 inline" />Reactivate</button>
               </div>
+              {softDeleteError && <div className="mt-2 text-xs text-red-400">{softDeleteError}</div>}
+            </section>
 
-              {artist?.agreementAccepted ? (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Agreement Version
-                      </label>
-                      <div className="mt-1 text-sm text-white font-medium">
-                        {artist.agreementVersion || "v1"}
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Agreement ID
-                      </label>
-                      <div className="mt-1 text-sm text-white font-mono">
-                        {artist.agreementId || "—"}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Accepted Date
-                      </label>
-                      <div className="mt-1 text-sm text-white">
-                        {artist.agreementAcceptedAt ? formatDateTime(artist.agreementAcceptedAt) : "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Agreement Status
-                      </label>
-                      <div className="mt-1">
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-                          artist.agreementStatus === 'ACTIVE' || artist.agreementStatus === 'VERIFIED'
-                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                            : artist.agreementStatus === 'PENDING_APPROVAL'
-                            ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-                            : artist.agreementStatus === 'SUSPENDED'
-                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                            : artist.agreementStatus === 'REJECTED'
-                            ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                            : artist.agreementStatus === 'TERMINATED'
-                            ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                            : 'bg-gray-500/10 text-[#8D7B77] border border-gray-500/20'
-                        }`}>
-                          {artist.agreementStatus || "ACTIVE"}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Artist Share
-                      </label>
-                      <div className="mt-1 text-sm text-white font-medium">
-                        {artist.artistRevenueShare || 0}%
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Platform Share
-                      </label>
-                      <div className="mt-1 text-sm text-white font-medium">
-                        {artist.platformRevenueShare || 0}%
-                      </div>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                      Agreement Start Date
-                    </label>
-                    <div className="mt-1 text-sm text-white">
-                      {artist.agreementStartDate ? formatDateTime(artist.agreementStartDate) : "—"}
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/20">
-                    <div className="flex items-center gap-2">
-                      <CheckCircle size={16} className="text-emerald-400" />
-                      <span className="text-sm text-emerald-400 font-medium">
-                        Agreement Signed & Active
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const url = `/api/v1/admin/artists/${artistId}/agreement-pdf`;
-                        window.open(url, '_blank');
-                      }}
-                      className="h-[42px] rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white hover:bg-white/10 transition-all flex items-center justify-center gap-2">
-                      <Download size={16} />
-                      Download PDF
-                    </button>
-                    {artist.agreementStatus === 'PENDING_APPROVAL' ? (
-                      <>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={async () => {
-                            setBusy(true);
-                            try {
-                              await http.patch(`/api/v1/admin/artists/${artistId}/approve-agreement`);
-                              await fetchArtist();
-                            } catch (error: any) {
-                              console.error('Failed to approve agreement:', error);
-                            } finally {
-                              setBusy(false);
-                            }
-                          }}
-                          className="h-[42px] rounded-xl bg-emerald-500 text-white font-medium hover:bg-emerald-600 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                          <ShieldCheck size={16} />
-                          Approve Agreement
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={async () => {
-                            const reason = prompt('Please enter rejection reason:');
-                            if (reason) {
-                              setBusy(true);
-                              try {
-                                await http.patch(`/api/v1/admin/artists/${artistId}/reject-agreement`, { reason });
-                                await fetchArtist();
-                              } catch (error: any) {
-                                console.error('Failed to reject agreement:', error);
-                              } finally {
-                                setBusy(false);
-                              }
-                            }
-                          }}
-                          className="h-[42px] rounded-xl bg-red-500 text-white font-medium hover:bg-red-600 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                          <XCircle size={16} />
-                          Reject Agreement
-                        </button>
-                      </>
-                    ) : artist.agreementStatus === 'ACTIVE' ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={async () => {
-                          setBusy(true);
-                          try {
-                            await http.patch(`/api/v1/admin/artists/${artistId}/agreement-status`, { status: 'SUSPENDED' });
-                            await fetchArtist();
-                          } catch (error: any) {
-                            console.error('Failed to suspend agreement:', error);
-                          } finally {
-                            setBusy(false);
-                          }
-                        }}
-                        className="h-[42px] rounded-xl bg-amber-500 text-white font-medium hover:bg-amber-600 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                        <Shield size={16} />
-                        Suspend Agreement
-                      </button>
-                    ) : artist.agreementStatus === 'SUSPENDED' ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={async () => {
-                          setBusy(true);
-                          try {
-                            await http.patch(`/api/v1/admin/artists/${artistId}/agreement-status`, { status: 'ACTIVE' });
-                            await fetchArtist();
-                          } catch (error: any) {
-                            console.error('Failed to activate agreement:', error);
-                          } finally {
-                            setBusy(false);
-                          }
-                        }}
-                        className="h-[42px] rounded-xl bg-emerald-500 text-white font-medium hover:bg-emerald-600 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                        <ShieldCheck size={16} />
-                        Activate Agreement
-                      </button>
-                    ) : artist.agreementStatus === 'REJECTED' ? (
-                      <div className="col-span-2 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-                        Agreement has been rejected
-                      </div>
-                    ) : null}
-                  </div>
-
-                  {artist?.digitalSignature && !brokenSignature ? (
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Digital Signature
-                      </label>
-                      <div className="mt-1.5 p-3 rounded-xl bg-black/40 border border-white/10 flex justify-center items-center h-[115px]">
-                        <img
-                          src={artist.digitalSignature}
-                          alt="Artist signature"
-                          className="max-h-[95px] max-w-full object-contain"
-                          onError={() => setBrokenSignature(true)}
-                        />
-                      </div>
-                      <div className="flex items-center justify-between mt-2">
-                        <p className="text-xs text-[#8D7B77]">
-                          Signed: {artist.signatureSignedAt ? formatDateTime(artist.signatureSignedAt) : "—"}
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (artist.digitalSignature) {
-                              window.open(artist.digitalSignature, '_blank');
-                            }
-                          }}
-                          className="text-xs text-primary hover:text-primary/80 transition-all">
-                          View Full Signature
-                        </button>
-                      </div>
-                    </div>
-                  ) : artist?.digitalSignature ? (
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Digital Signature
-                      </label>
-                      <div className="p-6 rounded-xl bg-yellow-500/5 border border-yellow-500/10 flex flex-col items-center justify-center h-[115px] mt-1.5">
-                        <AlertTriangle className="w-6 h-6 text-yellow-500 mb-1" />
-                        <p className="text-xs text-yellow-500 font-semibold">Signature Not Available</p>
-                        <p className="text-[10px] text-[#8D7B77] mt-0.5">Agreement signature decryption failed</p>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
+            <section className="rounded-2xl border border-white/5 bg-surface p-6">
+              <div className="mb-5 flex items-center justify-between"><div className="flex items-center gap-3"><div className="rounded-xl bg-green-500/10 p-2"><FileText size={18} className="text-green-400" /></div><h2 className="text-sm font-semibold text-white">Content History</h2></div><button type="button" disabled={historyLoading} onClick={() => void fetchContentHistory()} className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-[#B8A6A1] disabled:opacity-50"><RefreshCw size={12} className={`mr-1 inline ${historyLoading ? "animate-spin" : ""}`} />Refresh</button></div>
+              <p className="mb-4 text-xs leading-relaxed text-[#8D7B77]">Read-only context on this screen. Content approval and takedown remain in the dedicated moderation workflow; destructive hard-delete is not a Phase-1 governance action.</p>
+              {historyError && <div className="mb-3 rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">{historyError}</div>}
+              {historyLoading ? (
+                <div className="space-y-2">{[0, 1].map((value) => <Skeleton key={value} className="h-14 w-full rounded-xl" />)}</div>
+              ) : historyItems.length === 0 ? (
+                <div className="py-8 text-center text-sm text-[#8D7B77]">No content found</div>
               ) : (
-                <div className="p-4 rounded-xl bg-yellow-500/5 border border-yellow-500/20">
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle size={16} className="text-yellow-400" />
-                    <span className="text-sm text-yellow-400 font-medium">
-                      Agreement Not Signed
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#8D7B77] mt-2">
-                    This artist has not completed the onboarding agreement.
-                  </p>
+                <div className="max-h-[360px] space-y-2 overflow-y-auto">
+                  {historyItems.map((item) => (
+                    <div key={item.id} className="flex items-center gap-3 rounded-xl border border-white/5 bg-white/5 p-3">
+                      <div className="rounded-lg bg-black/30 p-2"><FileText size={16} className="text-[#8D7B77]" /></div>
+                      <div className="min-w-0 flex-1"><div className="truncate text-sm text-white">{item.title}</div><div className="mt-0.5 text-xs text-[#8D7B77]">{item.type} · {formatDateTime(item.createdAt)}</div></div>
+                      <span className={`text-xs ${item.isApproved ? "text-green-400" : "text-amber-400"}`}>{item.isApproved ? "Approved" : "Pending"}</span>
+                    </div>
+                  ))}
                 </div>
               )}
-            </div>
+            </section>
 
-            {/* Terms & Conditions */}
-            {artist?.agreementAccepted && (
-              <div className="rounded-2xl border border-white/5 bg-surface p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-xl bg-blue-500/10">
-                      <FileText size={18} className="text-blue-400" />
-                    </div>
-                    <h3 className="text-sm font-semibold text-white">
-                      Terms & Conditions
-                    </h3>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowTermsModal(true)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 text-xs text-[#8D7B77] hover:text-white transition-all">
-                    <Settings size={12} />
-                    Manage Terms
-                  </button>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Terms Version
-                      </label>
-                      <div className="mt-1 text-sm text-white font-medium">
-                        {artist.termsVersion || "v1"}
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                        Accepted Date
-                      </label>
-                      <div className="mt-1 text-sm text-white">
-                        {artist.agreementAcceptedAt ? formatDateTime(artist.agreementAcceptedAt) : "—"}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-white/5 border border-white/10">
-                    <p className="text-xs text-[#8D7B77] mb-2">Agreement Status</p>
-                    <div className="flex items-center gap-2">
-                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-                        artist.agreementStatus === 'ACTIVE'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          : 'bg-gray-500/10 text-[#8D7B77] border border-gray-500/20'
-                      }`}>
-                        {artist.agreementStatus || "ACTIVE"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Agreement Timeline */}
-            {artist?.agreementAccepted && (
-              <div className="rounded-2xl border border-white/5 bg-surface p-6">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="p-2 rounded-xl bg-orange-500/10">
-                    <Clock size={18} className="text-orange-400" />
-                  </div>
-                  <h3 className="text-sm font-semibold text-white">
-                    Agreement Timeline
-                  </h3>
-                </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-start gap-3">
-                    <div className="w-2 h-2 rounded-full bg-primary mt-1.5 shrink-0" />
-                    <div className="flex-1">
-                      <p className="text-xs text-[#8D7B77]">Agreement Created</p>
-                      <p className="text-sm text-white">
-                        {artist.agreementStartDate ? formatDateTime(artist.agreementStartDate) : "—"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-2 h-2 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                    <div className="flex-1">
-                      <p className="text-xs text-[#8D7B77]">Agreement Signed</p>
-                      <p className="text-sm text-white">
-                        {artist.signatureSignedAt ? formatDateTime(artist.signatureSignedAt) : "—"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-2 h-2 rounded-full bg-blue-400 mt-1.5 shrink-0" />
-                    <div className="flex-1">
-                      <p className="text-xs text-[#8D7B77]">Artist Joined</p>
-                      <p className="text-sm text-white">
-                        {artist.accountCreatedDate ? formatDateTime(artist.accountCreatedDate) : "—"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-2 h-2 rounded-full bg-purple-400 mt-1.5 shrink-0" />
-                    <div className="flex-1">
-                      <p className="text-xs text-[#8D7B77]">Revenue Version</p>
-                      <p className="text-sm text-white">
-                        {artist.agreementVersion || "v1"} ({artist.artistRevenueShare}% / {artist.platformRevenueShare}%)
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-2 h-2 rounded-full bg-amber-400 mt-1.5 shrink-0" />
-                    <div className="flex-1">
-                      <p className="text-xs text-[#8D7B77]">Terms Version</p>
-                      <p className="text-sm text-white">
-                        {artist.termsVersion || "v1"}
-                      </p>
-                    </div>
-                  </div>
-                  {artist.agreementStatus === 'VERIFIED' && (
-                    <div className="flex items-start gap-3">
-                      <div className="w-2 h-2 rounded-full bg-teal-400 mt-1.5 shrink-0" />
-                      <div className="flex-1">
-                        <p className="text-xs text-[#8D7B77]">Agreement Verified</p>
-                        <p className="text-sm text-white">
-                          Admin verified the agreement
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                  {artist.agreementStatus === 'SUSPENDED' && (
-                    <div className="flex items-start gap-3">
-                      <div className="w-2 h-2 rounded-full bg-red-400 mt-1.5 shrink-0" />
-                      <div className="flex-1">
-                        <p className="text-xs text-[#8D7B77]">Agreement Suspended</p>
-                        <p className="text-sm text-white">
-                          Agreement suspended by admin
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Audit Trail */}
-            {artist?.agreementAccepted && (
-              <div className="rounded-2xl border border-white/5 bg-surface p-6">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="p-2 rounded-xl bg-indigo-500/10">
-                    <Activity size={18} className="text-indigo-400" />
-                  </div>
-                  <h3 className="text-sm font-semibold text-white">
-                    Agreement Audit Trail
-                  </h3>
-                </div>
-
-                <div className="space-y-3">
-                  <div className="p-3 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center justify-between mb-1">
-                      <p className="text-xs text-[#8D7B77]">Agreement Signed</p>
-                      <p className="text-xs text-[#8D7B77]">
-                        {artist.agreementAcceptedAt ? formatDateTime(artist.agreementAcceptedAt) : "—"}
-                      </p>
-                    </div>
-                    <p className="text-sm text-white">
-                      Artist completed onboarding and signed agreement
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center justify-between mb-1">
-                      <p className="text-xs text-[#8D7B77]">Digital Signature</p>
-                      <p className="text-xs text-[#8D7B77]">
-                        {artist.signatureSignedAt ? formatDateTime(artist.signatureSignedAt) : "—"}
-                      </p>
-                    </div>
-                    <p className="text-sm text-white">
-                      Artist provided digital signature
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center justify-between mb-1">
-                      <p className="text-xs text-[#8D7B77]">Current Status</p>
-                      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium ${
-                        artist.agreementStatus === 'ACTIVE' || artist.agreementStatus === 'VERIFIED'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          : artist.agreementStatus === 'SUSPENDED'
-                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                          : 'bg-gray-500/10 text-[#8D7B77] border border-gray-500/20'
-                      }`}>
-                        {artist.agreementStatus || "ACTIVE"}
-                      </span>
-                    </div>
-                    <p className="text-sm text-white">
-                      Agreement is currently {artist.agreementStatus?.toLowerCase() || "active"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Content History */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-green-500/10">
-                    <FileText size={18} className="text-green-400" />
-                  </div>
-                  <h3 className="text-sm font-semibold text-white">
-                    Content History
-                  </h3>
-                </div>
-                <button
-                  type="button"
-                  disabled={historyLoading}
-                  onClick={() => fetchContentHistory(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 text-xs text-[#8D7B77] hover:text-white transition-all">
-                  <RefreshCw
-                    size={12}
-                    className={historyLoading ? "animate-spin" : ""}
-                  />
-                  Refresh
-                </button>
-              </div>
-
-              {historyError && (
-                <div className="mb-3 p-3 rounded-xl bg-red-500/5 border border-red-500/20 text-xs text-red-400">
-                  {historyError}
-                </div>
-              )}
-
-              <div className="flex items-center gap-2 mb-4">
-                <button
-                  type="button"
-                  onClick={() => setHistoryTab("AUDIO")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                    historyTab === "AUDIO"
-                      ? "bg-primary/10 text-primary border border-primary/20"
-                      : "text-[#8D7B77] hover:text-white"
-                  }`}>
-                  <Volume2 size={12} className="inline mr-1" />
-                  Audio
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setHistoryTab("VIDEO")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                    historyTab === "VIDEO"
-                      ? "bg-primary/10 text-primary border border-primary/20"
-                      : "text-[#8D7B77] hover:text-white"
-                  }`}>
-                  <Video size={12} className="inline mr-1" />
-                  Video
-                </button>
-
-                <select
-                  value={historyFilter}
-                  onChange={(e) => setHistoryFilter(e.target.value as any)}
-                  className="ml-auto h-[30px] rounded-lg bg-black/30 border border-white/10 px-2 text-xs text-white outline-none focus:border-primary/50">
-                  <option value="ALL">All</option>
-                  <option value="AUDIO_ONLY">Audio Only</option>
-                  <option value="VIDEO_ONLY">Video Only</option>
-                </select>
-              </div>
-
-              <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                {historyLoading ? (
-                  Array.from({ length: 2 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/5">
-                      <Skeleton className="h-[46px] w-[46px] rounded-xl" />
-                      <div className="flex-1">
-                        <Skeleton className="h-3 w-32" />
-                        <Skeleton className="h-2 w-20 mt-1" />
-                      </div>
-                      <Skeleton className="h-6 w-16" />
-                    </div>
-                  ))
-                ) : filteredHistoryItems.length === 0 ? (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-[#8D7B77]">No content found</p>
-                  </div>
-                ) : (
-                  filteredHistoryItems.map((item) => {
-                    const typeLabel = getDisplayType(item);
-                    const approved = Boolean(item.isApproved);
-                    const thumbSrc = toAbsoluteUrl(item.thumbnailUrl);
-                    return (
-                      <div
-                        key={item.id}
-                        className="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/5 hover:border-primary/30 transition-all">
-                        <div className="h-[46px] w-[46px] rounded-xl bg-black/30 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
-                          {thumbSrc ? (
-                            <img
-                              src={thumbSrc}
-                              alt=""
-                              className="h-full w-full object-cover"
-                            />
-                          ) : (
-                            <FileText size={18} className="text-[#8D7B77]" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-white truncate">
-                            {item.title}
-                          </p>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            <span className="text-xs text-[#8D7B77]">
-                              {typeLabel}
-                            </span>
-                            <span className="text-[#8D7B77]">•</span>
-                            <span
-                              className={`text-xs ${
-                                approved ? "text-green-400" : "text-yellow-400"
-                              }`}>
-                              {approved ? "Published" : "Pending"}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setPreviewItem(item)}
-                            className="p-1.5 rounded-lg hover:bg-white/10 transition-all text-[#8D7B77] hover:text-white"
-                            title="Preview">
-                            <Eye size={14} />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={historyBusyId === item.id}
-                            onClick={() => setConfirmDelete(item)}
-                            className="p-1.5 rounded-lg hover:bg-red-500/10 transition-all text-red-400"
-                            title="Delete">
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            {/* About Artist */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-yellow-500/10">
-                  <User size={18} className="text-yellow-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">About Artist</h3>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between p-3 rounded-xl bg-black/20 border border-white/5">
-                  <span className="text-xs text-[#8D7B77]">Account Created</span>
-                  <span className="text-sm text-white">
-                    {formatDateTime(artist?.accountCreatedDate)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between p-3 rounded-xl bg-black/20 border border-white/5">
-                  <span className="text-xs text-[#8D7B77]">Last Login</span>
-                  <span className="text-sm text-white">
-                    {formatDateTime(artist?.lastLogin)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between p-3 rounded-xl bg-black/20 border border-white/5">
-                  <span className="text-xs text-[#8D7B77]">Total Content</span>
-                  <span className="text-sm font-bold text-white">
-                    {artist?.totalContentCount ?? 0}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Profile Details */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-pink-500/10">
-                  <Edit size={18} className="text-pink-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Profile Details
-                </h3>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                    Name
-                  </label>
-                  <input
-                    value={draftName}
-                    onChange={(e) => setDraftName(e.target.value)}
-                    disabled={busy}
-                    className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                    placeholder="Artist name"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                    Phone
-                  </label>
-                  <input
-                    value={draftPhone}
-                    onChange={(e) => setDraftPhone(e.target.value)}
-                    disabled={busy}
-                    className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                    placeholder="+1 555 123 4567"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                    Bio
-                  </label>
-                  <textarea
-                    value={draftBio}
-                    onChange={(e) => setDraftBio(e.target.value)}
-                    disabled={busy}
-                    rows={3}
-                    className="mt-1.5 w-full rounded-xl bg-black/30 border border-white/10 px-4 py-2 text-sm text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50 resize-none"
-                    placeholder="Short bio"
-                  />
-                </div>
-              </div>
-
-              {saveError && (
-                <div className="mt-3 text-xs text-red-400">{saveError}</div>
-              )}
-
-              <button
-                type="button"
-                disabled={busy}
-                onClick={saveAll}
-                className="mt-4 w-full h-[42px] rounded-xl bg-gradient-to-r from-primary to-secondary text-white font-medium hover:shadow-lg hover:shadow-primary/30 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                <Save size={16} />
-                {busy ? "Saving..." : "Save Changes"}
-              </button>
-            </div>
-
-            {/* Admin Remarks */}
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-orange-500/10">
-                  <Settings size={18} className="text-orange-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Admin Remarks
-                </h3>
-              </div>
-
-              <textarea
-                value={draftAdminRemarks}
-                onChange={(e) => setDraftAdminRemarks(e.target.value)}
-                disabled={busy}
-                rows={4}
-                className="w-full rounded-xl bg-black/30 border border-white/10 px-4 py-2 text-sm text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50 resize-none"
-                placeholder="Internal notes visible only to admins..."
-              />
-            </div>
+            <section className="rounded-2xl border border-white/5 bg-surface p-6">
+              <div className="mb-4 flex items-center gap-3"><div className="rounded-xl bg-orange-500/10 p-2"><Activity size={18} className="text-orange-400" /></div><h2 className="text-sm font-semibold text-white">Account Context</h2></div>
+              <div className="space-y-2 text-sm"><div className="flex justify-between rounded-xl bg-black/20 p-3"><span className="text-[#8D7B77]">Created</span><span className="text-white">{formatDateTime(artist?.accountCreatedDate)}</span></div><div className="flex justify-between rounded-xl bg-black/20 p-3"><span className="text-[#8D7B77]">Last login</span><span className="text-white">{formatDateTime(artist?.lastLogin)}</span></div><div className="flex justify-between rounded-xl bg-black/20 p-3"><span className="text-[#8D7B77]">Total content</span><span className="font-semibold text-white">{artist?.totalContentCount ?? 0}</span></div></div>
+              <button type="button" onClick={() => setShowRevenueModal(true)} className="mt-4 h-10 w-full rounded-xl border border-primary/30 bg-primary/10 text-sm text-primary">Manage Future Revenue</button>
+              {artist?.agreementAccepted && <button type="button" onClick={() => setShowTermsModal(true)} className="mt-2 h-10 w-full rounded-xl border border-white/10 bg-white/5 text-sm text-[#B8A6A1]">Publish Future Terms Version</button>}
+            </section>
           </div>
         </div>
       )}
 
-      {/* Agreement Tab Content */}
-      {activeDetailTab === "AGREEMENT" && (
-        <div className="mt-6 space-y-6">
-          {/* Agreement Information */}
-          {artist?.agreementAccepted ? (
+      {activeTab === "AGREEMENT" && (
+        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <section className="rounded-2xl border border-white/5 bg-surface p-6">
+            <div className="mb-5 flex items-center gap-3"><div className="rounded-xl bg-primary/10 p-2"><FileText size={18} className="text-primary" /></div><h2 className="text-sm font-semibold text-white">Agreement Details</h2></div>
+            {!artist?.agreementAccepted ? (
+              <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-6 text-center"><AlertTriangle size={24} className="mx-auto mb-2 text-yellow-400" /><div className="text-sm font-medium text-yellow-300">Agreement Not Signed</div></div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-xl bg-white/5 p-3"><div className="text-xs text-[#8D7B77]">Agreement ID</div><div className="mt-1 truncate font-mono text-white">{artist.agreementId || "—"}</div></div>
+                  <div className="rounded-xl bg-white/5 p-3"><div className="text-xs text-[#8D7B77]">Status</div><div className="mt-1 font-semibold text-white">{agreementStatus || "ACTIVE"}</div></div>
+                  <div className="rounded-xl bg-white/5 p-3"><div className="text-xs text-[#8D7B77]">Artist Share</div><div className="mt-1 font-semibold text-primary">{artist.artistRevenueShare ?? 0}%</div></div>
+                  <div className="rounded-xl bg-white/5 p-3"><div className="text-xs text-[#8D7B77]">Platform Share</div><div className="mt-1 font-semibold text-secondary">{artist.platformRevenueShare ?? 0}%</div></div>
+                  <div className="rounded-xl bg-white/5 p-3"><div className="text-xs text-[#8D7B77]">Version</div><div className="mt-1 text-white">{artist.agreementVersion || "—"}</div></div>
+                  <div className="rounded-xl bg-white/5 p-3"><div className="text-xs text-[#8D7B77]">Terms</div><div className="mt-1 text-white">{artist.termsVersion || "—"}</div></div>
+                </div>
+
+                <div className="mt-5 flex flex-wrap gap-3">
+                  <button type="button" disabled={busy} onClick={() => void handleDownloadPdf()} className="h-11 flex-1 rounded-xl border border-primary/30 bg-primary/10 px-4 text-sm text-primary disabled:opacity-50"><Download size={16} className="mr-1 inline" />{busy ? "Working…" : "Download PDF"}</button>
+                  {agreementStatus === "PENDING_APPROVAL" && <button type="button" disabled={busy} onClick={() => void runAgreementAction(`/api/v1/admin/artists/${artist.id}/approve-agreement`, undefined, "Failed to approve agreement")} className="h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white disabled:opacity-50"><CheckCircle size={16} className="mr-1 inline" />Approve</button>}
+                  {agreementStatus === "PENDING_APPROVAL" && <button type="button" disabled={busy} onClick={() => void rejectAgreement()} className="h-11 flex-1 rounded-xl bg-red-600 px-4 text-sm font-medium text-white disabled:opacity-50"><XCircle size={16} className="mr-1 inline" />Reject</button>}
+                  {agreementStatus === "ACTIVE" && <button type="button" disabled={busy} onClick={() => { if (!window.confirm("Suspend this agreement?")) return; void runAgreementAction(`/api/v1/admin/artists/${artist.id}/agreement-status`, { status: "SUSPENDED" }, "Failed to suspend agreement"); }} className="h-11 flex-1 rounded-xl bg-amber-600 px-4 text-sm font-medium text-white disabled:opacity-50"><Shield size={16} className="mr-1 inline" />Suspend</button>}
+                  {agreementStatus === "SUSPENDED" && <button type="button" disabled={busy} onClick={() => void runAgreementAction(`/api/v1/admin/artists/${artist.id}/agreement-status`, { status: "ACTIVE" }, "Failed to activate agreement")} className="h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white disabled:opacity-50"><ShieldCheck size={16} className="mr-1 inline" />Activate</button>}
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="space-y-6">
             <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-primary/10">
-                  <FileText size={18} className="text-primary" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Agreement Details
-                </h3>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="p-3 rounded-xl bg-white/5">
-                  <p className="text-xs text-[#8D7B77] mb-1">Agreement ID</p>
-                  <p className="text-sm text-white font-mono">{artist.agreementId || "—"}</p>
-                </div>
-                <div className="p-3 rounded-xl bg-white/5">
-                  <p className="text-xs text-[#8D7B77] mb-1">Status</p>
-                  <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium ${
-                    artist.agreementStatus === 'ACTIVE' || artist.agreementStatus === 'VERIFIED'
-                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                      : artist.agreementStatus === 'PENDING_APPROVAL'
-                      ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-                      : artist.agreementStatus === 'REJECTED'
-                      ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                      : artist.agreementStatus === 'SUSPENDED'
-                      ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                      : 'bg-gray-500/10 text-[#8D7B77] border border-gray-500/20'
-                  }`}>
-                    {artist.agreementStatus || "ACTIVE"}
-                  </span>
-                </div>
-                <div className="p-3 rounded-xl bg-white/5">
-                  <p className="text-xs text-[#8D7B77] mb-1">Artist Share</p>
-                  <p className="text-lg font-bold text-primary">{artist.artistRevenueShare}%</p>
-                </div>
-                <div className="p-3 rounded-xl bg-white/5">
-                  <p className="text-xs text-[#8D7B77] mb-1">Platform Share</p>
-                  <p className="text-lg font-bold text-secondary">{artist.platformRevenueShare}%</p>
-                </div>
-                <div className="p-3 rounded-xl bg-white/5">
-                  <p className="text-xs text-[#8D7B77] mb-1">Agreement Version</p>
-                  <p className="text-sm text-white">{artist.agreementVersion || "v1"}</p>
-                </div>
-                <div className="p-3 rounded-xl bg-white/5">
-                  <p className="text-xs text-[#8D7B77] mb-1">Terms Version</p>
-                  <p className="text-sm text-white">{artist.termsVersion || "v1"}</p>
-                </div>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={handleDownloadPdf}
-                  disabled={busy}
-                  className="flex-1 h-[42px] rounded-xl border border-primary/30 bg-primary/10 text-sm text-primary hover:bg-primary/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50">
-                  <Download size={16} />
-                  {busy ? "Downloading..." : "Download PDF"}
-                </button>
-                {artist.agreementStatus === 'PENDING_APPROVAL' && (
-                  <>
-                    <button
-                      onClick={async () => {
-                        await http.patch(`/api/v1/admin/artists/${artist.id}/approve-agreement`);
-                        fetchArtist(true);
-                      }}
-                      className="flex-1 h-[42px] rounded-xl bg-emerald-500 text-white font-medium hover:bg-emerald-600 transition-all flex items-center justify-center gap-2">
-                      <CheckCircle size={16} />
-                      Approve
-                    </button>
-                    <button
-                      onClick={async () => {
-                        await http.patch(`/api/v1/admin/artists/${artist.id}/reject-agreement`);
-                        fetchArtist(true);
-                      }}
-                      className="flex-1 h-[42px] rounded-xl bg-red-500 text-white font-medium hover:bg-red-600 transition-all flex items-center justify-center gap-2">
-                      <XCircle size={16} />
-                      Reject
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-dashed border-white/10 bg-surface p-12 text-center">
-              <FileText className="w-16 h-16 text-[#8D7B77] mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-white mb-2">No Agreement Signed</h3>
-              <p className="text-sm text-[#8D7B77]">This artist has not signed an agreement yet.</p>
-            </div>
-          )}
-
-          {/* Digital Signature */}
-          {artist?.digitalSignature && (
-            <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-purple-500/10">
-                  <ShieldCheck size={18} className="text-purple-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Digital Signature
-                </h3>
-              </div>
-
-              {!brokenSignature ? (
-                <div className="p-4 rounded-xl bg-black/40 border border-white/10 flex justify-center items-center h-[140px]">
-                  <img
-                    src={artist.digitalSignature}
-                    alt="Digital Signature"
-                    className="max-h-[120px] max-w-full object-contain"
-                    onError={() => setBrokenSignature(true)}
-                  />
-                </div>
+              <div className="mb-4 flex items-center gap-3"><div className="rounded-xl bg-purple-500/10 p-2"><ShieldCheck size={18} className="text-purple-400" /></div><h2 className="text-sm font-semibold text-white">Digital Signature</h2></div>
+              {signatureUrl && !brokenSignature ? (
+                <div className="flex h-36 items-center justify-center rounded-xl border border-white/10 bg-black/40 p-4"><img src={signatureUrl} alt="Digital signature" className="max-h-28 max-w-full object-contain" onError={() => setBrokenSignature(true)} /></div>
               ) : (
-                <div className="p-6 rounded-xl bg-yellow-500/5 border border-yellow-500/10 flex flex-col items-center justify-center h-[140px]">
-                  <AlertTriangle className="w-6 h-6 text-yellow-500 mb-1" />
-                  <p className="text-xs text-yellow-500 font-semibold">Signature Not Available</p>
-                  <p className="text-[10px] text-[#8D7B77] mt-0.5">Agreement signature decryption failed</p>
-                </div>
+                <div className="flex h-36 flex-col items-center justify-center rounded-xl border border-yellow-500/10 bg-yellow-500/5"><AlertTriangle size={22} className="mb-2 text-yellow-500" /><div className="text-xs font-semibold text-yellow-400">Signature Not Available</div></div>
               )}
-
-              <div className="mt-4 grid grid-cols-2 gap-4 text-xs text-[#8D7B77]">
-                <div>
-                  <p className="mb-1">Signed At</p>
-                  <p className="text-white">{artist.signatureSignedAt ? formatDateTime(artist.signatureSignedAt) : "—"}</p>
-                </div>
-                <div>
-                  <p className="mb-1">IP Address</p>
-                  <p className="text-white">{artist.signatureIpAddress || "—"}</p>
-                </div>
-              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-xs"><div><div className="text-[#8D7B77]">Signed At</div><div className="mt-1 text-white">{formatDateTime(artist?.signatureSignedAt)}</div></div><div><div className="text-[#8D7B77]">IP Address</div><div className="mt-1 text-white">{artist?.signatureIpAddress || "—"}</div></div></div>
             </div>
-          )}
 
-          {/* Agreement Timeline */}
-          {artist?.agreementAccepted && (
             <div className="rounded-2xl border border-white/5 bg-surface p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 rounded-xl bg-orange-500/10">
-                  <Clock size={18} className="text-orange-400" />
-                </div>
-                <h3 className="text-sm font-semibold text-white">
-                  Agreement Timeline
-                </h3>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-start gap-3">
-                  <div className="w-2 h-2 rounded-full bg-primary mt-1.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs text-[#8D7B77]">Agreement Created</p>
-                    <p className="text-sm text-white">
-                      {artist.agreementStartDate ? formatDateTime(artist.agreementStartDate) : "—"}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-3">
-                  <div className="w-2 h-2 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs text-[#8D7B77]">Agreement Signed</p>
-                    <p className="text-sm text-white">
-                      {artist.signatureSignedAt ? formatDateTime(artist.signatureSignedAt) : "—"}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-3">
-                  <div className="w-2 h-2 rounded-full bg-blue-400 mt-1.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs text-[#8D7B77]">Artist Joined</p>
-                    <p className="text-sm text-white">
-                      {artist.accountCreatedDate ? formatDateTime(artist.accountCreatedDate) : "—"}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-3">
-                  <div className="w-2 h-2 rounded-full bg-purple-400 mt-1.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs text-[#8D7B77]">Revenue Version</p>
-                    <p className="text-sm text-white">
-                      {artist.agreementVersion || "v1"} ({artist.artistRevenueShare}% / {artist.platformRevenueShare}%)
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-3">
-                  <div className="w-2 h-2 rounded-full bg-amber-400 mt-1.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs text-[#8D7B77]">Terms Version</p>
-                    <p className="text-sm text-white">
-                      {artist.termsVersion || "v1"}
-                    </p>
-                  </div>
-                </div>
-              </div>
+              <div className="mb-4 flex items-center gap-3"><div className="rounded-xl bg-orange-500/10 p-2"><Clock size={18} className="text-orange-400" /></div><h2 className="text-sm font-semibold text-white">Agreement Timeline</h2></div>
+              <div className="space-y-3 text-sm"><div className="flex justify-between"><span className="text-[#8D7B77]">Created</span><span className="text-white">{formatDateTime(artist?.agreementStartDate)}</span></div><div className="flex justify-between"><span className="text-[#8D7B77]">Signed</span><span className="text-white">{formatDateTime(artist?.signatureSignedAt)}</span></div><div className="flex justify-between"><span className="text-[#8D7B77]">Artist joined</span><span className="text-white">{formatDateTime(artist?.accountCreatedDate)}</span></div></div>
             </div>
-          )}
+          </section>
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
-      {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setConfirmDelete(null)}
-          />
-          <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-surface p-6 shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-red-500/10">
-                <AlertTriangle size={20} className="text-red-400" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">
-                Confirm Deletion
-              </h3>
-            </div>
-            <p className="text-sm text-[#8D7B77]">
-              Are you sure you want to delete this content?
-            </p>
-            <p className="text-sm text-white mt-1 font-medium">
-              {confirmDelete.title}
-            </p>
-            <div className="flex items-center gap-3 mt-6">
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(null)}
-                className="flex-1 h-[42px] rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white transition-all">
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={historyBusyId === confirmDelete.id}
-                onClick={() => deleteContent(confirmDelete)}
-                className="flex-1 h-[42px] rounded-xl bg-red-500 text-white font-medium hover:bg-red-600 transition-all disabled:opacity-50">
-                {historyBusyId === confirmDelete.id ? "Deleting..." : "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Preview Modal */}
-      {previewItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setPreviewItem(null)}
-          />
-          <div className="relative w-full max-w-2xl rounded-2xl border border-white/10 bg-surface p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-lg font-semibold text-white">
-                  {previewItem.title}
-                </h3>
-                <p className="text-sm text-[#8D7B77]">
-                  Type: {getDisplayType(previewItem)}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPreviewItem(null)}
-                className="p-2 rounded-xl hover:bg-white/10 transition-all">
-                <XCircle size={20} className="text-[#8D7B77]" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              {hasAudioForItem(previewItem) && (
-                <div className="rounded-xl bg-black/30 border border-white/5 p-4">
-                  <p className="text-xs text-[#8D7B77] mb-2">Audio Preview</p>
-                  <audio
-                    src={
-                      toAbsoluteUrl(
-                        previewItem.audioUrl ?? previewItem.mediaUrl
-                      ) ?? undefined
-                    }
-                    controls
-                    className="w-full"
-                  />
-                </div>
-              )}
-              {hasVideoForItem(previewItem) && (
-                <div className="rounded-xl bg-black/30 border border-white/5 p-4">
-                  <p className="text-xs text-[#8D7B77] mb-2">Video Preview</p>
-                  <video
-                    src={
-                      toAbsoluteUrl(
-                        previewItem.videoUrl ?? previewItem.mediaUrl
-                      ) ?? undefined
-                    }
-                    controls
-                    className="w-full rounded-lg max-h-[320px]"
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Soft Delete Modal */}
       {softDeleteOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => {
-              if (!softDeleteBusy) setSoftDeleteOpen(false);
-            }}
-          />
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => { if (!softDeleteBusy) setSoftDeleteOpen(false); }} />
           <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-surface p-6 shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-red-500/10">
-                <AlertTriangle size={20} className="text-red-400" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">
-                Deactivate Artist
-              </h3>
-            </div>
-            <p className="text-sm text-[#8D7B77]">
-              This will hide the artist and all content from the Fan App
-              immediately.
-            </p>
-
-            <div className="mt-4">
-              <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                Reason (required)
-              </label>
-              <textarea
-                value={softDeleteReason}
-                onChange={(e) => setSoftDeleteReason(e.target.value)}
-                disabled={softDeleteBusy}
-                rows={3}
-                className="mt-1.5 w-full rounded-xl bg-black/30 border border-white/10 px-4 py-2 text-sm text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50 resize-none"
-                placeholder="e.g. Policy violation, requested deactivation..."
-              />
-              {softDeleteError && (
-                <div className="mt-1.5 text-xs text-red-400">
-                  {softDeleteError}
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-3 mt-6">
-              <button
-                type="button"
-                disabled={softDeleteBusy}
-                onClick={() => setSoftDeleteOpen(false)}
-                className="flex-1 h-[42px] rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white transition-all disabled:opacity-50">
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={softDeleteBusy}
-                onClick={submitSoftDelete}
-                className="flex-1 h-[42px] rounded-xl bg-red-500 text-white font-medium hover:bg-red-600 transition-all disabled:opacity-50">
-                {softDeleteBusy ? "Deactivating..." : "Deactivate"}
-              </button>
-            </div>
+            <div className="mb-4 flex items-center gap-3"><div className="rounded-xl bg-red-500/10 p-2"><AlertTriangle size={20} className="text-red-400" /></div><h3 className="text-lg font-semibold text-white">Deactivate Artist</h3></div>
+            <p className="text-sm text-[#8D7B77]">This changes account availability and must include an auditable reason.</p>
+            <textarea value={softDeleteReason} onChange={(event) => setSoftDeleteReason(event.target.value)} disabled={softDeleteBusy} rows={3} maxLength={500} className="mt-4 w-full resize-none rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none focus:border-primary/50 disabled:opacity-50" placeholder="Reason (3–500 characters)" />
+            {softDeleteError && <div className="mt-2 text-xs text-red-400">{softDeleteError}</div>}
+            <div className="mt-6 flex gap-3"><button type="button" disabled={softDeleteBusy} onClick={() => setSoftDeleteOpen(false)} className="h-11 flex-1 rounded-xl border border-white/10 bg-white/5 text-sm text-[#B8A6A1] disabled:opacity-50">Cancel</button><button type="button" disabled={softDeleteBusy} onClick={() => void submitSoftDelete()} className="h-11 flex-1 rounded-xl bg-red-600 text-sm font-medium text-white disabled:opacity-50">{softDeleteBusy ? "Deactivating…" : "Deactivate"}</button></div>
           </div>
         </div>
       )}
 
-      {/* Manage Future Revenue Modal */}
       {showRevenueModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => {
-              if (!revenueModalBusy) setShowRevenueModal(false);
-            }}
-          />
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => { if (!revenueModalBusy) setShowRevenueModal(false); }} />
           <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-surface p-6 shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-primary/10">
-                <Settings size={20} className="text-primary" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">
-                Manage Future Revenue
-              </h3>
-            </div>
-            <p className="text-sm text-[#8D7B77] mb-4">
-              This will update the revenue share configuration for future artist onboarding only. Existing signed agreements remain unchanged.
-            </p>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                  Artist Share %
-                </label>
-                <input
-                  value={futureArtistShare}
-                  onChange={(e) => setFutureArtistShare(e.target.value)}
-                  disabled={revenueModalBusy}
-                  className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                  placeholder="55"
-                  inputMode="decimal"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                  Platform Share %
-                </label>
-                <input
-                  value={futurePlatformShare}
-                  onChange={(e) => setFuturePlatformShare(e.target.value)}
-                  disabled={revenueModalBusy}
-                  className="mt-1.5 w-full h-[42px] rounded-xl bg-black/30 border border-white/10 px-4 text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50"
-                  placeholder="45"
-                  inputMode="decimal"
-                />
-              </div>
-              {artist?.agreementAccepted && (
-                <div className="p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
-                  <p className="text-xs text-amber-400">
-                    <strong>Note:</strong> Current agreement: {artist.artistRevenueShare}% artist / {artist.platformRevenueShare}% platform
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-3 mt-6">
-              <button
-                type="button"
-                disabled={revenueModalBusy}
-                onClick={() => setShowRevenueModal(false)}
-                className="flex-1 h-[42px] rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white transition-all disabled:opacity-50">
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={revenueModalBusy}
-                onClick={async () => {
-                  setRevenueModalBusy(true);
-                  try {
-                    await http.patch(`/api/v1/admin/revenue-share-config`, {
-                      artistShare: parseInt(futureArtistShare),
-                      platformShare: parseInt(futurePlatformShare)
-                    });
-                    setShowRevenueModal(false);
-                  } catch (error: any) {
-                    console.error('Failed to update revenue config:', error);
-                  } finally {
-                    setRevenueModalBusy(false);
-                  }
-                }}
-                className="flex-1 h-[42px] rounded-xl bg-primary text-white font-medium hover:bg-primary/90 transition-all disabled:opacity-50">
-                {revenueModalBusy ? "Updating..." : "Update Configuration"}
-              </button>
-            </div>
+            <div className="mb-4 flex items-center gap-3"><div className="rounded-xl bg-primary/10 p-2"><Settings size={20} className="text-primary" /></div><h3 className="text-lg font-semibold text-white">Manage Future Revenue</h3></div>
+            <p className="text-sm text-[#8D7B77]">Updates future onboarding configuration only; existing signed agreement values remain unchanged.</p>
+            <div className="mt-4 grid grid-cols-2 gap-3"><div><label className="text-xs uppercase text-[#8D7B77]">Artist %</label><input type="number" min="0" max="100" step="1" value={futureArtistShare} onChange={(event) => setFutureArtistShare(event.target.value)} disabled={revenueModalBusy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-3 text-white" /></div><div><label className="text-xs uppercase text-[#8D7B77]">Platform %</label><input type="number" min="0" max="100" step="1" value={futurePlatformShare} onChange={(event) => setFuturePlatformShare(event.target.value)} disabled={revenueModalBusy} className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-black/30 px-3 text-white" /></div></div>
+            <div className="mt-6 flex gap-3"><button type="button" disabled={revenueModalBusy} onClick={() => setShowRevenueModal(false)} className="h-11 flex-1 rounded-xl border border-white/10 bg-white/5 text-sm text-[#B8A6A1]">Cancel</button><button type="button" disabled={revenueModalBusy} onClick={() => void updateFutureRevenue()} className="h-11 flex-1 rounded-xl bg-primary text-sm font-medium text-white disabled:opacity-50">{revenueModalBusy ? "Updating…" : "Update"}</button></div>
           </div>
         </div>
       )}
 
-      {/* Manage Terms Modal */}
       {showTermsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => {
-              if (!termsModalBusy) setShowTermsModal(false);
-            }}
-          />
-          <div className="relative w-full max-w-2xl rounded-2xl border border-white/10 bg-surface p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 rounded-xl bg-blue-500/10">
-                <FileText size={20} className="text-blue-400" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">
-                Publish New Terms Version
-              </h3>
-            </div>
-            <p className="text-sm text-[#8D7B77] mb-4">
-              This will create a new terms version for future artist onboarding only. Existing signed agreements remain unchanged.
-            </p>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs text-[#8D7B77] uppercase tracking-wider">
-                  Terms & Conditions Content
-                </label>
-                <textarea
-                  value={newTermsContent}
-                  onChange={(e) => setNewTermsContent(e.target.value)}
-                  disabled={termsModalBusy}
-                  rows={12}
-                  className="mt-1.5 w-full rounded-xl bg-black/30 border border-white/10 px-4 py-3 text-sm text-white outline-none focus:border-primary/50 transition-all disabled:opacity-50 resize-none font-mono"
-                  placeholder="Enter the terms and conditions content..."
-                />
-              </div>
-              {artist?.agreementAccepted && (
-                <div className="p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
-                  <p className="text-xs text-amber-400">
-                    <strong>Note:</strong> Current agreement uses terms version: {artist.termsVersion || "v1"}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-3 mt-6">
-              <button
-                type="button"
-                disabled={termsModalBusy}
-                onClick={() => setShowTermsModal(false)}
-                className="flex-1 h-[42px] rounded-xl border border-white/10 bg-white/5 text-sm text-[#8D7B77] hover:text-white transition-all disabled:opacity-50">
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={termsModalBusy || !newTermsContent.trim()}
-                onClick={async () => {
-                  setTermsModalBusy(true);
-                  try {
-                    await http.post(`/api/v1/admin/terms-versions`, {
-                      content: newTermsContent
-                    });
-                    setShowTermsModal(false);
-                    setNewTermsContent("");
-                  } catch (error: any) {
-                    console.error('Failed to publish terms version:', error);
-                  } finally {
-                    setTermsModalBusy(false);
-                  }
-                }}
-                className="flex-1 h-[42px] rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 transition-all disabled:opacity-50">
-                {termsModalBusy ? "Publishing..." : "Publish New Version"}
-              </button>
-            </div>
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => { if (!termsModalBusy) setShowTermsModal(false); }} />
+          <div className="relative w-full max-w-2xl rounded-2xl border border-white/10 bg-surface p-6 shadow-2xl">
+            <div className="mb-4 flex items-center gap-3"><div className="rounded-xl bg-blue-500/10 p-2"><FileText size={20} className="text-blue-400" /></div><h3 className="text-lg font-semibold text-white">Publish New Terms Version</h3></div>
+            <p className="text-sm text-[#8D7B77]">Applies to future onboarding only; existing signed agreements remain unchanged.</p>
+            <textarea value={newTermsContent} onChange={(event) => setNewTermsContent(event.target.value)} disabled={termsModalBusy} rows={12} className="mt-4 w-full resize-none rounded-xl border border-white/10 bg-black/30 px-4 py-3 font-mono text-sm text-white outline-none focus:border-primary/50 disabled:opacity-50" placeholder="Terms and conditions content" />
+            <div className="mt-6 flex gap-3"><button type="button" disabled={termsModalBusy} onClick={() => setShowTermsModal(false)} className="h-11 flex-1 rounded-xl border border-white/10 bg-white/5 text-sm text-[#B8A6A1]">Cancel</button><button type="button" disabled={termsModalBusy || !newTermsContent.trim()} onClick={() => void publishTerms()} className="h-11 flex-1 rounded-xl bg-blue-600 text-sm font-medium text-white disabled:opacity-50">{termsModalBusy ? "Publishing…" : "Publish"}</button></div>
           </div>
         </div>
       )}
