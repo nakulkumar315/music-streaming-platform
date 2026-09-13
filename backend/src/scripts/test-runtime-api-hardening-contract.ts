@@ -37,6 +37,43 @@ function main() {
   assert.equal(server.includes('shutdown("uncaughtException", 1)'), true, "Unknown fatal errors must use controlled shutdown");
   assert.equal(server.includes("closeRedis()"), true, "Graceful shutdown must close Redis through its canonical lifecycle");
 
+  const schemaReadiness = source("common/db/schema-readiness.ts");
+  assert.equal(
+    schemaReadiness.includes('LATEST_SCHEMA_VERSION = "20260913_0009_playback_progress"'),
+    true,
+    "Startup schema gate must require Phase 06A playback progress migration"
+  );
+  assert.equal(
+    schemaReadiness.includes("playback_progress: ["),
+    true,
+    "Schema readiness must require playback_progress table"
+  );
+  assert.equal(
+    schemaReadiness.includes('"position_ms"'),
+    true,
+    "Schema readiness must require playback_progress position_ms column"
+  );
+  assert.equal(
+    schemaReadiness.includes("playback_progress_pkey"),
+    true,
+    "Schema readiness must validate playback_progress primary key constraint"
+  );
+  assert.equal(
+    schemaReadiness.includes("playback_progress_user_id_fkey"),
+    true,
+    "Schema readiness must validate playback_progress user FK constraint"
+  );
+  assert.equal(
+    schemaReadiness.includes("playback_progress_content_id_fkey"),
+    true,
+    "Schema readiness must validate playback_progress content FK constraint"
+  );
+  assert.equal(
+    schemaReadiness.includes("idx_playback_progress_user_updated"),
+    true,
+    "Schema readiness must validate playback_progress index"
+  );
+
   assert.equal(app.includes("app.listen("), false, "Express composition must not own the listener");
   assert.equal(app.includes('app.get("/health"'), true, "Liveness endpoint must exist");
   assert.equal(app.includes('app.get("/health/ready"'), true, "Readiness endpoint must be separate from liveness");

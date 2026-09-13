@@ -1,6 +1,7 @@
 import { pool } from "./index";
 
-export const LATEST_SCHEMA_VERSION = "20260913_0008_user_media_assets";
+// Earlier required hardening migrations: 20260913_0008_user_media_assets
+export const LATEST_SCHEMA_VERSION = "20260913_0009_playback_progress";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -119,6 +120,14 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
   ],
   revenue_share_configs: ["id", "version", "artist_share", "platform_share"],
   terms_versions: ["id", "version", "content", "effective_from"],
+  playback_progress: [
+    "user_id",
+    "content_id",
+    "position_ms",
+    "duration_ms",
+    "completed",
+    "updated_at",
+  ],
 };
 
 const REQUIRED_CONSTRAINTS = [
@@ -157,6 +166,15 @@ const REQUIRED_CONSTRAINTS = [
   "refund_requests_amount_positive",
   "refund_requests_status_valid",
   "refund_requests_requested_by_role_valid",
+  "playback_progress_pkey",
+  "playback_progress_user_id_fkey",
+  "playback_progress_content_id_fkey",
+  "playback_progress_position_ms_check",
+  "playback_progress_duration_ms_check",
+];
+
+const REQUIRED_INDEXES = [
+  "idx_playback_progress_user_updated",
 ];
 
 export type SchemaReadinessResult = {
@@ -232,6 +250,18 @@ export async function assertDatabaseSchemaReady(): Promise<SchemaReadinessResult
     const actualConstraints = new Set(constraints.rows.map((row) => row.conname));
     for (const constraint of REQUIRED_CONSTRAINTS) {
       if (!actualConstraints.has(constraint)) missing.push(`constraint:${constraint}`);
+    }
+
+    const indexQuery = await client.query<{ indexname: string }>(
+      `SELECT indexname
+       FROM pg_indexes
+       WHERE schemaname = 'public'
+         AND indexname = ANY($1::text[])`,
+      [REQUIRED_INDEXES]
+    );
+    const actualIndexes = new Set(indexQuery.rows.map((row) => row.indexname));
+    for (const idx of REQUIRED_INDEXES) {
+      if (!actualIndexes.has(idx)) missing.push(`index:${idx}`);
     }
 
     if (missing.length > 0) {
