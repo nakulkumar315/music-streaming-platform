@@ -16,7 +16,7 @@
       <data android:scheme="https"/>
     </intent>
   </queries>
-  <application android:name=".MainApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="true" android:theme="@style/AppTheme" android:supportsRtl="true" android:enableOnBackInvokedCallback="false">
+  <application android:name=".MainApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="true" android:theme="@style/AppTheme" android:supportsRtl="true" android:enableOnBackInvokedCallback="false" android:usesCleartextTraffic="false">
     <!-- Music Service for react-native-track-player background playback and lock screen controls -->
     <service android:name="com.doublesymmetry.trackplayer.service.MusicService" android:enabled="true" android:exported="false" android:foregroundServiceType="mediaPlayback" tools:replace="android:exported" />
     <!-- expo-video background playback service -->
