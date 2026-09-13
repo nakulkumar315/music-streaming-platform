@@ -1,4 +1,6 @@
+import type { PoolClient } from "pg";
 import { pool } from "../db";
+import { AuditService } from "../../shared/audit/audit.service";
 
 export type ArtistAccountState = {
   id: number;
@@ -10,9 +12,24 @@ export type ArtistAccountState = {
   operation: "soft_delete" | "reactivate" | "suspend" | "activate" | "ban";
 };
 
+export type ArtistAccountStateAudit = {
+  actorId: number;
+  actorRole?: "admin" | "moderator" | "system";
+  correlationId?: string;
+  reason?: string;
+};
+
 type AccountStateError = Error & {
   status?: number;
   code?: string;
+};
+
+type LockedArtist = {
+  id: number;
+  status: string;
+  is_deleted: boolean;
+  deleted_at: Date | null;
+  deletion_reason: string | null;
 };
 
 function accountStateError(message: string, status: number, code: string): AccountStateError {
@@ -22,8 +39,8 @@ function accountStateError(message: string, status: number, code: string): Accou
   return error;
 }
 
-async function lockArtist(client: any, artistId: number) {
-  const result = await client.query(
+async function lockArtist(client: PoolClient, artistId: number): Promise<LockedArtist> {
+  const result = await client.query<LockedArtist>(
     `SELECT id, status, is_deleted, deleted_at, deletion_reason
        FROM users
       WHERE id = $1
@@ -32,14 +49,14 @@ async function lockArtist(client: any, artistId: number) {
     [artistId]
   );
 
-  const artist = result.rows?.[0];
+  const artist = result.rows[0];
   if (!artist) {
     throw accountStateError("Artist not found", 404, "ARTIST_NOT_FOUND");
   }
   return artist;
 }
 
-async function revokeArtistSessions(client: any, artistId: number) {
+async function revokeArtistSessions(client: PoolClient, artistId: number) {
   const deleted = await client.query(
     "DELETE FROM user_sessions WHERE user_id = $1 RETURNING id",
     [artistId]
@@ -47,7 +64,11 @@ async function revokeArtistSessions(client: any, artistId: number) {
   return Number(deleted.rowCount ?? 0);
 }
 
-function mapState(row: any, sessionsRevoked: number, operation: ArtistAccountState["operation"]): ArtistAccountState {
+function mapState(
+  row: LockedArtist,
+  sessionsRevoked: number,
+  operation: ArtistAccountState["operation"]
+): ArtistAccountState {
   return {
     id: Number(row.id),
     status: String(row.status || ""),
@@ -59,7 +80,45 @@ function mapState(row: any, sessionsRevoked: number, operation: ArtistAccountSta
   };
 }
 
-async function inArtistStateTransaction<T>(work: (client: any) => Promise<T>): Promise<T> {
+async function writeStateAudit(
+  client: PoolClient,
+  before: LockedArtist,
+  after: ArtistAccountState,
+  audit: ArtistAccountStateAudit | undefined
+) {
+  if (!audit) return;
+
+  const actorId = Number(audit.actorId);
+  if (!Number.isSafeInteger(actorId) || actorId <= 0) {
+    throw accountStateError("Invalid account-state audit actor", 401, "INVALID_AUDIT_ACTOR");
+  }
+
+  await AuditService.logCritical(
+    {
+      action: "admin.artist_status_changed",
+      entity: "user",
+      entityId: String(after.id),
+      performedBy: actorId,
+      role: audit.actorRole || "admin",
+      status: "success",
+      correlationId: audit.correlationId,
+      metadata: {
+        operation: after.operation,
+        previousStatus: String(before.status || ""),
+        status: after.status,
+        previousIsDeleted: before.is_deleted === true,
+        isDeleted: after.isDeleted,
+        previousDeletionReason: before.deletion_reason,
+        deletionReason: after.deletionReason,
+        sessionsRevoked: after.sessionsRevoked,
+        ...(audit.reason ? { reason: audit.reason } : {}),
+      },
+    },
+    client
+  );
+}
+
+async function inArtistStateTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -77,21 +136,25 @@ async function inArtistStateTransaction<T>(work: (client: any) => Promise<T>): P
 /**
  * Canonical privileged artist account-state mutations.
  *
- * Every mutation locks the user row before changing account state and deletes
- * all server-side sessions in the same transaction. This gives the same lock
- * ordering as login/password rotation and prevents an old JWT from becoming
- * valid again after a later reactivation.
+ * Every mutation locks the user row before changing account state, deletes all
+ * server-side sessions, and (when invoked from a privileged route) persists the
+ * corresponding audit row inside the same transaction. Audit failure therefore
+ * rolls back both account-state mutation and session revocation.
  */
 export class ArtistAccountStateService {
-  static async softDelete(artistId: number, reason: string): Promise<ArtistAccountState> {
+  static async softDelete(
+    artistId: number,
+    reason: string,
+    audit?: ArtistAccountStateAudit
+  ): Promise<ArtistAccountState> {
     const deletionReason = String(reason || "").trim();
     if (!deletionReason) {
       throw accountStateError("Deletion reason is required", 400, "DELETION_REASON_REQUIRED");
     }
 
     return inArtistStateTransaction(async (client) => {
-      await lockArtist(client, artistId);
-      const updated = await client.query(
+      const before = await lockArtist(client, artistId);
+      const updated = await client.query<LockedArtist>(
         `UPDATE users
             SET is_deleted = true,
                 deleted_at = now(),
@@ -102,14 +165,23 @@ export class ArtistAccountStateService {
         [artistId, deletionReason]
       );
       const sessionsRevoked = await revokeArtistSessions(client, artistId);
-      return mapState(updated.rows[0], sessionsRevoked, "soft_delete");
+      const state = mapState(updated.rows[0], sessionsRevoked, "soft_delete");
+      await writeStateAudit(client, before, state, {
+        ...audit,
+        actorId: audit?.actorId ?? 0,
+        reason: audit?.reason || deletionReason,
+      });
+      return state;
     });
   }
 
-  static async reactivate(artistId: number): Promise<ArtistAccountState> {
+  static async reactivate(
+    artistId: number,
+    audit?: ArtistAccountStateAudit
+  ): Promise<ArtistAccountState> {
     return inArtistStateTransaction(async (client) => {
-      await lockArtist(client, artistId);
-      const updated = await client.query(
+      const before = await lockArtist(client, artistId);
+      const updated = await client.query<LockedArtist>(
         `UPDATE users
             SET status = 'ACTIVE',
                 is_deleted = false,
@@ -120,18 +192,21 @@ export class ArtistAccountStateService {
           RETURNING id, status, is_deleted, deleted_at, deletion_reason`,
         [artistId]
       );
-      // Purge any stale historical rows as part of reactivation. Reactivation
-      // never revives a previously issued JWT; the artist must authenticate again.
       const sessionsRevoked = await revokeArtistSessions(client, artistId);
-      return mapState(updated.rows[0], sessionsRevoked, "reactivate");
+      const state = mapState(updated.rows[0], sessionsRevoked, "reactivate");
+      await writeStateAudit(client, before, state, audit);
+      return state;
     });
   }
 
-  static async toggleSuspension(artistId: number): Promise<ArtistAccountState> {
+  static async toggleSuspension(
+    artistId: number,
+    audit?: ArtistAccountStateAudit
+  ): Promise<ArtistAccountState> {
     return inArtistStateTransaction(async (client) => {
-      const artist = await lockArtist(client, artistId);
-      const currentStatus = String(artist.status || "").toUpperCase();
-      const isDeleted = artist.is_deleted === true;
+      const before = await lockArtist(client, artistId);
+      const currentStatus = String(before.status || "").toUpperCase();
+      const isDeleted = before.is_deleted === true;
 
       if (currentStatus === "BANNED") {
         throw accountStateError(
@@ -143,7 +218,7 @@ export class ArtistAccountStateService {
 
       const activating = isDeleted || currentStatus === "SUSPENDED";
       const updated = activating
-        ? await client.query(
+        ? await client.query<LockedArtist>(
             `UPDATE users
                 SET status = 'ACTIVE',
                     is_deleted = false,
@@ -154,7 +229,7 @@ export class ArtistAccountStateService {
               RETURNING id, status, is_deleted, deleted_at, deletion_reason`,
             [artistId]
           )
-        : await client.query(
+        : await client.query<LockedArtist>(
             `UPDATE users
                 SET status = 'SUSPENDED',
                     is_deleted = false,
@@ -165,14 +240,23 @@ export class ArtistAccountStateService {
           );
 
       const sessionsRevoked = await revokeArtistSessions(client, artistId);
-      return mapState(updated.rows[0], sessionsRevoked, activating ? "activate" : "suspend");
+      const state = mapState(
+        updated.rows[0],
+        sessionsRevoked,
+        activating ? "activate" : "suspend"
+      );
+      await writeStateAudit(client, before, state, audit);
+      return state;
     });
   }
 
-  static async ban(artistId: number): Promise<ArtistAccountState> {
+  static async ban(
+    artistId: number,
+    audit?: ArtistAccountStateAudit
+  ): Promise<ArtistAccountState> {
     return inArtistStateTransaction(async (client) => {
-      await lockArtist(client, artistId);
-      const updated = await client.query(
+      const before = await lockArtist(client, artistId);
+      const updated = await client.query<LockedArtist>(
         `UPDATE users
             SET status = 'BANNED',
                 updated_at = now()
@@ -181,7 +265,9 @@ export class ArtistAccountStateService {
         [artistId]
       );
       const sessionsRevoked = await revokeArtistSessions(client, artistId);
-      return mapState(updated.rows[0], sessionsRevoked, "ban");
+      const state = mapState(updated.rows[0], sessionsRevoked, "ban");
+      await writeStateAudit(client, before, state, audit);
+      return state;
     });
   }
 }
