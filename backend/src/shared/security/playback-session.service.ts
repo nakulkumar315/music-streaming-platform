@@ -25,7 +25,10 @@ export async function createPlaybackSession(
   const userId = positiveInteger(rawUserId);
   const contentId = positiveInteger(rawContentId);
   if (!userId || !contentId) {
-    throw new MediaAccessDeniedException("Authenticated playback session required");
+    throw new MediaAccessDeniedException(
+      "Authenticated playback session required",
+      "AUTHENTICATION_REQUIRED"
+    );
   }
 
   const client = await pool.connect();
@@ -51,7 +54,8 @@ export async function createPlaybackSession(
 
     if (Number(active.rows[0]?.count ?? 0) >= MAX_CONCURRENT_PLAYBACK_SESSIONS) {
       throw new MediaAccessDeniedException(
-        "Too many concurrent streams. Close another playback session and retry."
+        "Too many concurrent streams. Close another playback session and retry.",
+        "PLAYBACK_SESSION_LIMIT"
       );
     }
 
