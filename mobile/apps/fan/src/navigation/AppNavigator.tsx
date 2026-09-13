@@ -1,6 +1,6 @@
 import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 
 import { Platform } from 'react-native';
 import SplashScreen from '../screens/SplashScreen';
@@ -15,9 +15,7 @@ import LoginScreen from '../screens/LoginScreen';
 import GuestHomeScreen from '../screens/GuestHomeScreen';
 import SignupScreen from '../screens/SignupScreen';
 import MainTabsNavigator from './MainTabsNavigator';
-
 import ArtistOnboardingScreen from '../screens/ArtistOnboardingScreen';
-import BackgroundPlaybackTestScreen from '../screens/BackgroundPlaybackTestScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -25,7 +23,7 @@ export default function AppNavigator() {
   const { isAuthenticated, bootstrapAuth } = useAuth();
   const player = useMediaPlayer();
   const [isSplashVisible, setIsSplashVisible] = React.useState(true);
-  const [currentRouteName, setCurrentRouteName] = useState<string | null>(null);
+  const [, setCurrentRouteName] = useState<string | null>(null);
 
   React.useEffect(() => {
     let mounted = true;
@@ -52,9 +50,15 @@ export default function AppNavigator() {
     return <SplashScreen />;
   }
 
-
   return (
-    <NavigationContainer ref={navigationRef} theme={DarkTheme}>
+    <NavigationContainer
+      ref={navigationRef}
+      theme={DarkTheme}
+      onStateChange={() => {
+        const route = navigationRef.getCurrentRoute();
+        setCurrentRouteName(route?.name ?? null);
+      }}
+    >
       <Stack.Navigator id="fan-root">
         {isAuthenticated ? (
           <>
@@ -67,11 +71,6 @@ export default function AppNavigator() {
               name="ArtistOnboarding"
               component={ArtistOnboardingScreen}
               options={{ headerShown: false, presentation: 'modal' }}
-            />
-            <Stack.Screen
-              name="BackgroundPlaybackTest"
-              component={BackgroundPlaybackTestScreen}
-              options={{ headerShown: false, title: 'Background Playback Test' }}
             />
           </>
         ) : (
