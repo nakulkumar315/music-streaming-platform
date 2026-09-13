@@ -3,7 +3,7 @@
 
 CREATE TABLE refund_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE RESTRICT,
+  payment_id UUID NOT NULL,
   subscription_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   razorpay_payment_id VARCHAR(255) NOT NULL,
@@ -23,6 +23,14 @@ CREATE TABLE refund_requests (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+  CONSTRAINT fk_refund_requests_payment
+    FOREIGN KEY (payment_id) REFERENCES payments(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_refund_requests_subscription
+    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_refund_requests_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_refund_requests_requested_by
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL,
   CONSTRAINT refund_requests_payment_unique UNIQUE (payment_id),
   CONSTRAINT refund_requests_gateway_payment_unique UNIQUE (razorpay_payment_id),
   CONSTRAINT refund_requests_idempotency_unique UNIQUE (idempotency_key),
@@ -37,6 +45,9 @@ CREATE TABLE refund_requests (
       'FAILED',
       'RECONCILIATION_REQUIRED'
     )
+  ),
+  CONSTRAINT refund_requests_requested_by_role_valid CHECK (
+    requested_by_role IN ('ADMIN', 'FINANCE', 'SYSTEM')
   )
 );
 
