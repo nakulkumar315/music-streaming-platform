@@ -36,7 +36,9 @@ export function mapStreamAccessError(err: unknown): StreamAccessErrorPayload {
         ? 401
         : err.code === "PLAYBACK_SESSION_LIMIT"
           ? 429
-          : 403;
+          : err.code === "PLAYBACK_SESSION_EXPIRED"
+            ? 409
+            : 403;
     return { status, code: err.code, message: err.message };
   }
   if (err instanceof MediaExpiredAccessException) {
