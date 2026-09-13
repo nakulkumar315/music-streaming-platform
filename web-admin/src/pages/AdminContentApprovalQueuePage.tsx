@@ -1,583 +1,234 @@
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { http } from "../services/http";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import Skeleton from "../components/Skeleton";
+import { AlertTriangle, CheckCircle2, Clock3, Music, RefreshCw, Video, XCircle } from "lucide-react";
 import PageWrapper from "../components/PageWrapper";
-import {
-  Eye,
-  Shield,
-  AlertTriangle,
-  CheckCircle,
-  XCircle,
-  RefreshCw,
-  Clock,
-  Image,
-  Music,
-  Video,
-  FileText,
-  User,
-  Flag,
-  Trash2,
-  RotateCcw,
-  AlertCircle,
-  Play,
-  Volume2,
-  Users,
-  TrendingUp,
-  Zap,
-  Crown,
-} from "lucide-react";
+import { http } from "../services/http";
 
-type PendingItem = {
+type PendingContent = {
   id: number;
   title: string;
   type: string;
-  thumbnailUrl: string | null;
-  mediaUrl?: string | null;
-  fileUrl?: string | null;
-  audioUrl?: string | null;
-  videoUrl?: string | null;
-  status: string;
-  reportCount?: number;
-  reasons?: Array<{ reason: string; count: number }>;
-  artist?: {
-    id: number;
-    name: string | null;
-  };
+  genre: string | null;
+  lifecycleState: string;
+  technicalStatus: string;
+  isApproved: boolean;
+  isTakenDown: boolean;
+  rejectionReason: string | null;
+  artist: { id: number; name: string | null };
+  createdAt: string;
+  uploadedAt: string | null;
 };
 
-const isAbsoluteUrl = (value: string) =>
-  value.startsWith("http://") || value.startsWith("https://");
+const queryKey = ["admin", "content", "pending"] as const;
 
-const toAbsoluteUrl = (value: string | null | undefined, baseUrl: string) => {
-  const raw = (value ?? "").toString().trim();
-  if (!raw) return null;
-  if (isAbsoluteUrl(raw)) return raw;
-  if (raw.startsWith("/")) return `${baseUrl}${raw}`;
-  return `${baseUrl}/${raw}`;
-};
-
-function PreviewModal({
-  open,
-  item,
-  onClose,
-  baseUrl,
-}: {
-  open: boolean;
-  item: PendingItem | null;
-  onClose: () => void;
-  baseUrl: string;
-}) {
-  const [mediaError, setMediaError] = useState<string | null>(null);
-
-  const audioUrl = toAbsoluteUrl(
-    item?.audioUrl ?? item?.mediaUrl ?? item?.fileUrl ?? null,
-    baseUrl
-  );
-  const videoUrl = toAbsoluteUrl(item?.videoUrl ?? null, baseUrl);
-
-  const hasAudio = Boolean(audioUrl);
-  const hasVideo = Boolean(videoUrl);
-  const derivedType =
-    item?.type === "AUDIO_VIDEO"
-      ? "AUDIO / VIDEO"
-      : item?.type ||
-        (hasAudio && hasVideo ? "AUDIO / VIDEO" : hasVideo ? "VIDEO" : "AUDIO");
-
-  useEffect(() => {
-    if (!open) return;
-    setMediaError(null);
-  }, [open, item?.id]);
-
-  if (!open || !item) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm px-4"
-      role="dialog"
-      aria-modal="true"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}>
-      <div className="w-full max-w-[800px] rounded-2xl border border-white/10 bg-surface shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
-          <div className="min-w-0">
-            <div className="text-lg font-semibold text-white truncate">
-              {item.title}
-            </div>
-            <div className="flex items-center gap-2 mt-0.5">
-              <span className="text-sm text-[#8D7B77]">{derivedType}</span>
-              <span className="text-[#8D7B77]">•</span>
-              <span className="text-sm text-[#8D7B77]">ID: #{item.id}</span>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="p-2 rounded-xl hover:bg-white/10 transition-all"
-            onClick={onClose}>
-            <XCircle size={20} className="text-[#8D7B77] hover:text-white" />
-          </button>
-        </div>
-
-        <div className="p-6">
-          {(!hasAudio || !hasVideo) && (
-            <div className="mb-4 rounded-xl border border-yellow-500/20 bg-yellow-500/5 px-4 py-3 flex items-start gap-3">
-              <AlertTriangle size={18} className="text-yellow-400 mt-0.5" />
-              <div>
-                <p className="text-sm font-medium text-yellow-400">
-                  Missing Media
-                </p>
-                <div className="text-sm text-yellow-300/80 mt-0.5">
-                  {!hasAudio && <div>• Audio file not found</div>}
-                  {!hasVideo && <div>• Video file not found</div>}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-4">
-            {mediaError && (
-              <div className="rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300/80">
-                Failed to load media. Please verify the file URL is reachable.
-              </div>
-            )}
-
-            <div className="rounded-xl border border-white/5 bg-black/30 overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-2 border-b border-white/5 bg-white/5">
-                <Volume2 size={14} className="text-[#8D7B77]" />
-                <span className="text-xs font-medium text-[#8D7B77] uppercase tracking-wider">
-                  Audio Preview
-                </span>
-              </div>
-              <div className="p-4">
-                {audioUrl ? (
-                  <audio
-                    src={audioUrl}
-                    controls
-                    preload="metadata"
-                    onError={() => setMediaError("FAILED")}
-                    className="w-full"
-                  />
-                ) : (
-                  <div className="text-sm text-[#8D7B77]">
-                    No audio available
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-white/5 bg-black/30 overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-2 border-b border-white/5 bg-white/5">
-                <Play size={14} className="text-[#8D7B77]" />
-                <span className="text-xs font-medium text-[#8D7B77] uppercase tracking-wider">
-                  Video Preview
-                </span>
-              </div>
-              <div className="p-4">
-                {videoUrl ? (
-                  <video
-                    src={videoUrl}
-                    controls
-                    preload="metadata"
-                    onError={() => setMediaError("FAILED")}
-                    className="w-full rounded-lg border border-white/5 bg-black"
-                  />
-                ) : (
-                  <div className="text-sm text-[#8D7B77]">
-                    No video available
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FlaggedBadge({ count }: { count: number }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
-      <Flag size={12} />
-      {count} report{count !== 1 ? "s" : ""}
-    </span>
-  );
-}
-
-function TypeBadge({ type }: { type: string }) {
-  const getIcon = () => {
-    if (type === "AUDIO" || type === "AUDIO_VIDEO") return <Music size={12} />;
-    if (type === "VIDEO") return <Video size={12} />;
-    return <FileText size={12} />;
-  };
-
-  const getColor = () => {
-    if (type === "AUDIO")
-      return "bg-blue-500/10 text-blue-400 border-blue-500/20";
-    if (type === "VIDEO")
-      return "bg-green-500/10 text-green-400 border-green-500/20";
-    if (type === "AUDIO_VIDEO")
-      return "bg-purple-500/10 text-purple-400 border-purple-500/20";
-    return "bg-gray-500/10 text-[#8D7B77] border-gray-500/20";
-  };
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border ${getColor()}`}>
-      {getIcon()}
-      {type === "AUDIO_VIDEO" ? "Audio/Video" : type}
-    </span>
-  );
+function statusClass(status: string) {
+  if (status === "READY") return "border-green-500/20 bg-green-500/10 text-green-300";
+  if (status === "FAILED") return "border-red-500/20 bg-red-500/10 text-red-300";
+  return "border-amber-500/20 bg-amber-500/10 text-amber-300";
 }
 
 export default function AdminContentApprovalQueuePage() {
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const baseUrl = http.defaults.baseURL || "";
-
-  const [busyId, setBusyId] = useState<number | null>(null);
-  const [previewItem, setPreviewItem] = useState<PendingItem | null>(null);
-
-  const pendingQueryKey = ["admin", "content", "flagged"] as const;
-
-  const pendingQuery = useQuery({
-    queryKey: pendingQueryKey,
+  const pending = useQuery({
+    queryKey,
     queryFn: async () => {
-      const res = await http.get("/api/v1/admin/content/flagged");
-      const next = Array.isArray(res.data?.items)
-        ? (res.data.items as PendingItem[])
-        : [];
-      return next;
+      const response = await http.get("/api/v1/admin/content/pending", {
+        params: { limit: 100 },
+      });
+      return (Array.isArray(response.data?.items) ? response.data.items : []) as PendingContent[];
     },
   });
 
-  const items = (pendingQuery.data ?? []).map((x: PendingItem) => ({
-    ...x,
-    thumbnailUrl: toAbsoluteUrl(x.thumbnailUrl, baseUrl),
-    mediaUrl: toAbsoluteUrl(x.mediaUrl ?? null, baseUrl),
-    fileUrl: toAbsoluteUrl(x.fileUrl ?? null, baseUrl),
-    audioUrl: toAbsoluteUrl(x.audioUrl ?? null, baseUrl),
-    videoUrl: toAbsoluteUrl(x.videoUrl ?? null, baseUrl),
-  }));
-
-  const restoreMutation = useMutation({
+  const approve = useMutation({
     mutationFn: async (id: number) => {
-      await http.post(`/api/v1/admin/content/${id}/restore`, {});
+      await http.patch(`/api/v1/admin/content/${id}/approve`, {});
       return id;
     },
-    onMutate: async (id: number) => {
-      setBusyId(id);
-      await queryClient.cancelQueries({ queryKey: pendingQueryKey });
-      const previous =
-        queryClient.getQueryData<PendingItem[]>(pendingQueryKey) ?? [];
-      queryClient.setQueryData<PendingItem[]>(
-        pendingQueryKey,
-        (old: PendingItem[] | undefined) =>
-          (old ?? []).filter((x: PendingItem) => x.id !== id)
-      );
-      return { previous };
+    onSuccess: async () => {
+      setError(null);
+      setNotice("Content approved for early access.");
+      await queryClient.invalidateQueries({ queryKey });
     },
-    onError: (
-      _err: unknown,
-      _id: number,
-      ctx: { previous: PendingItem[] } | undefined
-    ) => {
-      if (ctx?.previous)
-        queryClient.setQueryData(pendingQueryKey, ctx.previous);
-    },
-    onSettled: () => {
-      setBusyId(null);
-      queryClient.invalidateQueries({ queryKey: pendingQueryKey });
-      queryClient.invalidateQueries({
-        queryKey: ["admin", "analytics", "dashboard-data"],
-      });
+    onError: (e: any) => {
+      setNotice(null);
+      setError(e?.response?.data?.message || "Approval failed");
     },
   });
 
-  const deleteStrikeMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await http.post(`/api/v1/admin/content/${id}/delete-strike`, {});
+  const reject = useMutation({
+    mutationFn: async ({ id, reason }: { id: number; reason: string }) => {
+      await http.patch(`/api/v1/admin/content/${id}/reject`, { reason });
       return id;
     },
-    onMutate: async (id: number) => {
-      setBusyId(id);
-      await queryClient.cancelQueries({ queryKey: pendingQueryKey });
-      const previous =
-        queryClient.getQueryData<PendingItem[]>(pendingQueryKey) ?? [];
-      queryClient.setQueryData<PendingItem[]>(
-        pendingQueryKey,
-        (old: PendingItem[] | undefined) =>
-          (old ?? []).filter((x: PendingItem) => x.id !== id)
-      );
-      return { previous };
+    onSuccess: async () => {
+      setError(null);
+      setNotice("Content rejection recorded.");
+      await queryClient.invalidateQueries({ queryKey });
     },
-    onError: (
-      _err: unknown,
-      _id: number,
-      ctx: { previous: PendingItem[] } | undefined
-    ) => {
-      if (ctx?.previous)
-        queryClient.setQueryData(pendingQueryKey, ctx.previous);
-    },
-    onSettled: () => {
-      setBusyId(null);
-      queryClient.invalidateQueries({ queryKey: pendingQueryKey });
-      queryClient.invalidateQueries({
-        queryKey: ["admin", "analytics", "dashboard-data"],
-      });
+    onError: (e: any) => {
+      setNotice(null);
+      setError(e?.response?.data?.message || "Rejection failed");
     },
   });
 
-  const totalReports = items.reduce(
-    (acc, item) => acc + (item.reportCount || 0),
-    0
-  );
-  const uniqueItems = items.length;
-  const audioItems = items.filter(
-    (i) => i.type === "AUDIO" || i.type === "AUDIO_VIDEO"
-  ).length;
-  const videoItems = items.filter(
-    (i) => i.type === "VIDEO" || i.type === "AUDIO_VIDEO"
-  ).length;
+  const requestReject = (item: PendingContent) => {
+    const reason = window.prompt(
+      `Reason for rejecting “${item.title}” (3–500 characters):`,
+      item.rejectionReason || ""
+    );
+    if (reason === null) return;
+    const trimmed = reason.trim();
+    if (trimmed.length < 3 || trimmed.length > 500) {
+      setError("Rejection reason must be 3–500 characters.");
+      return;
+    }
+    reject.mutate({ id: item.id, reason: trimmed });
+  };
+
+  const items = pending.data ?? [];
+  const ready = items.filter((item) => item.technicalStatus === "READY").length;
+  const processing = items.filter((item) => ["UPLOADING", "PROCESSING"].includes(item.technicalStatus)).length;
+  const failed = items.filter((item) => item.technicalStatus === "FAILED").length;
 
   return (
     <PageWrapper
       title="Content Moderation"
-      subtitle="Review and manage flagged content reported by users">
-      {/* Stats Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-5 hover:border-white/10 transition-all duration-300">
-          <div className="absolute inset-0 bg-gradient-to-br from-red-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          <div className="relative">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-[#8D7B77]">
-                  Flagged Items
-                </p>
-                <p className="mt-1.5 text-3xl font-bold text-white">
-                  {uniqueItems}
-                </p>
-              </div>
-              <div className="p-3 rounded-xl bg-red-500/10">
-                <Flag size={20} className="text-red-400" />
-              </div>
-            </div>
-          </div>
+      subtitle="Review DRAFT releases. Approval is allowed only after media processing is READY."
+    >
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div className="rounded-2xl border border-white/5 bg-surface p-5">
+          <div className="text-sm text-white/50">Ready for review</div>
+          <div className="text-3xl font-semibold mt-2 text-green-300">{ready}</div>
         </div>
-
-        <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-5 hover:border-white/10 transition-all duration-300">
-          <div className="absolute inset-0 bg-gradient-to-br from-yellow-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          <div className="relative">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-[#8D7B77]">
-                  Total Reports
-                </p>
-                <p className="mt-1.5 text-3xl font-bold text-yellow-400">
-                  {totalReports}
-                </p>
-              </div>
-              <div className="p-3 rounded-xl bg-yellow-500/10">
-                <AlertTriangle size={20} className="text-yellow-400" />
-              </div>
-            </div>
-          </div>
+        <div className="rounded-2xl border border-white/5 bg-surface p-5">
+          <div className="text-sm text-white/50">Processing</div>
+          <div className="text-3xl font-semibold mt-2 text-amber-300">{processing}</div>
         </div>
-
-        <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-5 hover:border-white/10 transition-all duration-300">
-          <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          <div className="relative">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-[#8D7B77]">
-                  Audio Content
-                </p>
-                <p className="mt-1.5 text-3xl font-bold text-blue-400">
-                  {audioItems}
-                </p>
-              </div>
-              <div className="p-3 rounded-xl bg-blue-500/10">
-                <Music size={20} className="text-blue-400" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-surface p-5 hover:border-white/10 transition-all duration-300">
-          <div className="absolute inset-0 bg-gradient-to-br from-green-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          <div className="relative">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-[#8D7B77]">
-                  Video Content
-                </p>
-                <p className="mt-1.5 text-3xl font-bold text-green-400">
-                  {videoItems}
-                </p>
-              </div>
-              <div className="p-3 rounded-xl bg-green-500/10">
-                <Video size={20} className="text-green-400" />
-              </div>
-            </div>
-          </div>
+        <div className="rounded-2xl border border-white/5 bg-surface p-5">
+          <div className="text-sm text-white/50">Upload failed</div>
+          <div className="text-3xl font-semibold mt-2 text-red-300">{failed}</div>
         </div>
       </div>
 
-      {/* Content List */}
+      {error && (
+        <div className="mb-4 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-200 flex gap-2">
+          <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div className="mb-4 rounded-xl border border-green-500/20 bg-green-500/10 p-4 text-green-200 flex gap-2">
+          <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
+          <span>{notice}</span>
+        </div>
+      )}
+
       <div className="rounded-2xl border border-white/5 bg-surface overflow-hidden">
-        {/* Header */}
-        <div className="hidden md:grid grid-cols-[1fr_200px_120px_280px] gap-4 px-6 py-4 text-xs font-medium text-[#8D7B77] uppercase tracking-wider border-b border-white/5 bg-white/5">
-          <div>Content</div>
-          <div>Reports</div>
-          <div>Type</div>
-          <div className="text-right">Actions</div>
+        <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-4">
+          <div>
+            <div className="font-semibold">Draft review queue</div>
+            <div className="text-xs text-white/45 mt-1">
+              Technical readiness never publishes automatically. Approval moves DRAFT → EARLY_ACCESS.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void pending.refetch()}
+            disabled={pending.isFetching}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={pending.isFetching ? "animate-spin" : ""} />
+            Refresh
+          </button>
         </div>
 
-        {/* Loading State */}
-        {pendingQuery.isLoading ? (
-          <div className="px-6 py-8 space-y-4">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-4">
-                <Skeleton className="h-[66px] w-[66px] rounded-xl" />
-                <div className="flex-1 space-y-2">
-                  <Skeleton className="h-4 w-48" />
-                  <Skeleton className="h-3 w-32" />
-                </div>
-                <Skeleton className="h-6 w-24" />
-                <Skeleton className="h-6 w-20" />
-                <Skeleton className="h-9 w-24" />
-              </div>
-            ))}
-          </div>
+        {pending.isLoading ? (
+          <div className="p-10 text-center text-white/50">Loading draft content…</div>
+        ) : pending.isError ? (
+          <div className="p-10 text-center text-red-300">Unable to load moderation queue.</div>
         ) : items.length === 0 ? (
-          <div className="px-6 py-16 text-center">
-            <div className="inline-flex p-4 rounded-full bg-white/5 mb-4">
-              <CheckCircle size={32} className="text-green-400" />
-            </div>
-            <p className="text-lg font-medium text-white">All Clear! 🎉</p>
-            <p className="text-sm text-[#8D7B77] mt-1">
-              No flagged content pending review
-            </p>
-          </div>
+          <div className="p-10 text-center text-white/50">No DRAFT content awaiting review.</div>
         ) : (
-          <div className="divide-y divide-white/5">
-            {items.map((item: PendingItem) => {
-              const artistName = item.artist?.name || "Unknown artist";
-              const hasAudio = Boolean(
-                item.audioUrl || item.mediaUrl || item.fileUrl
-              );
-              const hasVideo = Boolean(item.videoUrl);
-              const typeLabel =
-                item.type === "AUDIO_VIDEO"
-                  ? "AUDIO / VIDEO"
-                  : item.type ||
-                    (hasAudio && hasVideo
-                      ? "AUDIO / VIDEO"
-                      : hasVideo
-                      ? "VIDEO"
-                      : "AUDIO");
-              const reportCount = Number(item.reportCount ?? 0);
-              const reasons = Array.isArray(item.reasons) ? item.reasons : [];
-
-              return (
-                <div
-                  key={item.id}
-                  className="px-6 py-4 hover:bg-white/5 transition-all">
-                  <div className="flex flex-col md:grid md:grid-cols-[1fr_200px_120px_280px] gap-4 items-start md:items-center">
-                    {/* Content Info */}
-                    <div className="flex items-center gap-4 min-w-0 w-full">
-                      <div className="h-[66px] w-[66px] shrink-0 rounded-xl bg-black/30 border border-white/10 overflow-hidden flex items-center justify-center">
-                        {item.thumbnailUrl ? (
-                          <img
-                            src={item.thumbnailUrl}
-                            alt=""
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <div className="h-full w-full flex items-center justify-center text-[#8D7B77]">
-                            <Image size={24} />
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-white/[0.03] text-white/50 text-left">
+                <tr>
+                  <th className="px-4 py-3 font-medium">Release</th>
+                  <th className="px-4 py-3 font-medium">Artist</th>
+                  <th className="px-4 py-3 font-medium">Technical state</th>
+                  <th className="px-4 py-3 font-medium">Created</th>
+                  <th className="px-4 py-3 font-medium text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => {
+                  const busy =
+                    (approve.isPending && approve.variables === item.id) ||
+                    (reject.isPending && reject.variables?.id === item.id);
+                  const canApprove = item.technicalStatus === "READY" && !item.isTakenDown;
+                  return (
+                    <tr key={item.id} className="border-t border-white/5 align-top">
+                      <td className="px-4 py-4">
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 rounded-lg bg-white/5 p-2">
+                            {item.type === "VIDEO" ? <Video size={17} /> : <Music size={17} />}
                           </div>
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-white truncate">
-                          {item.title}
+                          <div>
+                            <div className="font-medium text-white">{item.title}</div>
+                            <div className="text-xs text-white/40 mt-1">
+                              #{item.id}{item.genre ? ` · ${item.genre}` : ""} · DRAFT
+                            </div>
+                            {item.rejectionReason && (
+                              <div className="text-xs text-red-300 mt-1">Previous rejection: {item.rejectionReason}</div>
+                            )}
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <User size={12} className="text-[#8D7B77]" />
-                          <span className="text-xs text-[#8D7B77] truncate">
-                            {artistName}
-                          </span>
+                      </td>
+                      <td className="px-4 py-4">
+                        <div>{item.artist?.name || `Artist #${item.artist?.id}`}</div>
+                        <div className="text-xs text-white/40">ID #{item.artist?.id}</div>
+                      </td>
+                      <td className="px-4 py-4">
+                        <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass(item.technicalStatus)}`}>
+                          {item.technicalStatus === "PROCESSING" && <Clock3 size={12} className="mr-1" />}
+                          {item.technicalStatus}
+                        </span>
+                      </td>
+                      <td className="px-4 py-4 text-white/60">
+                        {item.createdAt ? new Date(item.createdAt).toLocaleString() : "—"}
+                      </td>
+                      <td className="px-4 py-4">
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={busy || !canApprove}
+                            title={!canApprove ? "Media must be READY before approval" : "Approve for early access"}
+                            onClick={() => approve.mutate(item.id)}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-green-500/15 text-green-200 border border-green-500/20 disabled:opacity-40"
+                          >
+                            <CheckCircle2 size={15} /> Approve
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => requestReject(item)}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/10 text-red-200 border border-red-500/20 disabled:opacity-40"
+                          >
+                            <XCircle size={15} /> Reject
+                          </button>
                         </div>
-                      </div>
-                    </div>
-
-                    {/* Reports */}
-                    <div className="flex items-center gap-2 w-full md:w-auto">
-                      <FlaggedBadge count={reportCount} />
-                      {reasons.length > 0 && (
-                        <span className="text-xs text-[#8D7B77] hidden lg:inline">
-                          {reasons
-                            .slice(0, 2)
-                            .map((r) => r.reason)
-                            .join(", ")}
-                          {reasons.length > 2 && ` +${reasons.length - 2}`}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Type */}
-                    <TypeBadge type={typeLabel} />
-
-                    {/* Actions */}
-                    <div className="flex items-center gap-2 w-full md:w-auto justify-start md:justify-end">
-                      <button
-                        type="button"
-                        onClick={() => setPreviewItem(item)}
-                        className="h-[36px] px-3 rounded-xl border border-white/10 bg-white/5 text-[#8D7B77] hover:text-white hover:bg-white/10 transition-all flex items-center gap-1.5"
-                        title="Preview">
-                        <Eye size={16} />
-                        <span className="text-xs hidden sm:inline">
-                          Preview
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => restoreMutation.mutate(item.id)}
-                        className="h-[36px] px-4 rounded-xl bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20 transition-all flex items-center gap-1.5 disabled:opacity-50">
-                        <RotateCcw size={14} />
-                        <span className="text-xs font-medium">Restore</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => deleteStrikeMutation.mutate(item.id)}
-                        className="h-[36px] px-4 rounded-xl bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-all flex items-center gap-1.5 disabled:opacity-50">
-                        <Trash2 size={14} />
-                        <span className="text-xs font-medium">Delete</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
-
-      {/* Preview Modal */}
-      <PreviewModal
-        open={Boolean(previewItem)}
-        item={previewItem}
-        onClose={() => setPreviewItem(null)}
-        baseUrl={baseUrl}
-      />
     </PageWrapper>
   );
 }
