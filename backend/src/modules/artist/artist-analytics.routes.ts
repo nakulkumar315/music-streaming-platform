@@ -67,11 +67,11 @@ router.get("/dashboard/summary", async (req: any, res: any) => {
         [artistId]
       ),
       pool.query<{ value: number }>(
-        `SELECT COUNT(p.id)::int AS value
-           FROM content_plays p
-           JOIN content_items c ON c.id = p.content_id
+        `SELECT COUNT(e.id)::int AS value
+           FROM analytics_events e
+           JOIN content_items c ON c.id = e.content_id
           WHERE c.artist_id = $1
-            AND p.playback_session_id IS NOT NULL`,
+            AND e.event_type = 'PLAY_STARTED'`,
         [artistId]
       ),
       pool.query<{ value: string | number }>(
@@ -129,13 +129,13 @@ router.get("/dashboard/growth", async (req: any, res: any) => {
     let rows: DailyPoint[];
     if (metric === "plays") {
       const result = await pool.query<DailyPoint>(
-        `SELECT to_char(date_trunc('day', p.created_at), 'YYYY-MM-DD') AS date,
-                COUNT(p.id)::int AS value
-           FROM content_plays p
-           JOIN content_items c ON c.id = p.content_id
+        `SELECT to_char(date_trunc('day', e.created_at), 'YYYY-MM-DD') AS date,
+                COUNT(e.id)::int AS value
+           FROM analytics_events e
+           JOIN content_items c ON c.id = e.content_id
           WHERE c.artist_id = $1
-            AND p.playback_session_id IS NOT NULL
-            AND p.created_at >= $2
+            AND e.event_type = 'PLAY_STARTED'
+            AND e.created_at >= $2
           GROUP BY 1
           ORDER BY 1 ASC`,
         [artistId, startIso]
@@ -214,11 +214,11 @@ router.get("/dashboard/new-plays", async (req: any, res: any) => {
   const artistId = actorId(req);
   try {
     const result = await pool.query(
-      `SELECT c.id, c.title, c.thumbnail_url, COUNT(p.id)::int AS plays
+      `SELECT c.id, c.title, c.thumbnail_url, COUNT(e.id)::int AS plays
          FROM content_items c
-         LEFT JOIN content_plays p
-           ON p.content_id = c.id
-          AND p.playback_session_id IS NOT NULL
+         LEFT JOIN analytics_events e
+           ON e.content_id = c.id
+          AND e.event_type = 'PLAY_STARTED'
         WHERE c.artist_id = $1
         GROUP BY c.id
         ORDER BY plays DESC, c.created_at DESC
@@ -254,12 +254,12 @@ router.get("/analytics/content-performance", async (req: any, res: any) => {
   start.setUTCDate(start.getUTCDate() - days);
   try {
     const result = await pool.query(
-      `SELECT c.id, c.title, c.thumbnail_url, COUNT(p.id)::int AS plays
+      `SELECT c.id, c.title, c.thumbnail_url, COUNT(e.id)::int AS plays
          FROM content_items c
-         LEFT JOIN content_plays p
-           ON p.content_id = c.id
-          AND p.playback_session_id IS NOT NULL
-          AND p.created_at >= $2
+         LEFT JOIN analytics_events e
+           ON e.content_id = c.id
+          AND e.event_type = 'PLAY_STARTED'
+          AND e.created_at >= $2
         WHERE c.artist_id = $1
         GROUP BY c.id
         ORDER BY plays DESC, c.created_at DESC
