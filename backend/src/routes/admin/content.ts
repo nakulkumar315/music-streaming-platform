@@ -8,6 +8,7 @@ import {
   takedownContent,
   type GovernanceRole,
 } from "../../modules/content/content-governance.service";
+import { listReportedLiveContent } from "../../modules/content/content-moderation-query.service";
 
 const router = Router();
 
@@ -40,6 +41,16 @@ router.get("/pending", async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
   try {
     const items = await listPendingContent(req.query?.limit, req.query?.offset);
+    return res.json({ success: true, items, correlationId });
+  } catch (error) {
+    return sendError(res, error, correlationId);
+  }
+});
+
+router.get("/reported", async (req: any, res: any) => {
+  const correlationId = req?.correlationId || "-";
+  try {
+    const items = await listReportedLiveContent(req.query?.limit, req.query?.offset);
     return res.json({ success: true, items, correlationId });
   } catch (error) {
     return sendError(res, error, correlationId);
