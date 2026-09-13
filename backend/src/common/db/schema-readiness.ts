@@ -44,6 +44,7 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
   operational_job_runs: [
     "job_name",
     "window_key",
+    "run_token",
     "status",
     "started_at",
     "completed_at",
