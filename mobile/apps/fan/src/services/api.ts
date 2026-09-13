@@ -3,10 +3,19 @@ import axios, { AxiosHeaders, type AxiosError, type AxiosInstance } from 'axios'
 import * as Sentry from '@sentry/react-native';
 import { Platform } from 'react-native';
 import { API_HOST_BASE_URL } from '../config/env';
+import {
+  clearAuthCredential,
+  LEGACY_JWT_STORAGE_KEY,
+  LEGACY_USER_TOKEN_STORAGE_KEY,
+  readAuthCredential,
+  saveAuthCredential,
+} from '../security/credentialStorage';
 
 export const API_BASE_URL = `${API_HOST_BASE_URL}/api/v1/fan`;
-export const JWT_STORAGE_KEY = 'jwt';
-export const USER_TOKEN_STORAGE_KEY = 'userToken';
+// Temporary compatibility exports for any older call sites. Credential access
+// itself is centralized in credentialStorage and never writes these keys.
+export const JWT_STORAGE_KEY = LEGACY_JWT_STORAGE_KEY;
+export const USER_TOKEN_STORAGE_KEY = LEGACY_USER_TOKEN_STORAGE_KEY;
 export const DEVICE_ID_STORAGE_KEY = 'fanDeviceId';
 
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -54,10 +63,7 @@ async function getOrCreateDeviceId() {
 }
 
 async function getStoredToken() {
-  return (
-    (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-    (await AsyncStorage.getItem(JWT_STORAGE_KEY))
-  );
+  return readAuthCredential();
 }
 
 function isSafeRetry(config: any): boolean {
@@ -98,8 +104,7 @@ function attachClientPolicy(client: AxiosInstance) {
       // are never reused by the client.
       const rotatedToken = res.data?.sessionRotated ? res.data?.token : null;
       if (typeof rotatedToken === 'string' && rotatedToken.length > 0) {
-        await AsyncStorage.setItem(USER_TOKEN_STORAGE_KEY, rotatedToken);
-        await AsyncStorage.removeItem(JWT_STORAGE_KEY);
+        await saveAuthCredential(rotatedToken);
       }
       return res;
     },
@@ -108,8 +113,13 @@ function attachClientPolicy(client: AxiosInstance) {
       const status = error?.response?.status;
 
       if (status === 401) {
-        await AsyncStorage.removeItem(USER_TOKEN_STORAGE_KEY);
-        await AsyncStorage.removeItem(JWT_STORAGE_KEY);
+        try {
+          await clearAuthCredential();
+        } catch (storageError) {
+          Sentry.captureException(storageError, {
+            tags: { area: 'auth-storage', action: 'clear-on-401' },
+          });
+        }
         await unauthorizedHandler?.();
       }
 
