@@ -1,6 +1,6 @@
 import { pool } from "./index";
 
-export const LATEST_SCHEMA_VERSION = "20260913_0007_content_governance_integrity";
+export const LATEST_SCHEMA_VERSION = "20260913_0008_user_media_assets";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -30,6 +30,18 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "audio_provider_asset_id",
     "video_provider_asset_id",
     "thumbnail_provider_asset_id",
+  ],
+  user_media_assets: [
+    "id",
+    "user_id",
+    "kind",
+    "storage_provider",
+    "storage_key",
+    "provider_asset_id",
+    "mime_type",
+    "size_bytes",
+    "created_at",
+    "updated_at",
   ],
   user_sessions: ["id", "user_id", "device_id", "last_active_at"],
   subscriptions: [
@@ -118,6 +130,11 @@ const REQUIRED_CONSTRAINTS = [
   "content_items_type_valid",
   "content_items_storage_provider_valid",
   "content_items_media_key_valid",
+  "fk_user_media_assets_user",
+  "user_media_assets_user_kind_unique",
+  "user_media_assets_kind_valid",
+  "user_media_assets_provider_valid",
+  "user_media_assets_size_positive",
   "fk_sessions_user",
   "fk_subscriptions_user",
   "fk_subscriptions_artist",
