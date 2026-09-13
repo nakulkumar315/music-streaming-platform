@@ -18,6 +18,7 @@ function main() {
   const prisma = backendFile("prisma/schema.prisma");
   const refundService = source("modules/payment/payment.refund.service.ts");
   const refundGateway = source("modules/payment/payment.refund.gateway.ts");
+  const refundWebhook = source("modules/payment/payment.refund.webhook.ts");
   const refundReconciliation = source("modules/payment/payment.refund.reconciliation.ts");
   const refundController = source("controllers/admin/adminRefundController.ts");
   const refundQuery = source("modules/payment/payment.refund.query.ts");
@@ -49,7 +50,7 @@ function main() {
   assert.equal(schemaReadiness.includes("fk_refund_requests_payment"), true, "Refund relational constraints must be checked at startup");
 
   assert.equal(refundService.includes("full-refund:${String(payment.id)}"), true, "Refund identity must be server-derived");
-  assert.equal(refundService.includes("PARTIAL_REFUND_NOT_SUPPORTED"), true, "Partial refund is outside approved Phase-1 scope");
+  assert.equal(refundService.includes("PARTIAL_REFUND_NOT_SUPPORTED"), true, "Direct canonical finalization remains full-refund-only");
   assert.equal(refundService.includes("GATEWAY_REQUESTED"), true, "Remote call must have a durable pre-call state");
   assert.equal(refundService.includes("RECONCILIATION_REQUIRED"), true, "Ambiguous outcomes must remain repairable");
   assert.equal(refundService.includes("LOCAL_REFUND_FINALIZATION_FAILED"), true, "Provider success plus local failure must reconcile rather than retry");
@@ -64,6 +65,12 @@ function main() {
   assert.equal(refundGateway.includes("refund_request_id"), true, "Provider notes must carry the durable request identifier");
   assert.equal(refundGateway.includes("fetchMultipleRefund"), true, "Reconciliation must query provider refunds rather than blindly retry");
   assert.equal(refundGateway.includes("amount_refunded"), true, "Reconciliation must compare provider payment refund totals");
+
+  assert.equal(refundWebhook.includes("UNSUPPORTED_PARTIAL_REFUND_DETECTED"), true, "Out-of-scope provider partial refunds must be quarantined, not normalized");
+  assert.equal(refundWebhook.includes("RECONCILIATION_REQUIRED"), true, "Provider partial refund anomaly must remain operationally visible");
+  assert.equal(refundWebhook.includes("entitlement_changed: false"), true, "Unsupported provider partial refund must not silently revoke entitlement");
+  assert.equal(refundWebhook.includes("completed_ledger_preserved"), true, "Later provider anomaly must not rewrite completed financial history");
+  assert.equal(refundWebhook.includes("return finalizeRefund(client"), true, "Valid full provider refund events must converge on canonical finalizer");
 
   assert.equal(refundReconciliation.includes("r.id IS NULL"), true, "Reconciliation must detect provider refunds with no local intent");
   assert.equal(refundReconciliation.includes("CORRECTED_FULL_REFUND"), true, "Missed full-refund webhook must be repairable");
@@ -91,7 +98,7 @@ function main() {
   assert.equal(paymentController.includes('case "refund.created"'), true, "Provider pending refund webhook must be tracked");
   assert.equal(paymentController.includes('case "refund.processed"'), true, "Verified refund processed webhook remains authoritative final signal");
   assert.equal(paymentController.includes('case "refund.failed"'), true, "Provider failed refund webhook must be tracked");
-  assert.equal(paymentController.includes("finalizeRefund(client"), true, "Refund webhooks must converge on canonical refund service");
+  assert.equal(paymentController.includes("processVerifiedRefundEvent(client"), true, "Refund webhooks must pass through the anomaly-aware canonical refund boundary");
   assert.equal(entitlement.includes("s.status = 'ACTIVE'"), true, "Refund/cancellation status transition must revoke Phase-02 entitlement");
   assert.equal(entitlement.includes("s.next_billing_date > now()"), true, "Entitlement remains time-bound as well as state-bound");
 
