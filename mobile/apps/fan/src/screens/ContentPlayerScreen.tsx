@@ -51,6 +51,7 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
 
   const playerRef = useRef<AudioPlayer | null>(null);
   const sessionRef = useRef<{ sessionId: number; contentId: number } | null>(null);
+  const isSeekingRef = useRef(false);
   const progressOpacity = useRef(new Animated.Value(0)).current;
   const contentId = route?.params?.contentId;
 
@@ -133,6 +134,8 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
       await disposePlayer();
       if (!currentContent) return;
 
+      isSeekingRef.current = false;
+      setIsSeeking(false);
       setMediaError(null);
       setIsPlaying(false);
       setPositionMs(0);
@@ -183,7 +186,7 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
           if (!mounted) return;
           const active = playerRef.current;
           if (!active || !active.isLoaded) return;
-          if (!isSeeking) {
+          if (!isSeekingRef.current) {
             setPositionMs(Math.max(0, Math.round((active.currentTime || 0) * 1000)));
           }
           setDurationMs(Math.max(0, Math.round((active.duration || 0) * 1000)));
@@ -191,12 +194,17 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
         }, 350);
 
         heartbeatTimer = setInterval(() => {
-          const active = sessionRef.current;
-          if (!active) return;
+          const session = sessionRef.current;
+          const activePlayer = playerRef.current;
+          if (!session) return;
           void apiV1
             .post('/stream/heartbeat', {
-              sessionId: active.sessionId,
-              contentId: active.contentId,
+              sessionId: session.sessionId,
+              contentId: session.contentId,
+              currentPosition:
+                activePlayer?.isLoaded ? Math.max(0, Math.round(activePlayer.currentTime || 0)) : undefined,
+              duration:
+                activePlayer?.isLoaded ? Math.max(0, Math.round(activePlayer.duration || 0)) : undefined,
             })
             .catch(() => {
               if (mounted) setMediaError('Playback authorization expired. Retry to reconnect.');
@@ -221,7 +229,7 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       void disposePlayer();
     };
-  }, [currentContent, progressOpacity, isSeeking, reloadKey]);
+  }, [currentContent, progressOpacity, reloadKey]);
 
   useEffect(() => {
     Animated.timing(progressOpacity, {
@@ -316,6 +324,7 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderGrant: () => {
+          isSeekingRef.current = true;
           setIsSeeking(true);
           setSeekProgress(displayedProgress);
         },
@@ -328,10 +337,14 @@ export default function ContentPlayerScreen({ navigation, route }: any) {
           try {
             await seekToProgress(Math.min(1, Math.max(0, seekProgress)));
           } finally {
+            isSeekingRef.current = false;
             setIsSeeking(false);
           }
         },
-        onPanResponderTerminate: () => setIsSeeking(false),
+        onPanResponderTerminate: () => {
+          isSeekingRef.current = false;
+          setIsSeeking(false);
+        },
       }),
     [displayedProgress, seekProgress, trackWidth]
   );
