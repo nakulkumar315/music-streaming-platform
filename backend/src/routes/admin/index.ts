@@ -5,6 +5,7 @@ import adminAnalyticsRoutes from "./analytics";
 import adminArtistApprovalsRoutes from "./artist-approvals";
 import adminArtistsRoutes from "./artists";
 import adminContentRoutes from "./content";
+import adminMediaRoutes from "./media";
 import adminFeaturedArtistsRoutes from "./featured-artists";
 import adminImageUploadRoutes from "./image-upload";
 import adminRefundRoutes from "./refunds";
@@ -15,17 +16,9 @@ import { requireRoles } from "../../common/auth/requireRoles";
 
 const router = Router();
 
-// Authentication endpoints are the only public routes under /admin.
 router.use("/", adminAuthRoutes);
-
-// Canonical account-security state changes are mounted before historical artist
-// and moderation routers so deactivate/delete/ban/reactivate can never bypass
-// transactional server-session revocation.
 router.use("/", adminAccountSecurityRoutes);
 
-// Every privileged route requires both a valid server-backed session and an
-// explicit role boundary. Child routers may keep narrower guards for endpoint-
-// specific permissions, but they must never broaden these mount-level rules.
 router.use("/", requireAuth, requireRoles("ADMIN"), adminArtistApprovalsRoutes);
 router.use("/analytics", requireAuth, requireRoles("ADMIN"), adminAnalyticsRoutes);
 router.use("/artists", requireAuth, requireRoles("ADMIN"), adminArtistsRoutes);
@@ -35,6 +28,7 @@ router.use(
   requireRoles("ADMIN", "MODERATOR"),
   adminContentRoutes
 );
+router.use("/media", requireAuth, requireRoles("ADMIN"), adminMediaRoutes);
 router.use(
   "/featured-artists",
   requireAuth,
