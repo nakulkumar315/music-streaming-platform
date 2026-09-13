@@ -1,12 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Sentry from '@sentry/react-native';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
+import { api, setUnauthorizedHandler } from '../services/api';
 import {
-  api,
-  JWT_STORAGE_KEY,
-  USER_TOKEN_STORAGE_KEY,
-  setUnauthorizedHandler,
-} from '../services/api';
+  clearAuthCredential,
+  readAuthCredential,
+  saveAuthCredential,
+} from '../security/credentialStorage';
 
 export type SessionUser = {
   id?: string | number;
@@ -82,9 +83,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setTokenState(null);
     setUser(null);
     setUserAccountStatusState('UNKNOWN');
-    await AsyncStorage.removeItem(USER_TOKEN_STORAGE_KEY);
-    await AsyncStorage.removeItem(JWT_STORAGE_KEY);
     await AsyncStorage.removeItem(SESSION_USER_STORAGE_KEY);
+
+    try {
+      await clearAuthCredential();
+    } catch (error) {
+      // Session state must remain logged out even if the OS secure-store delete
+      // call fails. The next unauthorized response will attempt cleanup again.
+      Sentry.captureException(error, {
+        tags: { area: 'auth-storage', action: 'clear-local-session' },
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -95,9 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const restoreToken = useCallback(async () => {
     setIsRestoring(true);
     try {
-      const stored =
-        (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-        (await AsyncStorage.getItem(JWT_STORAGE_KEY));
+      const stored = await readAuthCredential();
       setTokenState(stored);
       return stored;
     } finally {
@@ -107,11 +114,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setToken = useCallback(async (next: string | null) => {
     if (next) {
-      await AsyncStorage.setItem(USER_TOKEN_STORAGE_KEY, next);
-      await AsyncStorage.removeItem(JWT_STORAGE_KEY);
+      await saveAuthCredential(next);
     } else {
-      await AsyncStorage.removeItem(USER_TOKEN_STORAGE_KEY);
-      await AsyncStorage.removeItem(JWT_STORAGE_KEY);
+      await clearAuthCredential();
     }
     setTokenState(next);
   }, []);
@@ -141,9 +146,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const bootstrapAuth = useCallback(async () => {
     setIsRestoring(true);
     try {
-      const stored =
-        (await AsyncStorage.getItem(USER_TOKEN_STORAGE_KEY)) ??
-        (await AsyncStorage.getItem(JWT_STORAGE_KEY));
+      const stored = await readAuthCredential();
 
       if (!stored) {
         await clearLocalSession();
