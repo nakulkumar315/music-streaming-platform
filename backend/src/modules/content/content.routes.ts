@@ -35,7 +35,6 @@ function mapContent(req: any, row: any) {
     artistName: row.artist_name ? String(row.artist_name) : null,
     thumbnailUrl: thumbnailUrl(req, Number(row.id)),
     artwork: thumbnailUrl(req, Number(row.id)),
-    // Protected playback URLs are never returned from catalog/detail APIs.
     mediaUrl: null,
     fileUrl: null,
     audioUrl: null,
@@ -59,8 +58,11 @@ const GOVERNED_CONTENT_WHERE = `
   AND c.is_approved = TRUE
   AND c.is_taken_down = FALSE
   AND c.status = 'READY'
-  AND COALESCE(u.is_deleted, FALSE) = FALSE
+  AND UPPER(u.role) = 'ARTIST'
+  AND u.is_deleted = FALSE
   AND UPPER(u.status) = 'ACTIVE'
+  AND u.is_verified = TRUE
+  AND UPPER(u.artist_status::text) = 'APPROVED'
 `;
 
 function subscriptionExistsSql(userParam: string) {
