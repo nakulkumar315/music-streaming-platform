@@ -5,11 +5,27 @@ import { normalizeDeviceId, SessionService } from "../../common/auth/session.ser
 import { pool } from "../../common/db";
 import { AuditService } from "../../shared/audit/audit.service";
 
+type AuditRole = "fan" | "artist" | "admin" | "finance" | "moderator" | "system";
+
 function requestDeviceId(req: any) {
   const bodyValue = req.body?.deviceId;
   const headerValue = req.headers?.["x-device-id"];
   const candidate = bodyValue ?? (Array.isArray(headerValue) ? headerValue[0] : headerValue);
   return normalizeDeviceId(String(candidate || ""));
+}
+
+function auditRole(role: string): AuditRole {
+  const normalized = role.toLowerCase();
+  if (
+    normalized === "fan" ||
+    normalized === "artist" ||
+    normalized === "admin" ||
+    normalized === "finance" ||
+    normalized === "moderator"
+  ) {
+    return normalized;
+  }
+  return "system";
 }
 
 export async function updatePasswordAndRotateSession(req: any, res: Response) {
@@ -133,18 +149,21 @@ export async function updatePasswordAndRotateSession(req: any, res: Response) {
       { expiresIn: "1d" }
     );
 
-    await client.query("COMMIT");
+    await AuditService.logCritical(
+      {
+        action: "user.password_changed",
+        entity: "user",
+        entityId: String(userId),
+        performedBy: userId,
+        role: auditRole(role),
+        status: "success",
+        correlationId,
+        metadata: { allPreviousSessionsRevoked: true, replacementSessionId: session.id },
+      },
+      client
+    );
 
-    AuditService.log({
-      action: "user.password_changed",
-      entity: "user",
-      entityId: String(userId),
-      performedBy: userId,
-      role: role.toLowerCase() as any,
-      status: "success",
-      correlationId,
-      metadata: { allPreviousSessionsRevoked: true },
-    });
+    await client.query("COMMIT");
 
     return res.json({
       success: true,
