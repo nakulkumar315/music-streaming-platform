@@ -24,6 +24,10 @@ import { handleMediaWebhook } from "./controllers/media/WebhookController";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
 import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
+import {
+  artistAssetUploadRouter,
+  artistPublicAssetRouter,
+} from "./modules/artist/artist-assets.routes";
 import { createStorageProvider } from "./shared/storage/factory/storage-provider.factory";
 import { getDeliveryStrategyForProvider } from "./shared/delivery/services/media-delivery.service";
 import { NotificationService } from "./shared/notifications/notification.service";
@@ -125,7 +129,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Correlation IDs must be available to raw-body webhooks as well as JSON routes.
 app.use((req: any, res, next) => {
   const incomingCorrelationId =
     (req.headers["x-correlation-id"] as string | undefined) ||
@@ -136,8 +139,8 @@ app.use((req: any, res, next) => {
   next();
 });
 
-// Signature verification requires the exact raw bytes. Keep provider webhooks
-// before express.json(); handlers parse only after successful verification.
+// Provider signatures cover the exact raw bytes. These handlers must precede
+// express.json(), and they parse payloads only after successful verification.
 app.post(
   "/api/v1/payments/webhook",
   express.raw({ type: "application/json", limit: "2mb" }),
@@ -155,12 +158,14 @@ app.use(globalLimiter);
 app.use(httpLogger);
 
 // Protected media is delivered only through the canonical guarded stream route.
-// No public /uploads static route is mounted.
+// No generic public /uploads static route is mounted.
 app.use("/media/stream", mediaStreamRoutes);
 
 app.use("/api/v1/fan", fanRoutes);
 app.use("/api/v1/artist/onboard", artistOnboardingRoutes);
 app.use("/api/v1/artist/update-password", artistSecurityRoutes);
+app.use("/api/v1/artist/uploads", artistAssetUploadRouter);
+app.use("/api/v1/artist/assets", artistPublicAssetRouter);
 
 app.use(
   [
@@ -168,7 +173,6 @@ app.use(
     "/api/v1/artist/pricing",
     "/api/v1/artist/analytics",
     "/api/v1/artist/channel-preview",
-    "/api/v1/artist/uploads",
   ],
   requireAuth,
   requireVerifiedArtist
@@ -177,12 +181,6 @@ app.use(
 app.use("/api/v1/artist", artistRoutes);
 app.use("/api/v1/admin", adminRoutes);
 app.use("/api/v1/auth", authRoutes);
-
-// The historical artist multipart upload route is intentionally unreachable.
-// Phase 1 binary upload is ADMIN-governed at /api/v1/admin/media/upload.
-app.post("/api/v1/content/upload", (_req, res) =>
-  res.status(404).json({ success: false, message: "Route not found" })
-);
 app.use("/api/v1/content", contentRoutes);
 app.use("/api/v1/search", searchRoutes);
 app.use("/api/v1/media", mediaRoutes);
