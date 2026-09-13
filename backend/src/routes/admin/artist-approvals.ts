@@ -4,7 +4,6 @@ import { requireRoles } from "../../common/auth/requireRoles";
 import { pool } from "../../common/db";
 import { invalidateArtistCache } from "../../common/cache";
 import { logger } from "../../common/logger";
-import { AuditService } from "../../shared/audit/audit.service";
 import {
   ArtistApprovalDecision,
   ArtistApprovalService,
@@ -13,20 +12,11 @@ import {
 const router = Router();
 const requireAdmin = requireRoles("ADMIN");
 
-const safeQuery = async <T = any>(query: string, params: any[]): Promise<T[]> => {
-  try {
-    const r = await pool.query(query, params);
-    return (r.rows as T[]) ?? [];
-  } catch {
-    return [];
-  }
-};
-
 router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: any) => {
   const correlationId = req?.correlationId || "-";
 
   try {
-    const rows = await safeQuery<any>(
+    const result = await pool.query(
       `SELECT
          id,
          COALESCE(NULLIF(name, ''), NULLIF(split_part(email, '@', 1), ''), email) as name,
@@ -48,11 +38,10 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
            )
          )
        ORDER BY COALESCE(onboarded_at, created_at) DESC
-       LIMIT 300`,
-      []
+       LIMIT 300`
     );
 
-    const items = rows.map((u) => {
+    const items = result.rows.map((u: any) => {
       const status = (u.artist_status ?? "PENDING").toString().toUpperCase();
       const appeal = (u.artist_appeal_message ?? "").toString().trim();
       return {
@@ -70,8 +59,8 @@ router.get("/pending-artists", requireAuth, requireAdmin, async (req: any, res: 
     });
 
     return res.json({ success: true, items, correlationId });
-  } catch {
-    logger.error({ correlationId }, "[ADMIN] pending-artists failed");
+  } catch (error) {
+    logger.error({ error, correlationId }, "[ADMIN] pending-artists failed");
     return res.status(500).json({
       success: false,
       message: "Failed to fetch pending artists",
@@ -85,35 +74,20 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
   const artistId = Number(req.params.id);
   const action = String(req.body?.action || "").trim().toUpperCase() as ArtistApprovalDecision;
   const reason = String(req.body?.reason || "").trim();
+  const actorId = Number(req.user?.id);
 
   try {
     const result = await ArtistApprovalService.resolve({
       artistId,
       action,
       reason,
+      actorId,
+      correlationId,
     });
 
     // Public artist visibility depends on verified + APPROVED, so either
-    // decision must evict discovery/detail caches immediately.
+    // decision must evict discovery/detail caches immediately after commit.
     await invalidateArtistCache();
-
-    AuditService.log({
-      action:
-        result.status === "APPROVED"
-          ? "admin.artist_approved"
-          : "admin.artist_rejected",
-      entity: "user",
-      entityId: String(result.artistId),
-      performedBy: req.user?.id,
-      role: "admin",
-      status: "success",
-      correlationId,
-      metadata: {
-        action: result.status.toLowerCase(),
-        previousStatus: result.previousStatus,
-        ...(result.reason ? { reason: result.reason } : {}),
-      },
-    });
 
     logger.info(
       {
@@ -131,7 +105,7 @@ router.patch("/resolve-artist/:id", requireAuth, requireAdmin, async (req: any, 
       correlationId,
     });
   } catch (error: any) {
-    const status = [400, 404, 409].includes(Number(error?.status))
+    const status = [400, 401, 404, 409].includes(Number(error?.status))
       ? Number(error.status)
       : 500;
 
