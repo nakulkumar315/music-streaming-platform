@@ -166,11 +166,12 @@ export class ArtistAccountStateService {
       );
       const sessionsRevoked = await revokeArtistSessions(client, artistId);
       const state = mapState(updated.rows[0], sessionsRevoked, "soft_delete");
-      await writeStateAudit(client, before, state, {
-        ...audit,
-        actorId: audit?.actorId ?? 0,
-        reason: audit?.reason || deletionReason,
-      });
+      await writeStateAudit(
+        client,
+        before,
+        state,
+        audit ? { ...audit, reason: audit.reason || deletionReason } : undefined
+      );
       return state;
     });
   }
