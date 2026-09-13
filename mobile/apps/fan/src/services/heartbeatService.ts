@@ -36,6 +36,10 @@ export function startHeartbeat(
   getPosition?: () => number,
   getDuration?: () => number
 ) {
+  // Multiple lifecycle surfaces may observe the same playing transition. Keep
+  // one timer per content instead of resetting the timer/sequence twice.
+  if (heartbeatInterval && currentContentId === contentId) return;
+
   stopHeartbeat();
   currentContentId = contentId;
 
