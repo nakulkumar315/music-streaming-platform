@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+import { CheckCircle, Eye, FileText, Plus, Shield, XCircle } from "lucide-react";
 import { http } from "../services/http";
-import { Plus, Eye, CheckCircle, XCircle, Shield, FileText } from "lucide-react";
 
 type TermsVersion = {
   version: string;
@@ -11,179 +11,285 @@ type TermsVersion = {
   updatedAt: string;
 };
 
+type TermsResponse = {
+  success: boolean;
+  terms?: TermsVersion[];
+  message?: string;
+  correlationId?: string;
+};
+
+function errorMessage(error: unknown, fallback: string) {
+  const value = error as {
+    response?: { data?: { message?: string; correlationId?: string } };
+    message?: string;
+  };
+  const message = value?.response?.data?.message || value?.message || fallback;
+  const correlationId = value?.response?.data?.correlationId;
+  return correlationId ? `${message} (Reference: ${correlationId})` : message;
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+}
+
 export default function AdminTermsManagementPage() {
   const [terms, setTerms] = useState<TermsVersion[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [previewTerms, setPreviewTerms] = useState<TermsVersion | null>(null);
 
   const fetchTerms = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const res = await http.get("/api/v1/admin/artists/terms-versions");
-      console.log("Terms response:", res.data);
-      if (res.data?.success) {
-        setTerms(res.data.terms || []);
+      const response = await http.get<TermsResponse>(
+        "/api/v1/admin/artists/terms-versions"
+      );
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || "Failed to load terms versions");
       }
-    } catch (error) {
-      console.error("Failed to fetch terms:", error);
+      setTerms(Array.isArray(response.data.terms) ? response.data.terms : []);
+    } catch (requestError: unknown) {
+      setTerms([]);
+      setError(errorMessage(requestError, "Failed to load terms versions"));
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchTerms();
+    void fetchTerms();
   }, []);
 
-  const handleCreateTerms = async (content: string) => {
+  const runMutation = async (
+    actionKey: string,
+    command: () => Promise<unknown>,
+    fallback: string
+  ) => {
+    if (busyAction) return false;
+    setBusyAction(actionKey);
+    setError(null);
     try {
-      await http.post("/api/v1/admin/artists/terms-versions", { content });
-      setShowCreateModal(false);
-      fetchTerms();
-    } catch (error) {
-      console.error("Failed to create terms:", error);
+      await command();
+      await fetchTerms();
+      return true;
+    } catch (requestError: unknown) {
+      setError(errorMessage(requestError, fallback));
+      return false;
+    } finally {
+      setBusyAction(null);
     }
   };
 
-  const handleToggleTermsStatus = async (term: TermsVersion) => {
-    try {
-      await http.put(`/api/v1/admin/artists/terms-versions/${term.version}`, {
-        isActive: !term.isActive,
-      });
-      fetchTerms();
-    } catch (error) {
-      console.error("Failed to toggle terms status:", error);
+  const handleCreateTerms = async (content: string) => {
+    const normalized = content.trim();
+    if (!normalized) {
+      setError("Terms content is required.");
+      return false;
     }
+
+    const success = await runMutation(
+      "create",
+      () => http.post("/api/v1/admin/artists/terms-versions", { content: normalized }),
+      "Failed to publish terms version"
+    );
+    if (success) setShowCreateModal(false);
+    return success;
+  };
+
+  const handleToggleTermsStatus = async (term: TermsVersion) => {
+    const action = term.isActive ? "deactivate" : "activate";
+    if (
+      term.isActive &&
+      !window.confirm(
+        `Deactivate ${term.version}? Future onboarding must have another active terms version before it can use updated terms.`
+      )
+    ) {
+      return;
+    }
+
+    await runMutation(
+      `toggle:${term.version}`,
+      () =>
+        http.put(`/api/v1/admin/artists/terms-versions/${encodeURIComponent(term.version)}`, {
+          isActive: !term.isActive,
+        }),
+      `Failed to ${action} ${term.version}`
+    );
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-blue-500/20 text-blue-400">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/20 text-blue-400">
             <Shield size={20} />
           </div>
           <div>
             <h1 className="text-2xl font-bold text-white">Terms & Conditions</h1>
-            <p className="text-sm text-[#8D7B77]">Manage terms versions and content</p>
+            <p className="text-sm text-[#8D7B77]">Manage future onboarding terms versions</p>
           </div>
         </div>
         <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+          type="button"
+          disabled={Boolean(busyAction)}
+          onClick={() => {
+            setError(null);
+            setShowCreateModal(true);
+          }}
+          className="flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Plus size={18} />
           New Version
         </button>
       </div>
 
+      {error && (
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">
+          <span>{error}</span>
+          <button
+            type="button"
+            disabled={loading || Boolean(busyAction)}
+            onClick={() => void fetchTerms()}
+            className="shrink-0 rounded-lg border border-red-300/20 px-2.5 py-1 text-xs disabled:opacity-50"
+          >
+            Reload
+          </button>
+        </div>
+      )}
+
       {loading ? (
-        <div className="text-center py-12">
-          <div className="w-10 h-10 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-sm text-[#8D7B77]">Loading terms...</p>
+        <div className="py-12 text-center">
+          <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
+          <p className="text-sm text-[#8D7B77]">Loading terms…</p>
         </div>
       ) : terms.length === 0 ? (
-        <div className="text-center py-12 border border-dashed border-white/10 rounded-xl">
-          <Shield className="w-16 h-16 text-[#8D7B77] mx-auto mb-4" />
-          <h3 className="text-lg font-semibold text-white mb-2">No Terms Versions</h3>
-          <p className="text-sm text-[#8D7B77] mb-4">Create your first terms version to get started</p>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
-          >
-            <Plus size={18} />
-            Create Terms
-          </button>
+        <div className="rounded-xl border border-dashed border-white/10 py-12 text-center">
+          <Shield className="mx-auto mb-4 h-16 w-16 text-[#8D7B77]" />
+          <h3 className="mb-2 text-lg font-semibold text-white">No Terms Versions</h3>
+          <p className="text-sm text-[#8D7B77]">
+            Publish a terms version before future artist onboarding uses this policy.
+          </p>
         </div>
       ) : (
         <div className="grid gap-4">
-          {terms.map((term) => (
-            <div
-              key={term.version}
-              className={`p-6 rounded-xl border ${
-                term.isActive
-                  ? "bg-blue-500/5 border-blue-500/20"
-                  : "bg-white/5 border-white/10 opacity-60"
-              }`}
-            >
-              <div className="flex items-start justify-between mb-4">
-                <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
-                    <h3 className="text-lg font-semibold text-white">{term.version}</h3>
-                    {term.isActive ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        <CheckCircle size={12} />
-                        Active
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
-                        <XCircle size={12} />
-                        Inactive
-                      </span>
-                    )}
+          {terms.map((term) => {
+            const actionBusy = busyAction === `toggle:${term.version}`;
+            return (
+              <div
+                key={term.version}
+                className={`rounded-xl border p-6 ${
+                  term.isActive
+                    ? "border-blue-500/20 bg-blue-500/5"
+                    : "border-white/10 bg-white/5 opacity-70"
+                }`}
+              >
+                <div className="mb-4 flex items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <div className="mb-2 flex items-center gap-3">
+                      <h3 className="text-lg font-semibold text-white">{term.version}</h3>
+                      {term.isActive ? (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400">
+                          <CheckCircle size={12} /> Active
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-red-500/20 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-400">
+                          <XCircle size={12} /> Inactive
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-[#8D7B77]">
+                      Effective from: {formatDate(term.effectiveFrom)}
+                    </p>
                   </div>
-                  <p className="text-sm text-[#8D7B77]">
-                    Effective from: {new Date(term.effectiveFrom).toLocaleDateString()}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => setPreviewTerms(term)}
+                      className="rounded-lg p-2 text-[#8D7B77] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+                      title="Preview Terms"
+                    >
+                      <Eye size={18} />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => void handleToggleTermsStatus(term)}
+                      className="rounded-lg p-2 text-[#8D7B77] transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      title={term.isActive ? "Deactivate" : "Activate"}
+                    >
+                      {actionBusy ? (
+                        <span className="block h-[18px] w-[18px] animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      ) : term.isActive ? (
+                        <XCircle size={18} className="text-red-400" />
+                      ) : (
+                        <CheckCircle size={18} className="text-emerald-400" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="max-h-32 overflow-hidden rounded-lg bg-white/5 p-4">
+                  <p className="line-clamp-3 whitespace-pre-wrap text-sm text-[#8D7B77]">
+                    {term.content}
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setPreviewTerms(term)}
-                    className="p-2 rounded-lg hover:bg-white/10 text-[#8D7B77] hover:text-white transition-colors"
-                    title="Preview Terms"
-                  >
-                    <Eye size={18} />
-                  </button>
-                  <button
-                    onClick={() => handleToggleTermsStatus(term)}
-                    className="p-2 rounded-lg hover:bg-white/10 text-[#8D7B77] hover:text-white transition-colors"
-                    title={term.isActive ? "Deactivate" : "Activate"}
-                  >
-                    {term.isActive ? <XCircle size={18} className="text-red-400" /> : <CheckCircle size={18} className="text-emerald-400" />}
-                  </button>
+
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-[#8D7B77]">
+                  <span>Created: {formatDate(term.createdAt)}</span>
+                  <span>Updated: {formatDate(term.updatedAt)}</span>
                 </div>
               </div>
-
-              <div className="p-4 rounded-lg bg-white/5 max-h-32 overflow-hidden">
-                <p className="text-sm text-[#8D7B77] line-clamp-3">{term.content}</p>
-              </div>
-
-              <div className="flex items-center justify-between mt-4 text-xs text-[#8D7B77]">
-                <span>Created: {new Date(term.createdAt).toLocaleString()}</span>
-                <span>Updated: {new Date(term.updatedAt).toLocaleString()}</span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-background border border-white/10 rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-white mb-4">Create New Terms Version</h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/10 bg-background p-6">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="rounded-xl bg-blue-500/10 p-2 text-blue-400">
+                <FileText size={20} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-white">Create New Terms Version</h2>
+                <p className="mt-1 text-xs text-[#8D7B77]">
+                  A successful publish becomes the canonical future-onboarding terms version.
+                </p>
+              </div>
+            </div>
             <CreateTermsForm
+              busy={busyAction === "create"}
               onSubmit={handleCreateTerms}
-              onCancel={() => setShowCreateModal(false)}
+              onCancel={() => {
+                if (!busyAction) setShowCreateModal(false);
+              }}
             />
           </div>
         </div>
       )}
 
       {previewTerms && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-background border border-white/10 rounded-2xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/10 bg-background p-6">
+            <div className="mb-4 flex items-center justify-between gap-4">
               <h2 className="text-xl font-bold text-white">{previewTerms.version}</h2>
               <button
+                type="button"
                 onClick={() => setPreviewTerms(null)}
-                className="p-2 rounded-lg hover:bg-white/10 text-white"
+                className="rounded-lg p-2 text-white hover:bg-white/10"
+                aria-label="Close preview"
               >
                 <XCircle size={20} />
               </button>
             </div>
-            <div className="p-4 rounded-lg bg-white/5">
-              <pre className="text-sm text-[#8D7B77] whitespace-pre-wrap font-sans">
+            <div className="rounded-lg bg-white/5 p-4">
+              <pre className="whitespace-pre-wrap break-words font-sans text-sm text-[#B8A6A1]">
                 {previewTerms.content}
               </pre>
             </div>
@@ -194,47 +300,60 @@ export default function AdminTermsManagementPage() {
   );
 }
 
-function CreateTermsForm({ onSubmit, onCancel }: { onSubmit: (content: string) => void; onCancel: () => void }) {
+function CreateTermsForm({
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  busy: boolean;
+  onSubmit: (content: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
   const [content, setContent] = useState("");
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (content.trim()) {
-      onSubmit(content);
-    }
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const normalized = content.trim();
+    if (!normalized || busy) return;
+    const success = await onSubmit(normalized);
+    if (success) setContent("");
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label className="block text-sm font-medium text-[#8D7B77] mb-2">Terms Content</label>
+        <label className="mb-2 block text-sm font-medium text-[#8D7B77]">
+          Terms Content
+        </label>
         <textarea
           value={content}
-          onChange={(e) => setContent(e.target.value)}
+          onChange={(event) => setContent(event.target.value)}
           rows={12}
-          className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-lg text-white focus:outline-none focus:border-blue-500 resize-none"
-          placeholder="Enter terms and conditions content..."
+          disabled={busy}
+          className="w-full resize-none rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-blue-500 disabled:opacity-50"
+          placeholder="Enter terms and conditions content…"
         />
       </div>
-      <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+      <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-3">
         <p className="text-xs text-yellow-400">
-          <strong>Note:</strong> Creating a new version will automatically deactivate all previous versions. Published terms cannot be edited.
+          <strong>Note:</strong> Publishing a new version deactivates previous versions according to the backend contract. Existing signed agreements keep their recorded terms version.
         </p>
       </div>
       <div className="flex gap-3 pt-4">
         <button
           type="button"
+          disabled={busy}
           onClick={onCancel}
-          className="flex-1 px-4 py-3 bg-white/5 text-white rounded-lg hover:bg-white/10 transition-colors"
+          className="flex-1 rounded-lg bg-white/5 px-4 py-3 text-white transition-colors hover:bg-white/10 disabled:opacity-50"
         >
           Cancel
         </button>
         <button
           type="submit"
-          disabled={!content.trim()}
-          className="flex-1 px-4 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={busy || !content.trim()}
+          className="flex-1 rounded-lg bg-blue-500 px-4 py-3 text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Publish Version
+          {busy ? "Publishing…" : "Publish Version"}
         </button>
       </div>
     </form>
