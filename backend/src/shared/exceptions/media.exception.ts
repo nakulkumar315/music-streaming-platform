@@ -11,7 +11,8 @@ export type MediaAccessDeniedCode =
   | "CONTENT_INTERNAL"
   | "CONTENT_TAKEN_DOWN"
   | "INVALID_VISIBILITY"
-  | "PLAYBACK_SESSION_LIMIT";
+  | "PLAYBACK_SESSION_LIMIT"
+  | "PLAYBACK_SESSION_EXPIRED";
 
 export class MediaNotFoundException extends Error {
   constructor(public readonly mediaId: number | string) {
