@@ -97,7 +97,7 @@ async function main() {
   const subscriptionIds: number[] = [];
   const paymentIds: string[] = [];
 
-  async function createUser(role: "FAN" | "ARTIST") {
+  async function createUser(role: "FAN" | "ARTIST" | "ADMIN" | "FINANCE" | "MODERATOR") {
     const result = await pool.query(
       `INSERT INTO users (email, password, role, status, is_deleted, artist_status, is_verified, name)
        VALUES ($1, 'test-hash', $2, 'ACTIVE', false, $3, $4, 'Refund Test')
@@ -116,6 +116,9 @@ async function main() {
 
   const fanId = await createUser("FAN");
   const artistId = await createUser("ARTIST");
+  const adminId = await createUser("ADMIN");
+  const financeId = await createUser("FINANCE");
+  const moderatorId = await createUser("MODERATOR");
 
   async function createCapturedPurchase(index: number, paymentStatus = "SUCCESS") {
     const subscription = await pool.query(
@@ -154,13 +157,12 @@ async function main() {
   }
 
   try {
-    // Full refund derives its amount from the captured payment and revokes access.
     const first = await createCapturedPurchase(1);
     assert.equal(await hasActiveArtistEntitlement(fanId, artistId), true);
     const gateway = new MockRefundGateway();
     const firstRefund = await initiateFullRefund(
       first.paymentId,
-      { userId: 900001, role: "FINANCE" },
+      { userId: financeId, role: "FINANCE" },
       gateway
     );
     assert.equal(firstRefund.request.status, "COMPLETED");
@@ -187,22 +189,20 @@ async function main() {
     assert.equal(Number(firstTx.rows[0].refund_amount), first.amount);
     assert.equal(firstTx.rows[0].refund_status, "REFUNDED");
 
-    // Repeat request is idempotent and never calls the provider again.
     const duplicate = await initiateFullRefund(
       first.paymentId,
-      { userId: 900001, role: "FINANCE" },
+      { userId: financeId, role: "FINANCE" },
       gateway
     );
     assert.equal(duplicate.idempotent, true);
     assert.equal(duplicate.request.status, "COMPLETED");
     assert.equal(gateway.createCalls, 1, "Duplicate refund must not create another gateway refund");
 
-    // Unknown, failed and unauthorized refund requests are rejected before gateway mutation.
     await assert.rejects(
       () =>
         initiateFullRefund(
           uuidv4(),
-          { userId: 900001, role: "FINANCE" },
+          { userId: financeId, role: "FINANCE" },
           new MockRefundGateway()
         ),
       (error: any) => error?.code === "PAYMENT_NOT_FOUND"
@@ -213,7 +213,7 @@ async function main() {
       () =>
         initiateFullRefund(
           failed.paymentId,
-          { userId: 900001, role: "FINANCE" },
+          { userId: financeId, role: "FINANCE" },
           new MockRefundGateway()
         ),
       (error: any) => error?.code === "PAYMENT_NOT_REFUNDABLE"
@@ -222,31 +222,29 @@ async function main() {
       () =>
         initiateFullRefund(
           failed.paymentId,
-          { userId: 900001, role: "MODERATOR" } as any,
+          { userId: moderatorId, role: "MODERATOR" } as any,
           new MockRefundGateway()
         ),
       (error: any) => error?.code === "REFUND_FORBIDDEN"
     );
 
-    // Concurrent double-clicks converge on one durable intent and one provider call.
     const concurrent = await createCapturedPurchase(3);
     const concurrentGateway = new MockRefundGateway();
     const concurrentResults = await Promise.all([
-      initiateFullRefund(concurrent.paymentId, { userId: 900001, role: "ADMIN" }, concurrentGateway),
-      initiateFullRefund(concurrent.paymentId, { userId: 900001, role: "ADMIN" }, concurrentGateway),
+      initiateFullRefund(concurrent.paymentId, { userId: adminId, role: "ADMIN" }, concurrentGateway),
+      initiateFullRefund(concurrent.paymentId, { userId: adminId, role: "ADMIN" }, concurrentGateway),
     ]);
     assert.equal(concurrentGateway.createCalls, 1, "Concurrent refund race must call gateway once");
     assert.ok(concurrentResults.every((result) => result.request.paymentId === concurrent.paymentId));
     const refundRows = await pool.query(`SELECT COUNT(*)::int AS count FROM refund_requests WHERE payment_id = $1`, [concurrent.paymentId]);
     assert.equal(refundRows.rows[0].count, 1, "One payment must have one logical refund request");
 
-    // Ambiguous gateway timeout remains reconcilable and must not be retried blindly.
     const ambiguous = await createCapturedPurchase(4);
     const ambiguousGateway = new MockRefundGateway();
     ambiguousGateway.mode = "ambiguous";
     const ambiguousResult = await initiateFullRefund(
       ambiguous.paymentId,
-      { userId: 900001, role: "ADMIN" },
+      { userId: adminId, role: "ADMIN" },
       ambiguousGateway
     );
     assert.equal(ambiguousResult.request.status, "RECONCILIATION_REQUIRED");
@@ -254,7 +252,7 @@ async function main() {
 
     const retry = await initiateFullRefund(
       ambiguous.paymentId,
-      { userId: 900001, role: "ADMIN" },
+      { userId: adminId, role: "ADMIN" },
       ambiguousGateway
     );
     assert.equal(retry.idempotent, true);
@@ -264,14 +262,12 @@ async function main() {
     assert.equal(reconciled.status, "COMPLETED");
     assert.equal(ambiguousGateway.createCalls, 1);
 
-    // A provider refund may be accepted as pending and later fail. Reconciliation
-    // records terminal failure without revoking entitlement or altering captured money.
     const providerFailed = await createCapturedPurchase(5);
     const failingGateway = new MockRefundGateway();
     failingGateway.mode = "pendingThenFailed";
     const pendingFailure = await initiateFullRefund(
       providerFailed.paymentId,
-      { userId: 900001, role: "FINANCE" },
+      { userId: financeId, role: "FINANCE" },
       failingGateway
     );
     assert.equal(pendingFailure.request.status, "PROVIDER_PENDING");
@@ -292,7 +288,6 @@ async function main() {
     );
     assert.equal(failedProviderTx.rows[0].refund_status, "FAILED");
 
-    // Provider/webhook partial refund is explicitly rejected in Phase 1.
     const partial = await createCapturedPurchase(6);
     const client = await pool.connect();
     try {
@@ -312,11 +307,10 @@ async function main() {
       client.release();
     }
 
-    // Cancellation is a separate entitlement transition and leaves money untouched.
     const cancelOnly = await createCapturedPurchase(7);
     const cancelled = await cancelSubscription(
       cancelOnly.subscriptionId,
-      { userId: 900001, role: "ADMIN" },
+      { userId: adminId, role: "ADMIN" },
       "Support cancellation test"
     );
     assert.equal(cancelled.status, "CANCELLED");
