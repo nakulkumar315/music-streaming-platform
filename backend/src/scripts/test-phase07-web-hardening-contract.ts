@@ -134,7 +134,7 @@ function main() {
   );
 
   assert.equal(
-    adminIndex.includes("requireRoles(\"ADMIN\"),\n  adminArtistValidationRouter,\n  adminArtistsRoutes"),
+    adminIndex.includes('requireRoles("ADMIN"),\n  adminArtistValidationRouter,\n  adminArtistsRoutes'),
     true,
     "Admin Artist validation must execute after authentication/RBAC and before legacy handlers"
   );
@@ -145,8 +145,7 @@ function main() {
     "Admin Artist subscription price must be positive and map cleanly to paise"
   );
   assert.equal(
-    adminArtistValidation.includes('code: "INVALID_REVENUE_SHARE"') ||
-      adminArtistValidation.includes('"INVALID_REVENUE_SHARE"'),
+    adminArtistValidation.includes('"INVALID_REVENUE_SHARE"'),
     true,
     "Admin Artist revenue-share input must fail closed instead of silently clamping"
   );
@@ -175,7 +174,7 @@ function main() {
     "Admin Artists must not define a private localhost API fallback"
   );
   assert.equal(
-    adminArtists.includes("currency: \"INR\"") || adminArtists.includes('currency: "INR"'),
+    adminArtists.includes('currency: "INR"'),
     true,
     "Admin Artists must display subscription pricing as INR"
   );
@@ -217,14 +216,14 @@ function main() {
     "Admin Artist detail must not expose destructive content deletion outside moderation governance"
   );
   assert.equal(
-    adminArtistDetail.includes("responseType: \"blob\"") &&
+    adminArtistDetail.includes('responseType: "blob"') &&
       adminArtistDetail.includes("window.URL.revokeObjectURL"),
     true,
     "Agreement PDF download must stay authenticated and release object URLs"
   );
 
   assert.equal(
-    adminCommissionPlans.includes("busyAction"),
+    adminCommissionPlans.includes("busyKey"),
     true,
     "Commission configuration must block overlapping privileged mutations"
   );
@@ -239,7 +238,7 @@ function main() {
     "Commission UI must not expose the legacy duplicate-same-unique-version action"
   );
   assert.equal(
-    adminCommissionPlans.includes("setError(errorMessage"),
+    adminCommissionPlans.includes("setError(failureMessage"),
     true,
     "Commission mutation failures must be visible instead of console-only"
   );
