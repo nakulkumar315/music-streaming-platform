@@ -52,8 +52,8 @@ function main() {
 
   assert.equal(app.includes("express.static"), false, "Generic public static media serving must not be mounted");
   assert.equal(app.includes('/api/v1/content/upload'), false, "Legacy artist content upload route must not be preserved");
-  assert.equal(app.includes('artistAssetUploadRouter'), true, "Artist public-brand assets must use the governed provider-backed router");
-  assert.equal(app.includes('artistPublicAssetRouter'), true, "Artist public-brand assets need a stable governed delivery route");
+  assert.equal(app.includes("artistAssetUploadRouter"), true, "Artist public-brand assets must use the governed provider-backed router");
+  assert.equal(app.includes("artistPublicAssetRouter"), true, "Artist public-brand assets need a stable governed delivery route");
 
   assert.equal(adminIndex.includes('requireRoles("ADMIN", "MODERATOR")'), true, "Content moderation must remain ADMIN/MODERATOR scoped");
   assert.equal(adminIndex.includes('router.use("/media", requireAuth, requireRoles("ADMIN")'), true, "Binary content upload must be ADMIN-only");
@@ -77,20 +77,22 @@ function main() {
   assert.equal(contentRoutes.includes("status = 'FLAGGED'"), false, "Moderation signals must not overwrite technical media status");
   assert.equal(contentRoutes.includes('router.get(\n  "/mine"'), true, "Artists need read-only content history");
   assert.equal(contentRoutes.includes('router.post("/upload"'), false, "Artist content binary upload must not exist");
-  assert.equal(contentRoutes.includes('router.delete('), false, "Artist content hard-delete path must not exist");
+  assert.equal(contentRoutes.includes("router.delete("), false, "Artist content hard-delete path must not exist");
 
   assert.equal(fanContentRoutes.includes("mediaUrl: null"), true, "Catalog/detail APIs must not expose protected media URLs");
   assert.equal(fanContentRoutes.includes("c.lifecycle_state = 'EARLY_ACCESS'"), true, "Fan discovery must require governed lifecycle state");
   assert.equal(fanContentRoutes.includes("c.status = 'READY'"), true, "Fan discovery must require technical readiness");
-  assert.equal(fanContentRoutes.includes("UPPER(u.artist_status::text) = 'APPROVED'"), true, "Fan discovery must require approved artist state");
+  assert.equal(fanContentRoutes.includes("artist_status::text) = 'APPROVED'"), true, "Fan discovery must require approved artist state");
 
   assert.equal(webhookSecurity.includes("timingSafeEqual"), true, "Webhook signature comparison must be timing safe");
   assert.equal(webhook.includes("CLOUDINARY_ASSET_MAPPING_PENDING"), true, "Unknown eager callbacks must retry instead of being consumed during mapping races");
   assert.equal(webhook.includes("processed_webhook_events"), true, "Webhook handling must be idempotent");
   assert.equal(webhook.includes("content.media_status_changed"), true, "Provider media-state changes must be audited");
 
-  assert.equal(mediaAuthz.includes("JOIN users u ON u.id = c.artist_id"), true, "Direct playback authorization must include current artist account state");
-  assert.equal(streamRoutes.includes("UPPER(u.artist_status::text) = 'APPROVED'"), true, "Artwork delivery must respect artist approval state");
+  assert.equal(mediaAuthz.includes("JOIN users"), true, "Direct playback authorization must include the owning user row");
+  assert.equal(mediaAuthz.includes("artist_status::text) = 'APPROVED'"), true, "Direct playback authorization must require approved artist state");
+  assert.equal(mediaAuthz.includes("is_verified = TRUE"), true, "Direct playback authorization must require verified artist state");
+  assert.equal(streamRoutes.includes("getContentForAccess(contentId)"), true, "Artwork delivery must use canonical current-state authorization lookup");
   assert.equal(streamRoutes.includes("isContentEligibleForPlayback"), true, "Artwork delivery must reuse lifecycle/technical eligibility policy");
 
   assert.equal(artistAssets.includes("multer.diskStorage"), true, "Artist branding assets must spool to disk");
