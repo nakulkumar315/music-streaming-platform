@@ -30,6 +30,11 @@ router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (re
   const correlationId = req?.correlationId || "-";
   const contentId = positiveInteger(req.body?.contentId);
   const userId = positiveInteger(req.user?.id);
+  const hasSessionId =
+    req.body?.sessionId !== undefined &&
+    req.body?.sessionId !== null &&
+    String(req.body?.sessionId).trim() !== "";
+  const sessionId = hasSessionId ? positiveInteger(req.body?.sessionId) : undefined;
   const kindRaw = String(req.body?.kind || "").trim().toLowerCase();
   const kind = kindRaw === "video" ? "video" : kindRaw === "audio" ? "audio" : undefined;
   const quality = String(req.body?.quality || "Auto").trim();
@@ -45,11 +50,20 @@ router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (re
       correlationId,
     });
   }
+  if (hasSessionId && !sessionId) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_PLAYBACK_SESSION",
+      message: "sessionId must be a positive integer",
+      correlationId,
+    });
+  }
 
   try {
     const result = await requestPlaybackAccess({
       contentId,
       userId,
+      sessionId,
       kind,
       quality,
       correlationId,
@@ -89,6 +103,7 @@ router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (re
       correlationId,
       userId,
       contentId,
+      sessionId,
       code: mapped.code,
       error: error?.message,
     };
