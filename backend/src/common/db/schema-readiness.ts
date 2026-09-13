@@ -112,12 +112,17 @@ const REQUIRED_CONSTRAINTS = [
   "fk_playback_history_content",
   "fk_playback_sessions_user",
   "fk_playback_sessions_content",
+  "fk_refund_requests_payment",
+  "fk_refund_requests_subscription",
+  "fk_refund_requests_user",
+  "fk_refund_requests_requested_by",
   "refund_requests_payment_unique",
   "refund_requests_gateway_payment_unique",
   "refund_requests_idempotency_unique",
   "refund_requests_provider_refund_unique",
   "refund_requests_amount_positive",
   "refund_requests_status_valid",
+  "refund_requests_requested_by_role_valid",
 ];
 
 export type SchemaReadinessResult = {
