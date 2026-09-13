@@ -28,6 +28,13 @@ export type PlaybackAccess = {
   contentLength?: number;
 };
 
+export type ActivePlaybackLease = {
+  contentId: number;
+  sessionId: number;
+};
+
+let activePlaybackLease: ActivePlaybackLease | null = null;
+
 export class StreamAccessError extends Error {
   readonly code: string;
   readonly status: number | null;
@@ -222,6 +229,25 @@ function positiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+export function getActivePlaybackLease(
+  contentId?: string | number
+): ActivePlaybackLease | null {
+  if (!activePlaybackLease) return null;
+  if (contentId === undefined) return { ...activePlaybackLease };
+  const validContentId = positiveInteger(contentId);
+  if (!validContentId || validContentId !== activePlaybackLease.contentId) return null;
+  return { ...activePlaybackLease };
+}
+
+function clearActivePlaybackLease(expectedSessionId?: number) {
+  if (
+    expectedSessionId === undefined ||
+    activePlaybackLease?.sessionId === expectedSessionId
+  ) {
+    activePlaybackLease = null;
+  }
+}
+
 /**
  * Requests initial playback access or refreshes the short-lived token for one
  * existing server playback lease. A refresh must return the same session id;
@@ -297,19 +323,6 @@ export async function getPlaybackAccess(
   }
 }
 
-/**
- * Compatibility helper for call sites that only need a one-shot URL. New
- * playback lifecycle code should use getPlaybackAccess so it retains sessionId.
- */
-export async function getPlaybackUrl(
-  contentId: string | number,
-  kind?: 'audio' | 'video',
-  quality?: VideoQuality
-): Promise<string> {
-  const access = await getPlaybackAccess(contentId, kind, quality);
-  return access.playbackUrl;
-}
-
 /** Best-effort explicit release of one server playback lease. */
 export async function terminatePlaybackAccess(
   sessionId: number,
@@ -329,5 +342,59 @@ export async function terminatePlaybackAccess(
     // Session release is best effort on close/switch. Server staleness cleanup
     // remains the final safety net; callers should clear local lease state.
     return false;
+  }
+}
+
+export async function releaseActivePlaybackLease(): Promise<boolean> {
+  const lease = activePlaybackLease;
+  if (!lease) return true;
+
+  // Clear first so an overlapping new playback request cannot accidentally
+  // reuse a lease the user has already chosen to release.
+  clearActivePlaybackLease(lease.sessionId);
+  return terminatePlaybackAccess(lease.sessionId, lease.contentId);
+}
+
+/**
+ * Managed URL helper used by the single global mobile player. Repeated calls
+ * for the same content are token refreshes and reuse one server lease. A call
+ * for different content releases the old lease before allocating a new one.
+ */
+export async function getPlaybackUrl(
+  contentId: string | number,
+  kind?: 'audio' | 'video',
+  quality?: VideoQuality
+): Promise<string> {
+  const numericContentId = positiveInteger(contentId);
+  if (!numericContentId) {
+    throw new StreamAccessError('Invalid content id', 'INVALID_CONTENT_ID', null);
+  }
+
+  if (activePlaybackLease && activePlaybackLease.contentId !== numericContentId) {
+    await releaseActivePlaybackLease();
+  }
+
+  const existing = getActivePlaybackLease(numericContentId);
+  try {
+    const access = await getPlaybackAccess(
+      numericContentId,
+      kind,
+      quality,
+      existing?.sessionId
+    );
+    activePlaybackLease = {
+      contentId: numericContentId,
+      sessionId: access.sessionId,
+    };
+    return access.playbackUrl;
+  } catch (error) {
+    if (
+      error instanceof StreamAccessError &&
+      (error.code === 'PLAYBACK_SESSION_EXPIRED' ||
+        error.code === 'PLAYBACK_SESSION_MISMATCH')
+    ) {
+      clearActivePlaybackLease(existing?.sessionId);
+    }
+    throw error;
   }
 }
