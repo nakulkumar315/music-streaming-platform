@@ -186,10 +186,12 @@ export async function uploadAdminMedia(req: any, res: Response) {
     });
     uploaded.push({ storageKey: mediaKey, providerAssetId: mediaUpload.providerAssetId });
 
-    const technicalStatus =
-      storageProvider === "cloudinary" && metadata.contentType === "VIDEO"
-        ? "PROCESSING"
-        : "READY";
+    const adaptiveVideo = storageProvider === "cloudinary" && metadata.contentType === "VIDEO";
+    const technicalStatus = adaptiveVideo ? "PROCESSING" : "READY";
+    const adaptiveStatus = adaptiveVideo ? "PENDING" : "NOT_APPLICABLE";
+    const adaptiveQualities = adaptiveVideo && Array.isArray(mediaUpload.adaptiveQualities)
+      ? mediaUpload.adaptiveQualities
+      : [];
 
     const client = await pool.connect();
     try {
@@ -206,7 +208,11 @@ export async function uploadAdminMedia(req: any, res: Response) {
                 audio_url = NULL,
                 video_url = NULL,
                 file_key = NULL,
-                uploaded_at = now()
+                uploaded_at = now(),
+                adaptive_status = $8,
+                adaptive_qualities = $9::text[],
+                source_width = $10,
+                source_height = $11
           WHERE id = $1`,
         [
           contentId,
@@ -216,6 +222,10 @@ export async function uploadAdminMedia(req: any, res: Response) {
           metadata.contentType === "VIDEO" ? mediaUpload.providerAssetId || null : null,
           thumbnailUpload.providerAssetId || null,
           thumbnailUpload.providerUrl || null,
+          adaptiveStatus,
+          adaptiveQualities,
+          mediaUpload.sourceWidth || null,
+          mediaUpload.sourceHeight || null,
         ]
       );
 
@@ -247,6 +257,10 @@ export async function uploadAdminMedia(req: any, res: Response) {
             lifecycle_state: "DRAFT",
             technical_status: technicalStatus,
             storage_provider: storageProvider,
+            adaptive_status: adaptiveStatus,
+            adaptive_qualities: adaptiveQualities,
+            source_width: mediaUpload.sourceWidth || null,
+            source_height: mediaUpload.sourceHeight || null,
             ...(releaseMapping
               ? {
                   release_id: releaseMapping.releaseId,
@@ -274,6 +288,8 @@ export async function uploadAdminMedia(req: any, res: Response) {
         type: metadata.contentType,
         lifecycleState: "DRAFT",
         technicalStatus,
+        adaptiveStatus,
+        adaptiveQualities,
         isApproved: false,
         isTakenDown: false,
         ...(releaseMapping
@@ -293,6 +309,8 @@ export async function uploadAdminMedia(req: any, res: Response) {
         .query(
           `UPDATE content_items
               SET status = 'FAILED',
+                  adaptive_status = 'FAILED',
+                  adaptive_qualities = '{}'::text[],
                   provider_asset_id = NULL,
                   audio_provider_asset_id = NULL,
                   video_provider_asset_id = NULL,
