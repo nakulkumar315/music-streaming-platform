@@ -21,6 +21,10 @@ export interface UploadObjectResult {
   providerUrl?: string;
   etag?: string;
   sizeBytes?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  /** Planned adaptive variants. They are not playable until provider completion is verified. */
+  adaptiveQualities?: string[];
 }
 
 export interface ObjectMetadata {
