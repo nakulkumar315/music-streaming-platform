@@ -218,7 +218,10 @@ function testJobsAndSchemaContracts() {
   assert.match(schedulers, /runClaimedJob/);
   assert.match(schedulers, /stale-playback-session-cleanup/);
 
-  assert.match(schema, /20260913_0010_analytics_audit_operational_integrity/);
+  // Phase-specific tests verify the capabilities Phase 08 introduced; later
+  // phases may legitimately advance LATEST_SCHEMA_VERSION.
+  assert.match(schema, /operational_job_runs/);
+  assert.match(schema, /analytics_events/);
   assert.match(schema, /"run_token"/);
   assert.match(schema, /audit_logs_append_only/);
   assert.match(migration, /CREATE TRIGGER audit_logs_append_only/);
