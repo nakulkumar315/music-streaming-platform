@@ -42,7 +42,10 @@ function testSourceAwareRenditionLadder() {
     assert.equal(rendition.format, "m3u8");
     assert.ok(Number(rendition.height) <= 480);
   }
-  assert.deepEqual(transforms.at(-1), { streaming_profile: "auto", format: "m3u8" });
+  assert.deepEqual(transforms[transforms.length - 1], {
+    streaming_profile: "auto",
+    format: "m3u8",
+  });
 }
 
 function testMigrationAndSchemaGate() {
@@ -74,6 +77,7 @@ function testPlaybackDescriptorAndQualityAuthority() {
   const access = readBackend("modules/media/media-access.service.ts");
   const authz = readBackend("shared/security/media-authz.service.ts");
   const stream = readBackend("modules/streaming/stream.routes.ts");
+  const subscription = readBackend("modules/subscription/sub.routes.ts");
 
   assert.match(access, /adaptiveStatus !== "READY"/);
   assert.match(access, /actualAdaptiveQualities\(content\.adaptive_qualities\)/);
@@ -96,6 +100,13 @@ function testPlaybackDescriptorAndQualityAuthority() {
   assert.match(stream, /playbackMode: result\.playbackMode/);
   assert.match(stream, /expiresAt: result\.expiresAt/);
   assert.match(stream, /qualities: result\.qualities/);
+
+  // The legacy mobile endpoint must not turn an undocumented subscription tier
+  // into playback authority. It exists only to keep the old player on Auto/ABR;
+  // content-specific qualities are still returned by /stream/access.
+  assert.match(subscription, /router\.get\("\/quality"/);
+  assert.match(subscription, /policy: "SOURCE_AVAILABLE"/);
+  assert.match(subscription, /Actual[\s\S]{0,120}content-specific qualities[\s\S]{0,120}\/stream\/access/);
 }
 
 function testAdaptiveHlsSecurityBoundary() {
