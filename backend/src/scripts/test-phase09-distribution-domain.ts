@@ -122,21 +122,29 @@ function testMigrationAndBackfillContract() {
   assert.match(schema, /LATEST_SCHEMA_VERSION = "20260914_0011_distribution_ready_domain"/);
   assert.match(schema, /"release_track_id"/);
   assert.match(schema, /releases_distribution_status_valid/);
+  assert.match(schema, /releases_exclusivity_after_release_dates/);
+  assert.match(schema, /fk_release_tracks_release_artist/);
+  assert.match(schema, /fk_release_contributors_release_track/);
+  assert.match(schema, /fk_external_platform_links_release_track/);
   assert.match(schema, /distribution_submissions_idempotency_unique/);
+  assert.match(schema, /fk_distribution_outbox_release_submission/);
   assert.match(schema, /idx_distribution_outbox_pending/);
 
-  assert.match(migration, /WHERE UPPER\(c\.type\) = 'AUDIO'/);
-  assert.match(migration, /'SINGLE'/);
-  assert.match(migration, /'NOT_SUBMITTED'/);
-  assert.match(migration, /ON CONFLICT \(source_content_id\) DO NOTHING/);
-  assert.match(migration, /ON CONFLICT \(content_item_id\) DO NOTHING/);
-  assert.match(migration, /SET release_track_id = rt\.id/);
+  const backfillStart = migration.indexOf("-- Idempotent backfill:");
+  assert.ok(backfillStart >= 0, "Migration must contain an explicit existing-content backfill");
+  const backfill = migration.slice(backfillStart);
+  assert.match(backfill, /WHERE UPPER\(c\.type\) = 'AUDIO'/);
+  assert.match(backfill, /'SINGLE'/);
+  assert.match(backfill, /'NOT_SUBMITTED'/);
+  assert.match(backfill, /ON CONFLICT \(source_content_id\) DO NOTHING/);
+  assert.match(backfill, /ON CONFLICT \(content_item_id\) DO NOTHING/);
+  assert.match(backfill, /SET release_track_id = rt\.id/);
   assert.doesNotMatch(
-    migration,
-    /SELECT[\s\S]*?'DISTRIBUTED'[\s\S]*?FROM content_items/i,
+    backfill,
+    /'DISTRIBUTED'/,
     "Legacy content backfill must never mark releases as distributed"
   );
-  assert.doesNotMatch(migration, /generate.*(?:isrc|upc)|random.*(?:isrc|upc)/i);
+  assert.doesNotMatch(backfill, /generate.*(?:isrc|upc)|random.*(?:isrc|upc)/i);
 }
 
 function testCompatibilityAndProviderBoundary() {
@@ -145,6 +153,8 @@ function testCompatibilityAndProviderBoundary() {
   );
   const provider = readBackend("modules/distribution/distributor-provider.ts");
   const upload = readBackend("controllers/admin/adminMediaController.ts");
+  const uploadRoute = readBackend("routes/admin/media.ts");
+  const governance = readBackend("modules/content/content-governance.service.ts");
   const fanContent = readBackend("modules/content/content.routes.ts");
 
   assert.match(compatibility, /ensureSingleReleaseForAudioContent/);
@@ -165,6 +175,20 @@ function testCompatibilityAndProviderBoundary() {
   assert.match(upload, /metadata\.contentType === "AUDIO" && releaseMetadata/);
   assert.match(upload, /ensureSingleReleaseForAudioContent/);
   assert.match(upload, /distributionStatus: "NOT_SUBMITTED"/);
+  assert.match(uploadRoute, /fields:\s*24/);
+
+  assert.match(governance, /function syncLinkedReleasePhase/);
+  assert.match(governance, /syncLinkedReleasePhase\(client, contentId, "EARLY_ACCESS"\)/);
+  assert.match(governance, /syncLinkedReleasePhase\(client, contentId, "DRAFT"\)/);
+  assert.match(governance, /syncLinkedReleasePhase\(client, contentId, "TAKEDOWN"\)/);
+  const lifecycleSyncStart = governance.indexOf("async function syncLinkedReleasePhase");
+  const lifecycleSyncEnd = governance.indexOf("async function lockContent", lifecycleSyncStart);
+  assert.ok(lifecycleSyncStart >= 0 && lifecycleSyncEnd > lifecycleSyncStart);
+  assert.doesNotMatch(
+    governance.slice(lifecycleSyncStart, lifecycleSyncEnd),
+    /distribution_status/,
+    "Phase-1 moderation must not imply distribution lifecycle state"
+  );
 
   // Current fan identity remains content_items.id; release IDs are additive and
   // must not replace browse/playback identifiers during Phase 09.
