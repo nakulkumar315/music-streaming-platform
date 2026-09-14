@@ -85,6 +85,30 @@ async function writeAudit(
   );
 }
 
+/**
+ * Keep the additive Release business aggregate aligned with the existing
+ * Phase-1 content lifecycle. This deliberately changes only release_phase;
+ * distribution_status belongs to the future distributor workflow and is never
+ * inferred from moderation/streaming state.
+ */
+async function syncLinkedReleasePhase(
+  client: PoolClient,
+  contentId: number,
+  phase: "DRAFT" | "EARLY_ACCESS" | "TAKEDOWN"
+) {
+  await client.query(
+    `UPDATE releases r
+        SET release_phase = $2,
+            updated_at = now()
+       FROM release_tracks rt
+       JOIN content_items c ON c.release_track_id = rt.id
+      WHERE c.id = $1
+        AND rt.release_id = r.id
+        AND r.release_phase IS DISTINCT FROM $2`,
+    [contentId, phase]
+  );
+}
+
 async function lockContent(client: PoolClient, contentId: number): Promise<ContentRow> {
   const result = await client.query<ContentRow>(
     `SELECT id, title, type, artist_id, genre, lifecycle_state, is_approved,
@@ -156,6 +180,7 @@ export async function approveContent(rawContentId: unknown, rawActor: Governance
       throw new ContentGovernanceError(409, "CONTENT_TAKEN_DOWN", "Taken-down content cannot be approved");
     }
     if (current.lifecycle_state === "EARLY_ACCESS" && current.is_approved) {
+      await syncLinkedReleasePhase(client, contentId, "EARLY_ACCESS");
       await client.query("COMMIT");
       return { contentId, lifecycleState: "EARLY_ACCESS", technicalStatus: current.status, idempotent: true };
     }
@@ -176,6 +201,7 @@ export async function approveContent(rawContentId: unknown, rawActor: Governance
         RETURNING lifecycle_state, status`,
       [contentId]
     );
+    await syncLinkedReleasePhase(client, contentId, "EARLY_ACCESS");
 
     await writeAudit(client, actor, contentId, "content.approved", {
       from_lifecycle_state: current.lifecycle_state,
@@ -230,6 +256,7 @@ export async function rejectContent(
         WHERE id = $1`,
       [contentId, reason]
     );
+    await syncLinkedReleasePhase(client, contentId, "DRAFT");
     await writeAudit(client, actor, contentId, "content.rejected", {
       lifecycle_state: "DRAFT",
       technical_status: current.status,
@@ -262,6 +289,7 @@ export async function takedownContent(
     await client.query("BEGIN");
     const current = await lockContent(client, contentId);
     if (current.is_taken_down) {
+      await syncLinkedReleasePhase(client, contentId, "TAKEDOWN");
       await client.query("COMMIT");
       return { contentId, isTakenDown: true, idempotent: true };
     }
@@ -272,6 +300,7 @@ export async function takedownContent(
         WHERE id = $1`,
       [contentId]
     );
+    await syncLinkedReleasePhase(client, contentId, "TAKEDOWN");
     await writeAudit(client, actor, contentId, "content.takedown", {
       lifecycle_state: current.lifecycle_state,
       technical_status: current.status,
