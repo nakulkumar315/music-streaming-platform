@@ -193,8 +193,8 @@ CREATE TABLE IF NOT EXISTS distribution_outbox (
   processed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_distribution_outbox_release FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
-  CONSTRAINT fk_distribution_outbox_submission FOREIGN KEY (submission_id) REFERENCES distribution_submissions(id) ON DELETE SET NULL,
-  CONSTRAINT fk_distribution_outbox_release_submission FOREIGN KEY (release_id, submission_id) REFERENCES distribution_submissions(release_id, id) ON DELETE SET NULL,
+  CONSTRAINT fk_distribution_outbox_submission FOREIGN KEY (submission_id) REFERENCES distribution_submissions(id) ON DELETE CASCADE,
+  CONSTRAINT fk_distribution_outbox_release_submission FOREIGN KEY (release_id, submission_id) REFERENCES distribution_submissions(release_id, id) ON DELETE CASCADE,
   CONSTRAINT distribution_outbox_event_key_unique UNIQUE (event_key),
   CONSTRAINT distribution_outbox_status_valid CHECK (status IN ('PENDING', 'PROCESSING', 'PROCESSED', 'FAILED')),
   CONSTRAINT distribution_outbox_attempt_nonnegative CHECK (attempt_count >= 0)
