@@ -142,17 +142,20 @@ function testUploadWebhookAndBackfillReadiness() {
   assert.match(upload, /source_height/);
   assert.match(upload, /adaptive_qualities/);
   assert.match(upload, /adaptive_status/);
-  assert.match(upload, /qualitiesForSourceHeight/);
+  assert.match(upload, /adaptiveQualities/);
 
   assert.match(provider, /cloudinaryEagerTransformsForSourceHeight/);
+  assert.match(provider, /qualitiesForSourceHeight/);
   assert.match(provider, /eager_async: true/);
   assert.match(provider, /eager_notification_url/);
 
   assert.match(webhook, /adaptive_status/);
   assert.match(webhook, /adaptive_qualities/);
   assert.match(webhook, /successfulHlsResultCount/);
-  assert.match(webhook, /hasAutoMasterResult/);
-  assert.match(webhook, /adaptiveStatus = fullAdaptiveReady \? "READY" : "FAILED"/);
+  assert.match(webhook, /hasSuccessfulAutoHlsResult/);
+  assert.match(webhook, /adaptiveEvidenceComplete/);
+  assert.match(webhook, /adaptiveOutcome = isVideo/);
+  assert.match(webhook, /adaptiveEvidenceComplete[\s\S]{0,120}\? "READY"[\s\S]{0,120}: "FAILED"/);
 
   assert.match(backfill, /pg_try_advisory_lock/);
   assert.match(backfill, /adaptive_status = 'PENDING'/);
