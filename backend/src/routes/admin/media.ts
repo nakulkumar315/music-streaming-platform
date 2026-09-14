@@ -29,7 +29,10 @@ const upload = multer({
   limits: {
     fileSize: maxFileSize,
     files: 2,
-    fields: 12,
+    // Phase 09 adds bounded optional release metadata to the existing admin
+    // upload form. Keep the parser bounded while allowing the full supported
+    // field set without silently rejecting legitimate requests.
+    fields: 24,
   },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || "").toLowerCase();
