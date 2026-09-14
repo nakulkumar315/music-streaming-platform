@@ -1,6 +1,7 @@
 import {
   MediaAccessDeniedException,
   MediaExpiredAccessException,
+  MediaInvalidQualityException,
   MediaInvalidTokenException,
   MediaNotFoundException,
   MediaNotReadyException
@@ -29,6 +30,9 @@ export function mapStreamAccessError(err: unknown): StreamAccessErrorPayload {
       };
     }
     return { status: 409, code: "CONTENT_NOT_READY", message: err.message };
+  }
+  if (err instanceof MediaInvalidQualityException) {
+    return { status: 400, code: "INVALID_PLAYBACK_QUALITY", message: err.message };
   }
   if (err instanceof MediaAccessDeniedException) {
     const status =
