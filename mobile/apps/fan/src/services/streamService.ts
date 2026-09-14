@@ -1,18 +1,27 @@
 /**
- * Requests short-lived playback URLs from the canonical backend MediaAccessService.
- * The client never decides entitlement or preview permission.
+ * Requests short-lived playback descriptors from the canonical backend
+ * MediaAccessService. The client never decides entitlement or preview permission.
  */
 
 import Constants from 'expo-constants';
 import { APP_ENV, isAllowedPlaybackUrl } from '../config/env';
 import { apiV1, normalizeApiError } from './api';
 
+export type VideoQuality = '144p' | '240p' | '360p' | '480p' | '720p' | '1080p' | 'Auto' | 'SD' | 'HD';
+export type CanonicalVideoQuality = Exclude<VideoQuality, 'SD' | 'HD'>;
+export type PlaybackMode = 'HLS' | 'PROGRESSIVE';
+
 export type StreamAccessResponse = {
   success: boolean;
   mediaId?: number;
   sessionId?: number;
   playbackUrl?: string;
+  playbackMode?: PlaybackMode;
   expiresIn?: number;
+  expiresAt?: string;
+  qualities?: CanonicalVideoQuality[];
+  selectedQuality?: CanonicalVideoQuality;
+  defaultQuality?: CanonicalVideoQuality | 'ORIGINAL';
   contentType?: string;
   contentLength?: number;
   message?: string;
@@ -23,7 +32,12 @@ export type PlaybackAccess = {
   mediaId: number;
   sessionId: number;
   playbackUrl: string;
-  expiresIn?: number;
+  playbackMode: PlaybackMode;
+  expiresIn: number;
+  expiresAt: string;
+  qualities: CanonicalVideoQuality[];
+  selectedQuality?: CanonicalVideoQuality;
+  defaultQuality: CanonicalVideoQuality | 'ORIGINAL';
   contentType?: string;
   contentLength?: number;
 };
@@ -56,11 +70,6 @@ export type PlaybackErrorPresentation = {
   shouldStopPlayback: boolean;
 };
 
-/**
- * Converts backend machine codes into deterministic user-safe playback UX.
- * Do not parse backend message strings here; those are diagnostic text and may
- * change independently of the public API contract.
- */
 export function getPlaybackErrorPresentation(error: unknown): PlaybackErrorPresentation {
   const code = error instanceof StreamAccessError ? error.code : 'STREAM_ACCESS_FAILED';
 
@@ -108,6 +117,13 @@ export function getPlaybackErrorPresentation(error: unknown): PlaybackErrorPrese
         retryable: true,
         shouldStopPlayback: true,
       };
+    case 'INVALID_PLAYBACK_QUALITY':
+      return {
+        title: 'Quality unavailable',
+        message: 'That quality is not available for this video. Choose one of the available options.',
+        retryable: false,
+        shouldStopPlayback: false,
+      };
     case 'PLAYBACK_SESSION_LIMIT':
       return {
         title: 'Playback limit reached',
@@ -141,6 +157,7 @@ export function getPlaybackErrorPresentation(error: unknown): PlaybackErrorPrese
         shouldStopPlayback: false,
       };
     case 'INVALID_PLAYBACK_URL':
+    case 'INVALID_PLAYBACK_DESCRIPTOR':
       return {
         title: 'Playback unavailable',
         message: 'The server returned an invalid playback source. Please try again later.',
@@ -170,11 +187,7 @@ function getDevHost(): string | null {
 
 export function normalizePlaybackUrl(url: string): string {
   if (!url) return url;
-
-  // Localhost rewriting is a development-only convenience. Preview and
-  // production bundles must consume the exact HTTPS URL issued by the server.
   if (APP_ENV !== 'development' && APP_ENV !== 'test') return url;
-
   if (!/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\b/i.test(url)) return url;
   const host = getDevHost();
   if (!host) return url;
@@ -199,9 +212,11 @@ export function validatePlaybackUrl(url: string, kind?: 'audio' | 'video'): bool
   const lowerPath = parsed.pathname.toLowerCase();
   const kindParam = String(parsed.searchParams.get('kind') || '').toLowerCase();
   const token = parsed.searchParams.get('token');
+  const resource = parsed.searchParams.get('resource');
   const isTokenizedPrivateStream = lowerPath.includes('/media/stream/');
   if (isTokenizedPrivateStream) {
-    if (!token) return false;
+    if (!token && !resource) return false;
+    if (resource) return true;
     if (!kind) return true;
     return kindParam === kind;
   }
@@ -216,15 +231,12 @@ export function validatePlaybackUrl(url: string, kind?: 'audio' | 'video'): bool
       lowerPath.endsWith('.m4a') ||
       lowerPath.endsWith('.aac') ||
       lowerPath.endsWith('.wav') ||
-      // Cloudinary commonly delivers audio assets through its /video/ resource path.
       lowerPath.includes('/video/')
     );
   }
 
   return true;
 }
-
-export type VideoQuality = '144p' | '240p' | '360p' | '480p' | '720p' | '1080p' | 'Auto' | 'SD' | 'HD';
 
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
@@ -268,11 +280,56 @@ function clearActivePlaybackLease(expectedSessionId?: number) {
   }
 }
 
-/**
- * Requests initial playback access or refreshes the short-lived token for one
- * existing server playback lease. A refresh must return the same session id;
- * otherwise the client fails closed rather than silently consuming a new slot.
- */
+function parseDescriptor(
+  data: StreamAccessResponse,
+  numericContentId: number,
+  returnedSessionId: number,
+  kind?: 'audio' | 'video',
+  status?: number
+): PlaybackAccess {
+  const normalized = normalizePlaybackUrl(String(data.playbackUrl || ''));
+  if (!validatePlaybackUrl(normalized, kind)) {
+    throw new StreamAccessError('Received an invalid playback URL', 'INVALID_PLAYBACK_URL', status ?? null);
+  }
+
+  const playbackMode = data.playbackMode;
+  const expiresIn = Number(data.expiresIn);
+  const expiresAt = String(data.expiresAt || '');
+  const expiryMs = Date.parse(expiresAt);
+  if (
+    (playbackMode !== 'HLS' && playbackMode !== 'PROGRESSIVE') ||
+    !Number.isSafeInteger(expiresIn) ||
+    expiresIn <= 0 ||
+    !Number.isFinite(expiryMs) ||
+    expiryMs <= Date.now()
+  ) {
+    throw new StreamAccessError('Invalid playback descriptor', 'INVALID_PLAYBACK_DESCRIPTOR', status ?? null);
+  }
+
+  const qualities = Array.isArray(data.qualities)
+    ? data.qualities.filter((quality): quality is CanonicalVideoQuality =>
+        ['144p', '240p', '360p', '480p', '720p', '1080p', 'Auto'].includes(String(quality)))
+    : [];
+
+  if (playbackMode === 'HLS' && kind === 'video' && qualities.length === 0) {
+    throw new StreamAccessError('Adaptive playback has no verified qualities', 'INVALID_PLAYBACK_DESCRIPTOR', status ?? null);
+  }
+
+  return {
+    mediaId: positiveInteger(data.mediaId) || numericContentId,
+    sessionId: returnedSessionId,
+    playbackUrl: normalized,
+    playbackMode,
+    expiresIn,
+    expiresAt,
+    qualities,
+    selectedQuality: data.selectedQuality,
+    defaultQuality: data.defaultQuality || 'ORIGINAL',
+    contentType: data.contentType,
+    contentLength: data.contentLength,
+  };
+}
+
 export async function getPlaybackAccess(
   contentId: string | number,
   kind?: 'audio' | 'video',
@@ -288,11 +345,7 @@ export async function getPlaybackAccess(
     const sessionId =
       existingSessionId === undefined ? undefined : positiveInteger(existingSessionId);
     if (existingSessionId !== undefined && !sessionId) {
-      throw new StreamAccessError(
-        'Playback session is invalid',
-        'PLAYBACK_SESSION_EXPIRED',
-        null
-      );
+      throw new StreamAccessError('Playback session is invalid', 'PLAYBACK_SESSION_EXPIRED', null);
     }
 
     const res = await apiV1.post<StreamAccessResponse>('/stream/access', {
@@ -319,23 +372,7 @@ export async function getPlaybackAccess(
       );
     }
 
-    const normalized = normalizePlaybackUrl(data.playbackUrl);
-    if (!validatePlaybackUrl(normalized, kind)) {
-      throw new StreamAccessError(
-        'Received an invalid playback URL',
-        'INVALID_PLAYBACK_URL',
-        res.status
-      );
-    }
-
-    return {
-      mediaId: positiveInteger(data.mediaId) || numericContentId,
-      sessionId: returnedSessionId,
-      playbackUrl: normalized,
-      expiresIn: data.expiresIn,
-      contentType: data.contentType,
-      contentLength: data.contentLength,
-    };
+    return parseDescriptor(data, numericContentId, returnedSessionId, kind, res.status);
   } catch (error) {
     if (error instanceof StreamAccessError) throw error;
     const normalized = normalizeApiError(error);
@@ -343,7 +380,6 @@ export async function getPlaybackAccess(
   }
 }
 
-/** Best-effort explicit release of one server playback lease. */
 export async function terminatePlaybackAccess(
   sessionId: number,
   contentId: string | number
@@ -359,8 +395,6 @@ export async function terminatePlaybackAccess(
     });
     return response.data?.success === true && response.data?.terminated === true;
   } catch {
-    // Session release is best effort on close/switch. Server staleness cleanup
-    // remains the final safety net; callers should clear local lease state.
     return false;
   }
 }
@@ -368,19 +402,10 @@ export async function terminatePlaybackAccess(
 export async function releaseActivePlaybackLease(): Promise<boolean> {
   const lease = activePlaybackLease;
   if (!lease) return true;
-
-  // Clear first so an overlapping new playback request cannot accidentally
-  // reuse a lease the user has already chosen to release.
   clearActivePlaybackLease(lease.sessionId);
   return terminatePlaybackAccess(lease.sessionId, lease.contentId);
 }
 
-/**
- * Explicitly replace an expired same-content server lease. This is used only
- * after the backend has rejected the old heartbeat/session as expired. The
- * fresh access request re-checks account/content/subscription authorization and
- * concurrency before a new lease is accepted locally.
- */
 export async function reacquireExpiredPlaybackLease(
   contentId: string | number
 ): Promise<ActivePlaybackLease> {
@@ -399,12 +424,6 @@ export async function reacquireExpiredPlaybackLease(
   return storeActiveLease(numericContentId, access.sessionId);
 }
 
-/**
- * Return a locally-fresh lease, refresh an older same-content lease, or create a
- * new one when none exists. The backend is authoritative for whether a stale
- * lease is still reusable; an expired/mismatched lease is explicitly replaced
- * only after that refresh attempt fails with a session-expiry code.
- */
 export async function ensureActivePlaybackLease(
   contentId: string | number
 ): Promise<ActivePlaybackLease> {
@@ -450,16 +469,11 @@ export async function ensureActivePlaybackLease(
   return storeActiveLease(numericContentId, created.sessionId);
 }
 
-/**
- * Managed URL helper used by the single global mobile player. Repeated calls
- * for the same content are token refreshes and reuse one server lease. A call
- * for different content releases the old lease before allocating a new one.
- */
-export async function getPlaybackUrl(
+export async function getPlaybackDescriptor(
   contentId: string | number,
   kind?: 'audio' | 'video',
   quality?: VideoQuality
-): Promise<string> {
+): Promise<PlaybackAccess> {
   const numericContentId = positiveInteger(contentId);
   if (!numericContentId) {
     throw new StreamAccessError('Invalid content id', 'INVALID_CONTENT_ID', null);
@@ -478,7 +492,7 @@ export async function getPlaybackUrl(
       existing?.sessionId
     );
     storeActiveLease(numericContentId, access.sessionId);
-    return access.playbackUrl;
+    return access;
   } catch (error) {
     if (
       error instanceof StreamAccessError &&
@@ -489,4 +503,13 @@ export async function getPlaybackUrl(
     }
     throw error;
   }
+}
+
+export async function getPlaybackUrl(
+  contentId: string | number,
+  kind?: 'audio' | 'video',
+  quality?: VideoQuality
+): Promise<string> {
+  const access = await getPlaybackDescriptor(contentId, kind, quality);
+  return access.playbackUrl;
 }
