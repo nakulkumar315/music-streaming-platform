@@ -18,6 +18,7 @@ import searchRoutes from "./routes/search";
 import mediaRoutes from "./routes/media";
 import { razorpayWebhook } from "./controllers/paymentController";
 import { handleMediaWebhook } from "./controllers/media/WebhookController";
+import adaptiveMediaStreamRoutes from "./modules/media/adaptive-media-stream.routes";
 import mediaStreamRoutes from "./modules/media/media-stream.routes";
 import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
@@ -134,6 +135,10 @@ export function createApp(runtime: EnvValidationResult) {
   app.use(globalLimiter);
   app.use(httpLogger);
 
+  // Adaptive Cloudinary video is intercepted first so manifests/segments remain
+  // session-bound. All non-adaptive/progressive media continues through the
+  // existing Phase-02 protected stream boundary.
+  app.use("/media/stream", adaptiveMediaStreamRoutes);
   app.use("/media/stream", mediaStreamRoutes);
 
   app.use("/api/v1/fan", fanRoutes);
