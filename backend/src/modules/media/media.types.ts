@@ -3,6 +3,7 @@
  */
 
 import type { Visibility, MediaStatus } from "./media.constants";
+import type { VideoQuality } from "../../shared/security/media-authz.service";
 
 export interface MediaRecord {
   id: number;
@@ -27,11 +28,18 @@ export interface MediaRecord {
   uploadedAt?: Date | null;
 }
 
+export type PlaybackMode = "HLS" | "PROGRESSIVE";
+
 export interface PlaybackAccessResponse {
   mediaId: number;
   sessionId: number;
   playbackUrl: string;
+  playbackMode: PlaybackMode;
   expiresIn: number;
+  expiresAt: string;
+  qualities: VideoQuality[];
+  selectedQuality?: VideoQuality;
+  defaultQuality: VideoQuality | "ORIGINAL";
   contentType?: string;
   contentLength?: number;
 }
