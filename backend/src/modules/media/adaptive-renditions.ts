@@ -16,6 +16,8 @@ export const ADAPTIVE_RENDITION_LADDER: readonly AdaptiveRenditionDefinition[] =
   { quality: "1080p", width: 1920, height: 1080, bitRate: "3000k" },
 ] as const;
 
+const SUCCESS_STATES = new Set(["success", "succeeded", "complete", "completed", "ready"]);
+
 export function renditionsForSourceHeight(sourceHeight: unknown): AdaptiveRenditionDefinition[] {
   const height = Number(sourceHeight);
   if (!Number.isFinite(height) || height <= 0) return [];
@@ -39,13 +41,29 @@ export function cloudinaryEagerTransformsForSourceHeight(sourceHeight: unknown) 
   ];
 }
 
+function isSuccessfulHlsEntry(entry: any): boolean {
+  const status = String(entry?.status || entry?.state || "").trim().toLowerCase();
+  const url = String(entry?.secure_url || entry?.url || "").trim().toLowerCase();
+  const format = String(entry?.format || "").trim().toLowerCase();
+  const success = !status || SUCCESS_STATES.has(status);
+  return success && (format === "m3u8" || url.includes(".m3u8"));
+}
+
 export function successfulHlsResultCount(eager: unknown): number {
   if (!Array.isArray(eager)) return 0;
-  return eager.filter((entry: any) => {
-    const status = String(entry?.status || entry?.state || "").trim().toLowerCase();
-    const url = String(entry?.secure_url || entry?.url || "").trim().toLowerCase();
-    const format = String(entry?.format || "").trim().toLowerCase();
-    const success = !status || ["success", "succeeded", "complete", "completed", "ready"].includes(status);
-    return success && (format === "m3u8" || url.includes(".m3u8"));
-  }).length;
+  return eager.filter(isSuccessfulHlsEntry).length;
+}
+
+export function hasSuccessfulAutoHlsResult(eager: unknown): boolean {
+  if (!Array.isArray(eager)) return false;
+  return eager.some((entry: any) => {
+    if (!isSuccessfulHlsEntry(entry)) return false;
+    const transformation = String(entry?.transformation || "").toLowerCase();
+    const url = String(entry?.secure_url || entry?.url || "").toLowerCase();
+    return (
+      transformation.includes("streaming_profile") ||
+      transformation.includes("sp_auto") ||
+      url.includes("sp_auto")
+    );
+  });
 }
