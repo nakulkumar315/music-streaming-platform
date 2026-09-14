@@ -1,6 +1,6 @@
 import { pool } from "./index";
 
-export const LATEST_SCHEMA_VERSION = "20260914_0011_distribution_ready_domain";
+export const LATEST_SCHEMA_VERSION = "20260914_0012_adaptive_protected_media";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -31,6 +31,10 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "video_provider_asset_id",
     "thumbnail_provider_asset_id",
     "release_track_id",
+    "adaptive_status",
+    "adaptive_qualities",
+    "source_width",
+    "source_height",
   ],
   releases: [
     "id",
@@ -278,6 +282,10 @@ const REQUIRED_CONSTRAINTS = [
   "content_items_type_valid",
   "content_items_storage_provider_valid",
   "content_items_media_key_valid",
+  "content_items_adaptive_status_valid",
+  "content_items_adaptive_qualities_valid",
+  "content_items_source_width_positive",
+  "content_items_source_height_positive",
   "fk_content_items_release_track",
   "fk_releases_artist",
   "fk_releases_source_content",
@@ -377,6 +385,7 @@ const REQUIRED_INDEXES = [
   "idx_analytics_events_session",
   "idx_operational_job_runs_started",
   "idx_content_items_release_track_unique",
+  "idx_content_items_adaptive_readiness",
   "idx_releases_artist_created",
   "idx_releases_phase",
   "idx_releases_distribution_status",
