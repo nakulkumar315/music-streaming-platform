@@ -32,7 +32,7 @@ function testReleaseMetadataValidation() {
       earlyAccessStartAt: "2026-10-01T00:00:00Z",
       publicReleaseAt: "2026-10-08T00:00:00Z",
       exclusivityEndAt: "2026-10-08T00:00:00Z",
-      upcEan: "123456789012",
+      upcEan: "1234-5678-9012",
       isrc: "IN-ABC-26-12345",
       contributors: JSON.stringify([
         { displayName: "Guest Artist", role: "FEATURED_ARTIST" },
@@ -73,6 +73,18 @@ function testReleaseMetadataValidation() {
         {
           earlyAccessStartAt: "2026-10-08T00:00:00Z",
           publicReleaseAt: "2026-10-01T00:00:00Z",
+        },
+        "AUDIO"
+      ),
+    "INVALID_RELEASE_DATES"
+  );
+  expectValidationError(
+    () =>
+      validatePhase1ReleaseMetadata(
+        {
+          earlyAccessStartAt: "2026-10-01T00:00:00Z",
+          publicReleaseAt: "2026-10-08T00:00:00Z",
+          exclusivityEndAt: "2026-10-05T00:00:00Z",
         },
         "AUDIO"
       ),
