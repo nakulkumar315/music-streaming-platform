@@ -12,6 +12,7 @@ import { generatePlaybackAccess } from "../../shared/delivery/services/media-del
 import { DeliveryFailedException } from "../../shared/exceptions/delivery.exception";
 import {
   MediaAccessDeniedException,
+  MediaInvalidQualityException,
   MediaNotFoundException,
   MediaNotReadyException,
 } from "../../shared/exceptions/media.exception";
@@ -20,6 +21,7 @@ import {
   checkMediaEntitlement,
   getContentForAccess,
   validateQualityAccess,
+  type VideoQuality,
   type VisibilityType,
 } from "../../shared/security/media-authz.service";
 import {
@@ -32,7 +34,7 @@ import {
   isContentEligibleForPlayback,
   normalizeVisibilityForPlayback,
 } from "./media-policy.service";
-import type { PlaybackAccessResponse } from "./media.types";
+import type { PlaybackAccessResponse, PlaybackMode } from "./media.types";
 
 export interface RequestPlaybackInput {
   contentId: number;
@@ -49,10 +51,24 @@ export interface RequestPlaybackInput {
 }
 
 const SUPPORTED_PROVIDERS = new Set(["local", "cloudinary", "s3", "firebase"]);
+const QUALITY_ORDER: Exclude<VideoQuality, "Auto">[] = [
+  "144p",
+  "240p",
+  "360p",
+  "480p",
+  "720p",
+  "1080p",
+];
 
 function positiveInteger(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function actualAdaptiveQualities(raw: unknown): Exclude<VideoQuality, "Auto">[] {
+  if (!Array.isArray(raw)) return [];
+  const set = new Set(raw.map((value) => String(value)));
+  return QUALITY_ORDER.filter((quality) => set.has(quality));
 }
 
 export async function requestPlaybackAccess(
@@ -140,9 +156,49 @@ export async function requestPlaybackAccess(
     throw new MediaNotReadyException(contentId, "storage key missing");
   }
 
-  const quality = await validateQualityAccess(userId, input.quality);
+  const parsedQuality = await validateQualityAccess(userId, input.quality);
+  const availableAdaptiveQualities = actualAdaptiveQualities(content.adaptive_qualities);
+  const adaptiveVideo = resolvedKind === "video" && storageProvider === "cloudinary";
+  let playbackMode: PlaybackMode = "PROGRESSIVE";
+  let selectedQuality: VideoQuality | undefined;
+  let qualities: VideoQuality[] = [];
+  let defaultQuality: VideoQuality | "ORIGINAL" = "ORIGINAL";
+
+  if (adaptiveVideo) {
+    const adaptiveStatus = String(content.adaptive_status || "").toUpperCase();
+    if (adaptiveStatus !== "READY") {
+      throw new MediaNotReadyException(contentId, `ADAPTIVE_${adaptiveStatus || "PENDING"}`);
+    }
+    if (!availableAdaptiveQualities.length) {
+      throw new MediaNotReadyException(contentId, "ADAPTIVE_RENDITIONS_MISSING");
+    }
+
+    playbackMode = "HLS";
+    qualities = [...availableAdaptiveQualities];
+    const requested = parsedQuality.quality;
+    if (requested === "Auto") {
+      selectedQuality = availableAdaptiveQualities.length > 1
+        ? "Auto"
+        : availableAdaptiveQualities[0];
+    } else if (availableAdaptiveQualities.includes(requested)) {
+      selectedQuality = requested;
+    } else {
+      throw new MediaInvalidQualityException(
+        `Quality ${requested} is not available for this content`
+      );
+    }
+    defaultQuality = availableAdaptiveQualities.length > 1 ? "Auto" : availableAdaptiveQualities[0];
+  } else if (resolvedKind === "video" && parsedQuality.quality !== "Auto") {
+    // Progressive providers have no server-proven rendition ladder. Do not let
+    // the client label arbitrary URLs as a requested quality.
+    throw new MediaInvalidQualityException(
+      "Manual quality selection is unavailable for progressive video"
+    );
+  }
+
   const config = getMediaConfig();
-  const expiresInSeconds = Math.max(30, Math.min(config.mediaUrlTtlSeconds, 300));
+  const expiresInSeconds = config.mediaUrlTtlSeconds;
+  const expiresAtEpochSeconds = Math.floor(Date.now() / 1000) + expiresInSeconds;
 
   let sessionId: number;
   let createdNewSession = false;
@@ -184,16 +240,13 @@ export async function requestPlaybackAccess(
       expiresInSeconds,
       token,
       kind: resolvedKind,
-      quality: quality.quality,
+      quality: selectedQuality || parsedQuality.quality,
     });
 
     if (!access?.playbackUrl) {
       throw new DeliveryFailedException("Protected playback URL was not generated");
     }
 
-    // Issuing or refreshing a signed access URL is not proof that playback
-    // actually started. Phase 08 counts a play only after server-bounded forward
-    // progress is observed on this lease's trusted heartbeat path.
     logger.info(
       {
         userId,
@@ -201,6 +254,7 @@ export async function requestPlaybackAccess(
         sessionId,
         sessionReused: !createdNewSession,
         storageProvider,
+        playbackMode,
         correlationId,
       },
       "[Playback] Access granted"
@@ -210,7 +264,12 @@ export async function requestPlaybackAccess(
       mediaId: contentId,
       sessionId,
       playbackUrl: access.playbackUrl,
-      expiresIn: access.expiresIn,
+      playbackMode,
+      expiresIn: expiresInSeconds,
+      expiresAt: new Date(expiresAtEpochSeconds * 1000).toISOString(),
+      qualities,
+      selectedQuality,
+      defaultQuality,
       contentType: access.contentType,
       contentLength: access.contentLength,
     };
