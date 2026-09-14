@@ -29,14 +29,14 @@ export interface MediaProvider {
   ): Promise<UploadResult>;
 
   /**
-   * Generate a secure, short-lived playback URL directly to the CDN cache or secure stream.
-   * @param providerAssetId Provider-specific tracking identifier (e.g. public_id)
-   * @param fileType "audio" | "video"
+   * Generate a secure playback URL for exactly the remaining server-authorized
+   * lifetime. Provider URL expiry is never a second authorization policy.
    */
   generateSignedPlaybackUrl(
     providerAssetId: string,
     fileType: "audio" | "video",
-    quality?: VideoQuality
+    quality: VideoQuality | undefined,
+    expiresInSeconds: number
   ): Promise<PlayerUrlResult>;
 
   generatePublicAssetUrl?(
@@ -44,8 +44,6 @@ export interface MediaProvider {
     fileType: "thumbnail"
   ): string;
 
-  /**
-   * Perform deletion on the provider.
-   */
+  /** Perform deletion on the provider. */
   deleteFile(providerAssetId: string): Promise<boolean>;
 }
