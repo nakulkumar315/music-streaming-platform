@@ -188,18 +188,19 @@ export function validatePhase1ReleaseMetadata(
   const earlyAccessStartAt = optionalDate(input.earlyAccessStartAt, "earlyAccessStartAt");
   const publicReleaseAt = optionalDate(input.publicReleaseAt, "publicReleaseAt");
   const exclusivityEndAt = optionalDate(input.exclusivityEndAt, "exclusivityEndAt");
-  const upcEanRaw = optionalString(input.upcEan, "upcEan", 14);
-  const isrcRaw = optionalString(input.isrc, "isrc", 12);
 
-  const upcEan = upcEanRaw ? upcEanRaw.replace(/\s+/g, "") : null;
+  // Allow common human-facing separators, then validate/store canonical forms.
+  const upcEanRaw = optionalString(input.upcEan, "upcEan", 24);
+  const isrcRaw = optionalString(input.isrc, "isrc", 24);
+  const upcEan = upcEanRaw ? upcEanRaw.replace(/[\s-]+/g, "") : null;
+  const isrc = isrcRaw ? isrcRaw.replace(/[\s-]+/g, "").toUpperCase() : null;
+
   if (upcEan && !UPC_EAN_SHAPE.test(upcEan)) {
     throw new UploadValidationError(
       "INVALID_UPC_EAN",
       "upcEan must contain 8, 12, 13 or 14 digits"
     );
   }
-
-  const isrc = isrcRaw ? isrcRaw.replace(/[\s-]+/g, "").toUpperCase() : null;
   if (isrc && !ISRC_SHAPE.test(isrc)) {
     throw new UploadValidationError(
       "INVALID_ISRC",
@@ -213,10 +214,14 @@ export function validatePhase1ReleaseMetadata(
       "publicReleaseAt cannot be before earlyAccessStartAt"
     );
   }
-  if (earlyAccessStartAt && exclusivityEndAt && exclusivityEndAt < earlyAccessStartAt) {
+  if (
+    exclusivityEndAt &&
+    ((earlyAccessStartAt && exclusivityEndAt < earlyAccessStartAt) ||
+      (publicReleaseAt && exclusivityEndAt < publicReleaseAt))
+  ) {
     throw new UploadValidationError(
       "INVALID_RELEASE_DATES",
-      "exclusivityEndAt cannot be before earlyAccessStartAt"
+      "exclusivityEndAt cannot be before the configured release dates"
     );
   }
 
