@@ -38,10 +38,11 @@ function main() {
   assert.equal(server.includes("closeRedis()"), true, "Graceful shutdown must close Redis through its canonical lifecycle");
 
   const schemaReadiness = source("common/db/schema-readiness.ts");
-  assert.equal(
-    schemaReadiness.includes('LATEST_SCHEMA_VERSION = "20260913_0009_playback_progress"'),
-    true,
-    "Startup schema gate must require Phase 06A playback progress migration"
+  const latestSchemaMatch = schemaReadiness.match(/LATEST_SCHEMA_VERSION\s*=\s*"([^"]+)"/);
+  assert.ok(latestSchemaMatch, "Schema readiness must declare the latest required migration");
+  assert.ok(
+    String(latestSchemaMatch?.[1] || "") >= "20260913_0009_playback_progress",
+    "Startup schema gate must never regress behind Phase 06A playback progress migration"
   );
   assert.equal(
     schemaReadiness.includes("playback_progress: ["),
