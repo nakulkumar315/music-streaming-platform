@@ -41,6 +41,13 @@ export class MediaAccessDeniedException extends Error {
   }
 }
 
+export class MediaInvalidQualityException extends Error {
+  constructor(message = "Requested playback quality is not supported") {
+    super(message);
+    this.name = "MediaInvalidQualityException";
+  }
+}
+
 export class MediaExpiredAccessException extends Error {
   constructor(message = "Playback access has expired") {
     super(message);
