@@ -32,6 +32,12 @@ function positiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function noStorePlaybackAccess(res: any) {
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
 async function heartbeatEntitlementAllowed(userId: number, contentId: number) {
   const content = await getContentForAccess(contentId);
   if (!content) {
@@ -72,6 +78,7 @@ async function heartbeatEntitlementAllowed(userId: number, contentId: number) {
 }
 
 router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (req: any, res: any) => {
+  noStorePlaybackAccess(res);
   const correlationId = req?.correlationId || "-";
   const contentId = positiveInteger(req.body?.contentId);
   const userId = positiveInteger(req.user?.id);
@@ -135,7 +142,12 @@ router.post("/access", requireAuth, requireFan, playbackAccessLimiter, async (re
       mediaId: result.mediaId,
       sessionId: result.sessionId,
       playbackUrl,
+      playbackMode: result.playbackMode,
       expiresIn: result.expiresIn,
+      expiresAt: result.expiresAt,
+      qualities: result.qualities,
+      selectedQuality: result.selectedQuality,
+      defaultQuality: result.defaultQuality,
       contentType: result.contentType,
       contentLength: result.contentLength,
       correlationId,
