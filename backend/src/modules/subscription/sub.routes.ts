@@ -135,6 +135,22 @@ router.get("/access-check", requireAuth, async (req: any, res) => {
   }
 });
 
+/**
+ * Legacy mobile compatibility only. Phase-1 source documents do not define a
+ * commercial HD-vs-SD subscription entitlement. The active VideoScreen expects
+ * this historical response shape; returning the unrestricted marker prevents it
+ * from inventing a 240p cap and preserves Auto/ABR as the default. Actual
+ * content-specific qualities remain authoritative in /stream/access.
+ */
+router.get("/quality", requireAuth, (_req: any, res) => {
+  return res.json({
+    success: true,
+    quality: "HD",
+    maxResolution: "1080p",
+    policy: "SOURCE_AVAILABLE",
+  });
+});
+
 router.get("/summary", requireAuth, async (req: any, res) => {
   const userId = positiveInteger(req.user?.id);
   if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
