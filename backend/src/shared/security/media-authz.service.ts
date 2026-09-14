@@ -8,7 +8,10 @@
 
 import { pool } from "../../common/db";
 import { getArtistEntitlementState } from "./artist-entitlement.service";
-import type { MediaAccessDeniedCode } from "../exceptions/media.exception";
+import {
+  MediaInvalidQualityException,
+  type MediaAccessDeniedCode,
+} from "../exceptions/media.exception";
 
 export type VisibilityType = "PUBLIC" | "PROTECTED" | "PRIVATE_INTERNAL";
 
@@ -54,8 +57,14 @@ export async function validateQualityAccess(
     return { authorized: true, quality: "Auto", maxAllowedQuality: "1080p" };
   }
 
-  const quality =
-    VALID_QUALITIES.find((candidate) => candidate.toLowerCase() === raw) ?? "Auto";
+  const quality = VALID_QUALITIES.find(
+    (candidate) => candidate.toLowerCase() === raw
+  );
+  if (!quality) {
+    throw new MediaInvalidQualityException(
+      `Unsupported playback quality: ${String(requestedQuality || "")}`
+    );
+  }
   return { authorized: true, quality, maxAllowedQuality: "1080p" };
 }
 
@@ -140,6 +149,10 @@ export interface ContentForAccess {
   thumbnail_provider_asset_id: string | null;
   visibility: string;
   status: string;
+  adaptive_status: string;
+  adaptive_qualities: string[];
+  source_width: number | null;
+  source_height: number | null;
   lifecycle_state: string;
   is_approved: boolean;
   is_taken_down: boolean;
@@ -174,6 +187,10 @@ export async function getContentForAccess(
             c.thumbnail_provider_asset_id,
             c.visibility,
             c.status,
+            c.adaptive_status,
+            c.adaptive_qualities,
+            c.source_width,
+            c.source_height,
             c.lifecycle_state,
             c.is_approved,
             c.is_taken_down,
