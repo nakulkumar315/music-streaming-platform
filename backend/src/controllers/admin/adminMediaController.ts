@@ -11,6 +11,11 @@ import {
   validateSpooledFile,
   validateUploadMetadata,
 } from "../../modules/content/media-upload-validation";
+import { validatePhase1ReleaseMetadata } from "../../modules/distribution/release-domain.validation";
+import {
+  ensureSingleReleaseForAudioContent,
+  type ReleaseCompatibilityResult,
+} from "../../modules/distribution/release-compatibility.service";
 
 function correlationUuid(value: unknown): string | null {
   const normalized = String(value || "").trim();
@@ -77,6 +82,7 @@ export async function uploadAdminMedia(req: any, res: Response) {
   const storage = getStorageService();
   const uploaded: Array<{ storageKey: string; providerAssetId?: string }> = [];
   let contentId: number | null = null;
+  let releaseMapping: ReleaseCompatibilityResult | null = null;
 
   try {
     if (!thumbnail || !media) {
@@ -93,6 +99,10 @@ export async function uploadAdminMedia(req: any, res: Response) {
       contentType: req.body?.contentType,
       subscriptionRequired: req.body?.subscriptionRequired,
     });
+    const releaseMetadata = validatePhase1ReleaseMetadata(
+      (req.body ?? {}) as Record<string, unknown>,
+      metadata.contentType
+    );
     await assertGovernableArtist(metadata.artistId);
 
     const mediaConfig = getMediaConfig();
@@ -208,6 +218,19 @@ export async function uploadAdminMedia(req: any, res: Response) {
           thumbnailUpload.providerUrl || null,
         ]
       );
+
+      if (metadata.contentType === "AUDIO" && releaseMetadata) {
+        releaseMapping = await ensureSingleReleaseForAudioContent(client, {
+          contentId,
+          artistId: metadata.artistId,
+          title: metadata.title,
+          genre: metadata.genre,
+          thumbnailStorageKey: thumbnailKey,
+          thumbnailProviderAssetId: thumbnailUpload.providerAssetId || null,
+          metadata: releaseMetadata,
+        });
+      }
+
       await client.query(
         `INSERT INTO audit_logs (
            id, action, entity, entity_id, actor_id, actor_role, status,
@@ -224,6 +247,13 @@ export async function uploadAdminMedia(req: any, res: Response) {
             lifecycle_state: "DRAFT",
             technical_status: technicalStatus,
             storage_provider: storageProvider,
+            ...(releaseMapping
+              ? {
+                  release_id: releaseMapping.releaseId,
+                  release_track_id: releaseMapping.releaseTrackId,
+                  distribution_status: "NOT_SUBMITTED",
+                }
+              : {}),
           },
         ]
       );
@@ -246,6 +276,13 @@ export async function uploadAdminMedia(req: any, res: Response) {
         technicalStatus,
         isApproved: false,
         isTakenDown: false,
+        ...(releaseMapping
+          ? {
+              releaseId: releaseMapping.releaseId,
+              releaseTrackId: releaseMapping.releaseTrackId,
+              distributionStatus: "NOT_SUBMITTED",
+            }
+          : {}),
       },
       correlationId,
     });
