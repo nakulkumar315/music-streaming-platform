@@ -18,6 +18,10 @@ import type {
   GetPublicObjectUrlParams,
 } from "../interfaces/storage-types.interface";
 import { normalizePublicId, isValidPublicId } from "../../utils/cloudinary.utils";
+import {
+  cloudinaryEagerTransformsForSourceHeight,
+  qualitiesForSourceHeight,
+} from "../../../modules/media/adaptive-renditions";
 
 export interface CloudinaryStorageProviderConfig {
   cloudName: string;
@@ -52,13 +56,12 @@ function inferKind(contentType: string | undefined, storageKey: string): "audio"
   throw new Error("Unable to determine Cloudinary media type");
 }
 
-function optionsFor(
+function uploadOptionsFor(
   kind: "audio" | "video" | "thumbnail",
-  publicId: string,
-  webhookUrl: string
+  publicId: string
 ) {
   const isThumbnail = kind === "thumbnail";
-  const options: Record<string, unknown> = {
+  return {
     public_id: publicId,
     resource_type: isThumbnail ? "image" : "video",
     type: isThumbnail ? "upload" : "authenticated",
@@ -66,22 +69,6 @@ function optionsFor(
     unique_filename: false,
     use_filename: false,
   };
-
-  if (kind === "video") {
-    options.eager = [
-      { width: 256, height: 144, crop: "scale", bit_rate: "100k", format: "m3u8" },
-      { width: 426, height: 240, crop: "scale", bit_rate: "200k", format: "m3u8" },
-      { width: 640, height: 360, crop: "scale", bit_rate: "400k", format: "m3u8" },
-      { width: 854, height: 480, crop: "scale", bit_rate: "700k", format: "m3u8" },
-      { width: 1280, height: 720, crop: "scale", bit_rate: "1500k", format: "m3u8" },
-      { width: 1920, height: 1080, crop: "scale", bit_rate: "3000k", format: "m3u8" },
-      { streaming_profile: "auto", format: "m3u8" },
-    ];
-    options.eager_async = true;
-    options.eager_notification_url = webhookUrl;
-  }
-
-  return options;
 }
 
 export class CloudinaryStorageProvider implements IStorageProvider {
@@ -99,20 +86,55 @@ export class CloudinaryStorageProvider implements IStorageProvider {
   async upload(params: UploadObjectParams): Promise<UploadObjectResult> {
     const publicId = providerIdFromStorageKey(params.storageKey);
     const kind = inferKind(params.contentType, params.storageKey);
-    const options = optionsFor(kind, publicId, this.config.webhookUrl);
+    const options = uploadOptionsFor(kind, publicId);
 
     return new Promise<UploadObjectResult>((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(options, (error: any, result: any) => {
+      const uploadStream = cloudinary.uploader.upload_stream(options, async (error: any, result: any) => {
         if (error) return reject(error);
         if (!result?.public_id) return reject(new Error("Cloudinary upload returned no public_id"));
 
-        resolve({
-          storageKey: params.storageKey,
-          providerAssetId: String(result.public_id),
-          providerUrl: kind === "thumbnail" ? String(result.secure_url || "") || undefined : undefined,
-          etag: result.etag ? String(result.etag) : undefined,
-          sizeBytes: Number.isFinite(Number(result.bytes)) ? Number(result.bytes) : undefined,
-        });
+        const sourceWidth = Number.isFinite(Number(result.width)) ? Number(result.width) : undefined;
+        const sourceHeight = Number.isFinite(Number(result.height)) ? Number(result.height) : undefined;
+        const adaptiveQualities = kind === "video" ? qualitiesForSourceHeight(sourceHeight) : undefined;
+
+        try {
+          // Generate adaptive derivatives only after the real source dimensions
+          // are known. This prevents low-resolution masters being upscaled simply
+          // to populate a hard-coded quality menu.
+          if (kind === "video") {
+            if (!sourceHeight) throw new Error("Cloudinary video upload returned no source dimensions");
+            await cloudinary.uploader.explicit(String(result.public_id), {
+              resource_type: "video",
+              type: "authenticated",
+              eager: cloudinaryEagerTransformsForSourceHeight(sourceHeight),
+              eager_async: true,
+              eager_notification_url: this.config.webhookUrl,
+            });
+          }
+
+          resolve({
+            storageKey: params.storageKey,
+            providerAssetId: String(result.public_id),
+            providerUrl: kind === "thumbnail" ? String(result.secure_url || "") || undefined : undefined,
+            etag: result.etag ? String(result.etag) : undefined,
+            sizeBytes: Number.isFinite(Number(result.bytes)) ? Number(result.bytes) : undefined,
+            sourceWidth,
+            sourceHeight,
+            adaptiveQualities,
+          });
+        } catch (processingError) {
+          // Upload succeeded but adaptive preparation could not be scheduled.
+          // Remove the just-created protected asset so the caller cannot persist
+          // a content row that points at an untracked orphan master.
+          if (kind === "video") {
+            await cloudinary.uploader.destroy(String(result.public_id), {
+              resource_type: "video",
+              type: "authenticated",
+              invalidate: true,
+            }).catch(() => undefined);
+          }
+          reject(processingError);
+        }
       });
 
       if (Buffer.isBuffer(params.body)) {
