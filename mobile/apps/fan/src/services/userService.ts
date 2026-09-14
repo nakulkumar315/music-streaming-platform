@@ -205,9 +205,9 @@ export const userService: UserService = {
   async getListenTime() {
     try {
       const res = await apiV1.get('/user/listen-time');
-      return { 
-        totalMinutes: Number(res.data?.totalMinutes || 0), 
-        formattedTime: (res.data?.formattedTime || '0m').toString() 
+      return {
+        totalMinutes: Number(res.data?.totalMinutes || 0),
+        formattedTime: (res.data?.formattedTime || '0m').toString()
       };
     } catch (err: any) {
       logger.warn('[userService] getListenTime failed - status:', err?.response?.status, 'msg:', err?.message);
@@ -267,11 +267,15 @@ export const userService: UserService = {
       const res = await apiV1.get('/subscriptions/quality');
       return {
         quality: res.data?.quality === 'HD' ? 'HD' : 'SD',
-        maxResolution: (res.data?.maxResolution ?? '240p').toString(),
+        maxResolution: (res.data?.maxResolution ?? '1080p').toString(),
         isGrace: Boolean(res.data?.isGrace),
       };
     } catch {
-      return { quality: 'SD', maxResolution: '240p' };
+      // Phase 09A removed the historical commercial HD/SD entitlement. If this
+      // legacy compatibility endpoint is temporarily unavailable, never invent a
+      // 240p cap or platform-plan upsell. /stream/access remains authoritative
+      // for the actual source-backed adaptive rendition set.
+      return { quality: 'HD', maxResolution: '1080p' };
     }
   },
 
