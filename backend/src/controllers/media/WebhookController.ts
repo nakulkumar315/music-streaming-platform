@@ -1,6 +1,10 @@
 import type { Response } from "express";
 import { pool } from "../../common/db";
 import {
+  hasSuccessfulAutoHlsResult,
+  successfulHlsResultCount,
+} from "../../modules/media/adaptive-renditions";
+import {
   CloudinaryWebhookAuthError,
   deriveCloudinaryEventId,
   verifyCloudinaryWebhook,
@@ -62,8 +66,6 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
     const eventId = deriveCloudinaryEventId(rawBody, timestamp, signature);
     const notificationType = String(body.notification_type || "").trim().toLowerCase();
 
-    // Valid but unrelated Cloudinary notifications are acknowledged only after
-    // signature verification. They never mutate content state.
     if (notificationType !== "eager") {
       return res.status(200).json({ received: true, ignored: true, correlationId });
     }
@@ -104,7 +106,8 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
       }
 
       const contentResult = await client.query(
-        `SELECT id, status, lifecycle_state, is_approved, is_taken_down
+        `SELECT id, type, status, adaptive_status, adaptive_qualities,
+                lifecycle_state, is_approved, is_taken_down
            FROM content_items
           WHERE storage_provider = 'cloudinary'
             AND (provider_asset_id = $1 OR video_provider_asset_id = $1)
@@ -114,9 +117,6 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
       );
       const content = contentResult.rows[0];
       if (!content) {
-        // A valid eager callback can race the application's final DB mapping
-        // transaction. Do not consume the idempotency marker in that case:
-        // rollback and return 5xx so Cloudinary retries the same callback.
         await client.query("ROLLBACK");
         return res.status(503).json({
           success: false,
@@ -127,9 +127,40 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
       }
 
       const current = String(content.status || "").toUpperCase();
+      const currentAdaptive = String(content.adaptive_status || "NOT_APPLICABLE").toUpperCase();
+      const isVideo = String(content.type || "").toUpperCase() === "VIDEO";
+      const plannedQualities = Array.isArray(content.adaptive_qualities)
+        ? content.adaptive_qualities.map((value: unknown) => String(value))
+        : [];
+      const successfulHls = successfulHlsResultCount(body.eager);
+      const autoReady = hasSuccessfulAutoHlsResult(body.eager);
+      const adaptiveEvidenceComplete =
+        outcome === "READY" &&
+        isVideo &&
+        plannedQualities.length > 0 &&
+        autoReady &&
+        successfulHls >= plannedQualities.length + 1;
+
+      const technicalOutcome = isVideo
+        ? adaptiveEvidenceComplete
+          ? "READY"
+          : "FAILED"
+        : outcome;
+      const adaptiveOutcome = isVideo
+        ? adaptiveEvidenceComplete
+          ? "READY"
+          : "FAILED"
+        : currentAdaptive;
+
       const legal = current === "UPLOADING" || current === "PROCESSING";
       if (legal) {
-        await client.query(`UPDATE content_items SET status = $2 WHERE id = $1`, [content.id, outcome]);
+        await client.query(
+          `UPDATE content_items
+              SET status = $2,
+                  adaptive_status = $3
+            WHERE id = $1`,
+          [content.id, technicalOutcome, adaptiveOutcome]
+        );
         await client.query(
           `INSERT INTO audit_logs (
              id, action, entity, entity_id, actor_id, actor_role, status,
@@ -144,7 +175,12 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
               provider: "cloudinary",
               provider_asset_id: providerAssetId,
               from_status: current,
-              to_status: outcome,
+              to_status: technicalOutcome,
+              from_adaptive_status: currentAdaptive,
+              to_adaptive_status: adaptiveOutcome,
+              adaptive_qualities: plannedQualities,
+              successful_hls_results: successfulHls,
+              adaptive_master_ready: autoReady,
               notification_type: notificationType,
             },
           ]
@@ -155,7 +191,8 @@ export const handleMediaWebhook = async (req: any, res: Response) => {
       return res.status(200).json({
         received: true,
         contentId: Number(content.id),
-        technicalStatus: legal ? outcome : current,
+        technicalStatus: legal ? technicalOutcome : current,
+        adaptiveStatus: legal ? adaptiveOutcome : currentAdaptive,
         ignored: !legal,
         correlationId,
       });
