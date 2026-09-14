@@ -30,13 +30,18 @@ CREATE TABLE IF NOT EXISTS releases (
   CONSTRAINT fk_releases_artist FOREIGN KEY (artist_id) REFERENCES users(id) ON DELETE RESTRICT,
   CONSTRAINT fk_releases_source_content FOREIGN KEY (source_content_id) REFERENCES content_items(id) ON DELETE RESTRICT,
   CONSTRAINT releases_source_content_unique UNIQUE (source_content_id),
+  CONSTRAINT releases_id_artist_unique UNIQUE (id, artist_id),
   CONSTRAINT releases_release_type_valid CHECK (release_type IN ('SINGLE', 'EP', 'ALBUM')),
   CONSTRAINT releases_release_phase_valid CHECK (release_phase IN ('DRAFT', 'PENDING_REVIEW', 'EARLY_ACCESS', 'PUBLIC', 'EXCLUSIVITY_ENDED', 'TAKEDOWN')),
   CONSTRAINT releases_distribution_status_valid CHECK (distribution_status IN ('NOT_READY', 'READY_FOR_DISTRIBUTION', 'NOT_SUBMITTED', 'SUBMISSION_PENDING', 'SUBMITTED', 'PARTIALLY_DISTRIBUTED', 'DISTRIBUTED', 'REJECTED', 'TAKEDOWN_REQUESTED', 'TAKEN_DOWN')),
   CONSTRAINT releases_upc_ean_shape_valid CHECK (upc_ean IS NULL OR upc_ean ~ '^[0-9]{8}$|^[0-9]{12}$|^[0-9]{13}$|^[0-9]{14}$'),
   CONSTRAINT releases_version_positive CHECK (version_no > 0),
   CONSTRAINT releases_public_after_early_access CHECK (public_release_at IS NULL OR early_access_start_at IS NULL OR public_release_at >= early_access_start_at),
-  CONSTRAINT releases_exclusivity_after_early_access CHECK (exclusivity_end_at IS NULL OR early_access_start_at IS NULL OR exclusivity_end_at >= early_access_start_at)
+  CONSTRAINT releases_exclusivity_after_release_dates CHECK (
+    exclusivity_end_at IS NULL
+    OR ((early_access_start_at IS NULL OR exclusivity_end_at >= early_access_start_at)
+        AND (public_release_at IS NULL OR exclusivity_end_at >= public_release_at))
+  )
 );
 
 CREATE INDEX IF NOT EXISTS idx_releases_artist_created ON releases(artist_id, created_at DESC);
@@ -61,8 +66,10 @@ CREATE TABLE IF NOT EXISTS release_tracks (
   CONSTRAINT fk_release_tracks_release FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
   CONSTRAINT fk_release_tracks_content FOREIGN KEY (content_item_id) REFERENCES content_items(id) ON DELETE RESTRICT,
   CONSTRAINT fk_release_tracks_artist FOREIGN KEY (artist_id) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_release_tracks_release_artist FOREIGN KEY (release_id, artist_id) REFERENCES releases(id, artist_id) ON DELETE CASCADE,
   CONSTRAINT release_tracks_content_unique UNIQUE (content_item_id),
   CONSTRAINT release_tracks_order_unique UNIQUE (release_id, disc_number, track_number),
+  CONSTRAINT release_tracks_release_id_id_unique UNIQUE (release_id, id),
   CONSTRAINT release_tracks_disc_positive CHECK (disc_number > 0),
   CONSTRAINT release_tracks_track_positive CHECK (track_number > 0),
   CONSTRAINT release_tracks_duration_positive CHECK (duration_ms IS NULL OR duration_ms >= 0),
@@ -96,6 +103,7 @@ CREATE TABLE IF NOT EXISTS release_contributors (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_release_contributors_release FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
   CONSTRAINT fk_release_contributors_track FOREIGN KEY (release_track_id) REFERENCES release_tracks(id) ON DELETE CASCADE,
+  CONSTRAINT fk_release_contributors_release_track FOREIGN KEY (release_id, release_track_id) REFERENCES release_tracks(release_id, id) ON DELETE CASCADE,
   CONSTRAINT fk_release_contributors_user FOREIGN KEY (contributor_user_id) REFERENCES users(id) ON DELETE SET NULL,
   CONSTRAINT release_contributors_role_valid CHECK (role IN ('PRIMARY_ARTIST', 'FEATURED_ARTIST', 'COMPOSER', 'LYRICIST', 'PRODUCER', 'REMIXER')),
   CONSTRAINT release_contributors_display_order_nonnegative CHECK (display_order >= 0)
@@ -119,6 +127,7 @@ CREATE TABLE IF NOT EXISTS external_platform_links (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_external_platform_links_release FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
   CONSTRAINT fk_external_platform_links_track FOREIGN KEY (release_track_id) REFERENCES release_tracks(id) ON DELETE CASCADE,
+  CONSTRAINT fk_external_platform_links_release_track FOREIGN KEY (release_id, release_track_id) REFERENCES release_tracks(release_id, id) ON DELETE CASCADE,
   CONSTRAINT external_platform_links_status_valid CHECK (status IN ('ACTIVE', 'REMOVED')),
   CONSTRAINT external_platform_links_url_http CHECK (external_url ~ '^https://')
 );
@@ -143,6 +152,7 @@ CREATE TABLE IF NOT EXISTS distribution_submissions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_distribution_submissions_release FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
   CONSTRAINT distribution_submissions_idempotency_unique UNIQUE (idempotency_key),
+  CONSTRAINT distribution_submissions_release_id_id_unique UNIQUE (release_id, id),
   CONSTRAINT distribution_submissions_status_valid CHECK (status IN ('NOT_SUBMITTED', 'SUBMISSION_PENDING', 'SUBMITTED', 'PARTIALLY_DISTRIBUTED', 'DISTRIBUTED', 'REJECTED', 'TAKEDOWN_REQUESTED', 'TAKEN_DOWN', 'FAILED')),
   CONSTRAINT distribution_submissions_attempt_nonnegative CHECK (attempt_count >= 0)
 );
@@ -184,6 +194,7 @@ CREATE TABLE IF NOT EXISTS distribution_outbox (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_distribution_outbox_release FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
   CONSTRAINT fk_distribution_outbox_submission FOREIGN KEY (submission_id) REFERENCES distribution_submissions(id) ON DELETE SET NULL,
+  CONSTRAINT fk_distribution_outbox_release_submission FOREIGN KEY (release_id, submission_id) REFERENCES distribution_submissions(release_id, id) ON DELETE SET NULL,
   CONSTRAINT distribution_outbox_event_key_unique UNIQUE (event_key),
   CONSTRAINT distribution_outbox_status_valid CHECK (status IN ('PENDING', 'PROCESSING', 'PROCESSED', 'FAILED')),
   CONSTRAINT distribution_outbox_attempt_nonnegative CHECK (attempt_count >= 0)
