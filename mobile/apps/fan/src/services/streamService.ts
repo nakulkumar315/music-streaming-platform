@@ -221,9 +221,10 @@ export function validatePlaybackUrl(url: string, kind?: 'audio' | 'video'): bool
     return kindParam === kind;
   }
 
-  if (kind === 'video') {
-    return lowerPath.endsWith('.m3u8') || lowerPath.endsWith('.mp4') || lowerPath.includes('/video/');
-  }
+  // Phase 09A closes the protected-video fail-open path. The player must never
+  // accept a raw provider/CDN video URL from catalog or legacy navigation data;
+  // only the backend-protected stream/HLS boundary above is authoritative.
+  if (kind === 'video') return false;
 
   if (kind === 'audio') {
     return (
