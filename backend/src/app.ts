@@ -55,6 +55,7 @@ function corsMiddleware(runtime: EnvValidationResult): RequestHandler {
       }
       return res.sendStatus(204);
     }
+
     return next();
   };
 }
@@ -63,6 +64,7 @@ export function createApp(runtime: EnvValidationResult) {
   const app = express();
   app.set("trust proxy", runtime.trustProxyHops);
   if (runtime.nodeEnv !== "production") app.set("etag", false);
+
   app.use(corsMiddleware(runtime));
 
   app.use((req: any, res, next) => {
@@ -77,28 +79,65 @@ export function createApp(runtime: EnvValidationResult) {
     next();
   });
 
-  app.get("/health", (_req, res) => res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) }));
-  app.get("/health/live", (_req, res) => res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) }));
+  // Liveness reveals only process state. It intentionally does not query or
+  // identify internal dependencies.
+  app.get("/health", (_req, res) =>
+    res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
+  );
+  app.get("/health/live", (_req, res) =>
+    res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
+  );
 
+  // Readiness checks only critical serving state. Redis is an optional cache;
+  // when configured but unavailable it is reported as degraded without making
+  // DB-backed request handling falsely unavailable.
   app.get("/health/ready", async (_req, res) => {
     let database: "ok" | "error" = "error";
     let cache: "disabled" | "ok" | "degraded" = runtime.redisUrl ? "degraded" : "disabled";
-    try { await pool.query("SELECT 1"); database = "ok"; } catch { database = "error"; }
-    if (runtime.redisUrl && redis) {
-      try { cache = (await redis.ping()) === "PONG" ? "ok" : "degraded"; } catch { cache = "degraded"; }
+
+    try {
+      await pool.query("SELECT 1");
+      database = "ok";
+    } catch {
+      database = "error";
     }
+
+    if (runtime.redisUrl && redis) {
+      try {
+        cache = (await redis.ping()) === "PONG" ? "ok" : "degraded";
+      } catch {
+        cache = "degraded";
+      }
+    }
+
     const ready = database === "ok";
-    return res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", dependencies: { database, cache } });
+    return res.status(ready ? 200 : 503).json({
+      status: ready ? "ready" : "not_ready",
+      dependencies: { database, cache },
+    });
   });
 
-  app.post("/api/v1/payments/webhook", express.raw({ type: "application/json", limit: "2mb" }), (req, res) => razorpayWebhook(req as any, res));
-  app.post("/api/v1/media/webhook", express.raw({ type: "application/json", limit: "2mb" }), (req, res) => handleMediaWebhook(req as any, res));
+  // Provider signatures cover exact raw bytes. Webhooks intentionally bypass
+  // generic rate limiting; signature verification + idempotency are their abuse boundary.
+  app.post(
+    "/api/v1/payments/webhook",
+    express.raw({ type: "application/json", limit: "2mb" }),
+    (req, res) => razorpayWebhook(req as any, res)
+  );
+  app.post(
+    "/api/v1/media/webhook",
+    express.raw({ type: "application/json", limit: "2mb" }),
+    (req, res) => handleMediaWebhook(req as any, res)
+  );
 
   app.use(compression());
   app.use(express.json({ limit: "2mb" }));
   app.use(globalLimiter);
   app.use(httpLogger);
 
+  // Adaptive Cloudinary video is intercepted first so manifests/segments remain
+  // session-bound. All non-adaptive/progressive media continues through the
+  // existing Phase-02 protected stream boundary.
   app.use("/media/stream", adaptiveMediaStreamRoutes);
   app.use("/media/stream", mediaStreamRoutes);
 
@@ -109,13 +148,27 @@ export function createApp(runtime: EnvValidationResult) {
   app.use("/api/v1/artist/assets", artistPublicAssetRouter);
 
   app.use(
-    ["/api/v1/artist/dashboard", "/api/v1/artist/pricing", "/api/v1/artist/analytics", "/api/v1/artist/channel-preview"],
+    [
+      "/api/v1/artist/dashboard",
+      "/api/v1/artist/pricing",
+      "/api/v1/artist/analytics",
+      "/api/v1/artist/channel-preview",
+    ],
     requireAuth,
     requireVerifiedArtist
   );
 
+  // Phase-1 Artist pricing remains a server-validated control-plane command.
+  // This boundary normalizes supported rupee values before the authoritative
+  // Phase 08 pricing route persists them transactionally with its audit record.
   app.patch("/api/v1/artist/pricing", validateArtistPricingRequest);
+
   app.use("/api/v1/artist", artistPricingRoutes);
+
+  // Phase 08 moves all artist analytics/dashboard metrics onto a strict,
+  // ownership-scoped boundary before the legacy artist router. Query failures
+  // remain visible and earnings are sourced only from captured payment ledger
+  // rows; listening analytics never becomes a payout authority.
   app.use("/api/v1/artist", artistAnalyticsRoutes);
   app.use("/api/v1/artist", artistRoutes);
   app.use("/api/v1/admin", adminRoutes);
@@ -139,25 +192,37 @@ export function createApp(runtime: EnvValidationResult) {
     const code = String(error?.code || (status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR"));
     const requestPath = String(req?.originalUrl || req?.url || "").split("?", 1)[0];
 
-    logger.error({
-      correlationId,
-      method: req?.method,
-      path: requestPath,
-      statusCode: status,
-      code,
-      message: error?.message || String(error),
-      stack: runtime.nodeEnv !== "production" ? error?.stack : undefined,
-    }, "[HTTP] Request failed");
+    logger.error(
+      {
+        correlationId,
+        method: req?.method,
+        path: requestPath,
+        statusCode: status,
+        code,
+        message: error?.message || String(error),
+        stack: runtime.nodeEnv !== "production" ? error?.stack : undefined,
+      },
+      "[HTTP] Request failed"
+    );
 
     if (status >= 500) {
-      captureError(error, { correlationId, method: req?.method, path: requestPath, statusCode: status, code });
+      captureError(error, {
+        correlationId,
+        method: req?.method,
+        path: requestPath,
+        statusCode: status,
+        code,
+      });
     }
 
     if (res.headersSent) return next(error);
     return res.status(status).json({
       success: false,
       code,
-      message: status >= 500 && runtime.nodeEnv === "production" ? "Internal Server Error" : error?.message || "Request failed",
+      message:
+        status >= 500 && runtime.nodeEnv === "production"
+          ? "Internal Server Error"
+          : error?.message || "Request failed",
       correlationId,
     });
   });
