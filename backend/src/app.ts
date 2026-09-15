@@ -24,6 +24,7 @@ import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
 import artistAnalyticsRoutes from "./modules/artist/artist-analytics.routes";
 import artistPricingRoutes from "./modules/artist/artist-pricing.routes";
+import artistPublicMetadataRoutes from "./modules/artist/artist-public-metadata.routes";
 import { validateArtistPricingRequest } from "./modules/artist/artist-pricing.validation";
 import {
   artistAssetUploadRouter,
@@ -79,8 +80,6 @@ export function createApp(runtime: EnvValidationResult) {
     next();
   });
 
-  // Liveness reveals only process state. It intentionally does not query or
-  // identify internal dependencies.
   app.get("/health", (_req, res) =>
     res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
   );
@@ -88,20 +87,15 @@ export function createApp(runtime: EnvValidationResult) {
     res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
   );
 
-  // Readiness checks only critical serving state. Redis is an optional cache;
-  // when configured but unavailable it is reported as degraded without making
-  // DB-backed request handling falsely unavailable.
   app.get("/health/ready", async (_req, res) => {
     let database: "ok" | "error" = "error";
     let cache: "disabled" | "ok" | "degraded" = runtime.redisUrl ? "degraded" : "disabled";
-
     try {
       await pool.query("SELECT 1");
       database = "ok";
     } catch {
       database = "error";
     }
-
     if (runtime.redisUrl && redis) {
       try {
         cache = (await redis.ping()) === "PONG" ? "ok" : "degraded";
@@ -109,16 +103,10 @@ export function createApp(runtime: EnvValidationResult) {
         cache = "degraded";
       }
     }
-
     const ready = database === "ok";
-    return res.status(ready ? 200 : 503).json({
-      status: ready ? "ready" : "not_ready",
-      dependencies: { database, cache },
-    });
+    return res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", dependencies: { database, cache } });
   });
 
-  // Provider signatures cover exact raw bytes. Webhooks intentionally bypass
-  // generic rate limiting; signature verification + idempotency are their abuse boundary.
   app.post(
     "/api/v1/payments/webhook",
     express.raw({ type: "application/json", limit: "2mb" }),
@@ -135,9 +123,6 @@ export function createApp(runtime: EnvValidationResult) {
   app.use(globalLimiter);
   app.use(httpLogger);
 
-  // Adaptive Cloudinary video is intercepted first so manifests/segments remain
-  // session-bound. All non-adaptive/progressive media continues through the
-  // existing Phase-02 protected stream boundary.
   app.use("/media/stream", adaptiveMediaStreamRoutes);
   app.use("/media/stream", mediaStreamRoutes);
 
@@ -146,6 +131,9 @@ export function createApp(runtime: EnvValidationResult) {
   app.use("/api/v1/artist/update-password", artistSecurityRoutes);
   app.use("/api/v1/artist/uploads", artistAssetUploadRouter);
   app.use("/api/v1/artist/assets", artistPublicAssetRouter);
+  // Public onboarding metadata must fail closed on database errors. Keep this
+  // strict router ahead of the inherited artist compatibility router.
+  app.use("/api/v1/artist", artistPublicMetadataRoutes);
 
   app.use(
     [
@@ -158,17 +146,8 @@ export function createApp(runtime: EnvValidationResult) {
     requireVerifiedArtist
   );
 
-  // Phase-1 Artist pricing remains a server-validated control-plane command.
-  // This boundary normalizes supported rupee values before the authoritative
-  // Phase 08 pricing route persists them transactionally with its audit record.
   app.patch("/api/v1/artist/pricing", validateArtistPricingRequest);
-
   app.use("/api/v1/artist", artistPricingRoutes);
-
-  // Phase 08 moves all artist analytics/dashboard metrics onto a strict,
-  // ownership-scoped boundary before the legacy artist router. Query failures
-  // remain visible and earnings are sourced only from captured payment ledger
-  // rows; listening analytics never becomes a payout authority.
   app.use("/api/v1/artist", artistAnalyticsRoutes);
   app.use("/api/v1/artist", artistRoutes);
   app.use("/api/v1/admin", adminRoutes);
@@ -190,12 +169,13 @@ export function createApp(runtime: EnvValidationResult) {
     const rawStatus = Number(error?.status || error?.statusCode || 500);
     const status = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 500;
     const code = String(error?.code || (status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR"));
+    const requestPath = String(req?.originalUrl || req?.url || "").split("?", 1)[0];
 
     logger.error(
       {
         correlationId,
         method: req?.method,
-        path: req?.originalUrl || req?.url,
+        path: requestPath,
         statusCode: status,
         code,
         message: error?.message || String(error),
@@ -208,7 +188,7 @@ export function createApp(runtime: EnvValidationResult) {
       captureError(error, {
         correlationId,
         method: req?.method,
-        path: req?.originalUrl || req?.url,
+        path: requestPath,
         statusCode: status,
         code,
       });
@@ -218,10 +198,7 @@ export function createApp(runtime: EnvValidationResult) {
     return res.status(status).json({
       success: false,
       code,
-      message:
-        status >= 500 && runtime.nodeEnv === "production"
-          ? "Internal Server Error"
-          : error?.message || "Request failed",
+      message: status >= 500 && runtime.nodeEnv === "production" ? "Internal Server Error" : error?.message || "Request failed",
       correlationId,
     });
   });
