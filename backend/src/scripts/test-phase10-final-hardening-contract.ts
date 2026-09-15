@@ -10,16 +10,15 @@ const assert = (condition: unknown, message: string) => {
 const app = read("src/app.ts");
 const env = read("src/config/env.validation.ts");
 const onboarding = read("src/modules/artist/artist-onboarding.routes.ts");
-const publicMetadata = read("src/modules/artist/artist-public-metadata.routes.ts");
+const artistRoutes = read("src/routes/artist.ts");
 const packageJson = JSON.parse(read("package.json"));
 
-const metadataMount = app.indexOf('app.use("/api/v1/artist", artistPublicMetadataRoutes)');
-const legacyMount = app.indexOf('app.use("/api/v1/artist", artistRoutes)');
-assert(metadataMount >= 0 && legacyMount > metadataMount, "strict public artist metadata must precede the legacy artist router");
 assert(app.includes('.split("?", 1)[0]'), "global error logging must strip request query strings");
-assert(!publicMetadata.includes("safeRows"), "public onboarding metadata must not use fail-open DB helpers");
-assert(publicMetadata.includes("COMMISSION_PLANS_UNAVAILABLE"), "commission-plan DB failures must be explicit");
-assert(publicMetadata.includes("TERMS_UNAVAILABLE"), "terms DB failures must be explicit");
+assert(!artistRoutes.includes("safeRows"), "canonical artist routes must not use fail-open DB helpers");
+assert(!artistRoutes.includes("safeScalarNumber"), "canonical artist routes must not fabricate zero metrics on DB failure");
+assert(!artistRoutes.includes("SIGNATURE_ENCRYPTION_KEY"), "legacy signature crypto must not remain in the compatibility router");
+assert(!artistRoutes.includes("jwt.sign"), "legacy artist onboarding token issuance must not remain in the compatibility router");
+assert(artistRoutes.includes('WHERE is_active = TRUE'), "public commission/terms metadata must query active canonical records");
 
 assert(env.includes('envStr("SIGNATURE_ENCRYPTION_KEY")'), "signature encryption key must be required by canonical runtime validation");
 assert(onboarding.includes('process.env.SIGNATURE_ENCRYPTION_KEY || ""'), "authoritative onboarding must require configured signature encryption");
