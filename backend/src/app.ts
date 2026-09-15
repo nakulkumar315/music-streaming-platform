@@ -24,7 +24,6 @@ import artistOnboardingRoutes from "./modules/artist/artist-onboarding.routes";
 import artistSecurityRoutes from "./modules/artist/artist-security.routes";
 import artistAnalyticsRoutes from "./modules/artist/artist-analytics.routes";
 import artistPricingRoutes from "./modules/artist/artist-pricing.routes";
-import artistPublicMetadataRoutes from "./modules/artist/artist-public-metadata.routes";
 import { validateArtistPricingRequest } from "./modules/artist/artist-pricing.validation";
 import {
   artistAssetUploadRouter,
@@ -56,7 +55,6 @@ function corsMiddleware(runtime: EnvValidationResult): RequestHandler {
       }
       return res.sendStatus(204);
     }
-
     return next();
   };
 }
@@ -65,7 +63,6 @@ export function createApp(runtime: EnvValidationResult) {
   const app = express();
   app.set("trust proxy", runtime.trustProxyHops);
   if (runtime.nodeEnv !== "production") app.set("etag", false);
-
   app.use(corsMiddleware(runtime));
 
   app.use((req: any, res, next) => {
@@ -80,43 +77,22 @@ export function createApp(runtime: EnvValidationResult) {
     next();
   });
 
-  app.get("/health", (_req, res) =>
-    res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
-  );
-  app.get("/health/live", (_req, res) =>
-    res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) })
-  );
+  app.get("/health", (_req, res) => res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) }));
+  app.get("/health/live", (_req, res) => res.json({ status: "alive", uptimeSeconds: Math.floor(process.uptime()) }));
 
   app.get("/health/ready", async (_req, res) => {
     let database: "ok" | "error" = "error";
     let cache: "disabled" | "ok" | "degraded" = runtime.redisUrl ? "degraded" : "disabled";
-    try {
-      await pool.query("SELECT 1");
-      database = "ok";
-    } catch {
-      database = "error";
-    }
+    try { await pool.query("SELECT 1"); database = "ok"; } catch { database = "error"; }
     if (runtime.redisUrl && redis) {
-      try {
-        cache = (await redis.ping()) === "PONG" ? "ok" : "degraded";
-      } catch {
-        cache = "degraded";
-      }
+      try { cache = (await redis.ping()) === "PONG" ? "ok" : "degraded"; } catch { cache = "degraded"; }
     }
     const ready = database === "ok";
     return res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", dependencies: { database, cache } });
   });
 
-  app.post(
-    "/api/v1/payments/webhook",
-    express.raw({ type: "application/json", limit: "2mb" }),
-    (req, res) => razorpayWebhook(req as any, res)
-  );
-  app.post(
-    "/api/v1/media/webhook",
-    express.raw({ type: "application/json", limit: "2mb" }),
-    (req, res) => handleMediaWebhook(req as any, res)
-  );
+  app.post("/api/v1/payments/webhook", express.raw({ type: "application/json", limit: "2mb" }), (req, res) => razorpayWebhook(req as any, res));
+  app.post("/api/v1/media/webhook", express.raw({ type: "application/json", limit: "2mb" }), (req, res) => handleMediaWebhook(req as any, res));
 
   app.use(compression());
   app.use(express.json({ limit: "2mb" }));
@@ -131,17 +107,9 @@ export function createApp(runtime: EnvValidationResult) {
   app.use("/api/v1/artist/update-password", artistSecurityRoutes);
   app.use("/api/v1/artist/uploads", artistAssetUploadRouter);
   app.use("/api/v1/artist/assets", artistPublicAssetRouter);
-  // Public onboarding metadata must fail closed on database errors. Keep this
-  // strict router ahead of the inherited artist compatibility router.
-  app.use("/api/v1/artist", artistPublicMetadataRoutes);
 
   app.use(
-    [
-      "/api/v1/artist/dashboard",
-      "/api/v1/artist/pricing",
-      "/api/v1/artist/analytics",
-      "/api/v1/artist/channel-preview",
-    ],
+    ["/api/v1/artist/dashboard", "/api/v1/artist/pricing", "/api/v1/artist/analytics", "/api/v1/artist/channel-preview"],
     requireAuth,
     requireVerifiedArtist
   );
@@ -171,27 +139,18 @@ export function createApp(runtime: EnvValidationResult) {
     const code = String(error?.code || (status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR"));
     const requestPath = String(req?.originalUrl || req?.url || "").split("?", 1)[0];
 
-    logger.error(
-      {
-        correlationId,
-        method: req?.method,
-        path: requestPath,
-        statusCode: status,
-        code,
-        message: error?.message || String(error),
-        stack: runtime.nodeEnv !== "production" ? error?.stack : undefined,
-      },
-      "[HTTP] Request failed"
-    );
+    logger.error({
+      correlationId,
+      method: req?.method,
+      path: requestPath,
+      statusCode: status,
+      code,
+      message: error?.message || String(error),
+      stack: runtime.nodeEnv !== "production" ? error?.stack : undefined,
+    }, "[HTTP] Request failed");
 
     if (status >= 500) {
-      captureError(error, {
-        correlationId,
-        method: req?.method,
-        path: requestPath,
-        statusCode: status,
-        code,
-      });
+      captureError(error, { correlationId, method: req?.method, path: requestPath, statusCode: status, code });
     }
 
     if (res.headersSent) return next(error);
