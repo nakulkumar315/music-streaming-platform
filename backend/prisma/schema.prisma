@@ -8,58 +8,62 @@ datasource db {
 }
 
 model users {
-  id                        Int                 @id @default(autoincrement())
-  email                     String              @unique(map: "idx_users_email_unique") @db.VarChar(255)
+  id                        Int                       @id @default(autoincrement())
+  email                     String                    @unique(map: "idx_users_email_unique") @db.VarChar(255)
   password                  String
-  role                      String              @default("FAN") @db.VarChar(20)
-  isDeleted                 Boolean             @default(false) @map("is_deleted")
-  deletedAt                 DateTime?           @map("deleted_at") @db.Timestamptz(6)
-  deletionReason            String?             @map("deletion_reason")
-  status                    String              @default("ACTIVE") @db.VarChar(20)
-  artistStatus              String              @default("PENDING") @map("artist_status") @db.VarChar(20)
-  is_verified               Boolean             @default(false)
-  verified                  Boolean             @default(false)
-  trust_score               Int                 @default(100)
-  strike_count              Int                 @default(0)
-  name                      String?             @db.VarChar(255)
+  role                      String                    @default("FAN") @db.VarChar(20)
+  isDeleted                 Boolean                   @default(false) @map("is_deleted")
+  deletedAt                 DateTime?                 @map("deleted_at") @db.Timestamptz(6)
+  deletionReason            String?                   @map("deletion_reason")
+  anonymizedAt              DateTime?                 @map("anonymized_at") @db.Timestamptz(6)
+  anonymizationReason       String?                   @map("anonymization_reason")
+  status                    String                    @default("ACTIVE") @db.VarChar(20)
+  artistStatus              String                    @default("PENDING") @map("artist_status") @db.VarChar(20)
+  is_verified               Boolean                   @default(false)
+  verified                  Boolean                   @default(false)
+  trust_score               Int                       @default(100)
+  strike_count              Int                       @default(0)
+  name                      String?                   @db.VarChar(255)
   profile_image_url         String?
-  artistBio                 String?             @map("artist_bio")
-  portfolioLinks            String[]            @default([]) @map("portfolio_links")
-  onboardedAt               DateTime?           @map("onboarded_at") @db.Timestamptz(6)
-  created_at                DateTime            @default(now()) @db.Timestamptz(6)
-  updated_at                DateTime            @default(now()) @db.Timestamptz(6)
-  phone                     String?             @db.VarChar(50)
+  artistBio                 String?                   @map("artist_bio")
+  portfolioLinks            String[]                  @default([]) @map("portfolio_links")
+  onboardedAt               DateTime?                 @map("onboarded_at") @db.Timestamptz(6)
+  created_at                DateTime                  @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime                  @default(now()) @db.Timestamptz(6)
+  phone                     String?                   @db.VarChar(50)
   bio                       String?
   banner_image_url          String?
-  accent_color              String?             @db.VarChar(20)
+  accent_color              String?                   @db.VarChar(20)
   social_links              Json?
-  subscription_price        Decimal             @default(0) @db.Decimal
+  subscription_price        Decimal                   @default(0) @db.Decimal
   admin_remarks             String?
   artist_appeal_message     String?
-  subscription_features     Json                @default("[]")
-  yearly_subscription_price Decimal             @default(0) @db.Decimal
-  agreementAccepted         Boolean             @default(false) @map("agreement_accepted")
-  agreementAcceptedAt       DateTime?           @map("agreement_accepted_at") @db.Timestamptz(6)
-  agreementVersion          String?             @map("agreement_version") @db.VarChar(20)
-  artistRevenueShare        Int?                @map("artist_revenue_share")
-  platformRevenueShare      Int?                @map("platform_revenue_share")
-  digitalSignature          String?             @map("digital_signature")
-  signatureSignedAt         DateTime?           @map("signature_signed_at") @db.Timestamptz(6)
-  agreementId               String?             @map("agreement_id") @db.VarChar(100)
-  termsVersion              String?             @map("terms_version") @db.VarChar(20)
-  agreementStatus           String?             @map("agreement_status") @db.VarChar(20)
-  agreementStartDate        DateTime?           @map("agreement_start_date") @db.Timestamptz(6)
-  agreementPdfPath          String?             @map("agreement_pdf_path") @db.VarChar(500)
-  signatureIpAddress        String?             @map("signature_ip_address") @db.VarChar(50)
-  signatureUserAgent        String?             @map("signature_user_agent")
-  genre                     String?             @db.VarChar(50)
+  subscription_features     Json                      @default("[]")
+  yearly_subscription_price Decimal                   @default(0) @db.Decimal
+  agreementAccepted         Boolean                   @default(false) @map("agreement_accepted")
+  agreementAcceptedAt       DateTime?                 @map("agreement_accepted_at") @db.Timestamptz(6)
+  agreementVersion          String?                   @map("agreement_version") @db.VarChar(20)
+  artistRevenueShare        Int?                      @map("artist_revenue_share")
+  platformRevenueShare      Int?                      @map("platform_revenue_share")
+  digitalSignature          String?                   @map("digital_signature")
+  signatureSignedAt         DateTime?                 @map("signature_signed_at") @db.Timestamptz(6)
+  agreementId               String?                   @map("agreement_id") @db.VarChar(100)
+  termsVersion              String?                   @map("terms_version") @db.VarChar(20)
+  agreementStatus           String?                   @map("agreement_status") @db.VarChar(20)
+  agreementStartDate        DateTime?                 @map("agreement_start_date") @db.Timestamptz(6)
+  agreementPdfPath          String?                   @map("agreement_pdf_path") @db.VarChar(500)
+  signatureIpAddress        String?                   @map("signature_ip_address") @db.VarChar(50)
+  signatureUserAgent        String?                   @map("signature_user_agent")
+  genre                     String?                   @db.VarChar(50)
   featured_artists          featured_artists[]
   user_media_assets         user_media_assets[]
+  media_deletion_requests   media_deletion_requests[]
 
   @@index([artistStatus], map: "idx_users_artist_status")
   @@index([isDeleted], map: "idx_users_is_deleted")
   @@index([role], map: "idx_users_role")
   @@index([agreementId], map: "idx_users_agreement_id")
+  @@index([anonymizedAt], map: "idx_users_anonymized_at")
 }
 
 model artist_stats {
@@ -99,38 +103,41 @@ model terms_versions {
 }
 
 model content_items {
-  id                       Int       @id @default(autoincrement())
-  title                    String    @db.VarChar(255)
-  type                     String    @db.VarChar(20)
-  artist_id                Int
-  thumbnail_url            String?
-  media_url                String?
-  audio_url                String?
-  video_url                String?
-  genre                    String?   @db.VarChar(80)
-  lifecycle_state          String    @default("DRAFT") @db.VarChar(20)
-  is_approved              Boolean   @default(false)
-  is_taken_down            Boolean   @default(false)
-  rejection_reason         String?
-  reportCount              Int       @default(0) @map("report_count")
-  created_at               DateTime  @default(now()) @db.Timestamptz(6)
-  published_at             DateTime? @db.Timestamptz(6)
-  subscription_required    Boolean   @default(false)
-  storage_provider         String    @map("storage_provider") @db.VarChar(20)
-  storage_key              String?   @map("storage_key")
-  thumbnail_storage_key    String    @map("thumbnail_storage_key")
-  visibility               String    @default("PROTECTED") @db.VarChar(30)
-  status                   String    @default("UPLOADING") @db.VarChar(20)
-  mime_type                String?   @map("mime_type") @db.VarChar(100)
-  file_size_bytes          Int?      @map("file_size_bytes")
-  original_file_name       String?   @map("original_file_name") @db.VarChar(255)
-  uploaded_at              DateTime? @map("uploaded_at") @db.Timestamptz(6)
-  video_storage_key        String?   @map("video_storage_key")
-  fileKey                  String?   @map("file_key")
-  providerAssetId          String?   @map("provider_asset_id")
-  audioProviderAssetId     String?   @map("audio_provider_asset_id")
-  videoProviderAssetId     String?   @map("video_provider_asset_id")
-  thumbnailProviderAssetId String?   @map("thumbnail_provider_asset_id")
+  id                           Int       @id @default(autoincrement())
+  title                        String    @db.VarChar(255)
+  type                         String    @db.VarChar(20)
+  artist_id                    Int
+  thumbnail_url                String?
+  media_url                    String?
+  audio_url                    String?
+  video_url                    String?
+  genre                        String?   @db.VarChar(80)
+  lifecycle_state              String    @default("DRAFT") @db.VarChar(20)
+  is_approved                  Boolean   @default(false)
+  is_taken_down                Boolean   @default(false)
+  rejection_reason             String?
+  reportCount                  Int       @default(0) @map("report_count")
+  created_at                   DateTime  @default(now()) @db.Timestamptz(6)
+  published_at                 DateTime? @db.Timestamptz(6)
+  subscription_required        Boolean   @default(false)
+  storage_provider             String    @map("storage_provider") @db.VarChar(20)
+  storage_key                  String?   @map("storage_key")
+  thumbnail_storage_key        String    @map("thumbnail_storage_key")
+  visibility                   String    @default("PROTECTED") @db.VarChar(30)
+  status                       String    @default("UPLOADING") @db.VarChar(20)
+  mime_type                    String?   @map("mime_type") @db.VarChar(100)
+  file_size_bytes              Int?      @map("file_size_bytes")
+  original_file_name           String?   @map("original_file_name") @db.VarChar(255)
+  uploaded_at                  DateTime? @map("uploaded_at") @db.Timestamptz(6)
+  video_storage_key            String?   @map("video_storage_key")
+  fileKey                      String?   @map("file_key")
+  providerAssetId              String?   @map("provider_asset_id")
+  audioProviderAssetId         String?   @map("audio_provider_asset_id")
+  videoProviderAssetId         String?   @map("video_provider_asset_id")
+  thumbnailProviderAssetId     String?   @map("thumbnail_provider_asset_id")
+  physicalDeletionStatus       String    @default("NOT_REQUESTED") @map("physical_deletion_status") @db.VarChar(20)
+  physicalDeletionRequestedAt  DateTime? @map("physical_deletion_requested_at") @db.Timestamptz(6)
+  physicalDeletedAt            DateTime? @map("physical_deleted_at") @db.Timestamptz(6)
 
   @@index([audioProviderAssetId], map: "idx_content_items_audio_provider_asset_id")
   @@index([storage_provider], map: "idx_content_items_storage_provider")
@@ -138,6 +145,7 @@ model content_items {
   @@index([videoProviderAssetId], map: "idx_content_items_video_provider_asset_id")
   @@index([lifecycle_state, is_taken_down, status, created_at(sort: Desc)], map: "idx_content_items_moderation_queue")
   @@index([is_taken_down, lifecycle_state, is_approved, status], map: "idx_content_items_playback_governance")
+  @@index([physicalDeletionStatus, physicalDeletionRequestedAt], map: "idx_content_items_physical_deletion")
 }
 
 model user_media_assets {
@@ -155,6 +163,28 @@ model user_media_assets {
 
   @@unique([user_id, kind], map: "user_media_assets_user_kind_unique")
   @@index([storage_provider, storage_key], map: "idx_user_media_assets_provider")
+}
+
+model media_deletion_requests {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entity_type       String    @db.VarChar(30)
+  entity_id         String    @db.VarChar(100)
+  asset_kind        String    @db.VarChar(30)
+  storage_provider  String    @db.VarChar(20)
+  storage_key       String
+  provider_asset_id String?
+  status            String    @default("PENDING") @db.VarChar(20)
+  attempt_count     Int       @default(0)
+  last_error        String?
+  requested_by      Int?
+  requested_at      DateTime  @default(now()) @db.Timestamptz(6)
+  next_attempt_at   DateTime  @default(now()) @db.Timestamptz(6)
+  completed_at      DateTime? @db.Timestamptz(6)
+  updated_at        DateTime  @default(now()) @db.Timestamptz(6)
+  users             users?    @relation(fields: [requested_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@unique([entity_type, entity_id, asset_kind, storage_provider, storage_key], map: "idx_media_deletion_requests_asset_unique")
+  @@index([status, next_attempt_at, requested_at], map: "idx_media_deletion_requests_pending")
 }
 
 model reports {

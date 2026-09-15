@@ -1,6 +1,6 @@
 import { pool } from "./index";
 
-export const LATEST_SCHEMA_VERSION = "20260914_0012_adaptive_protected_media";
+export const LATEST_SCHEMA_VERSION = "20260914_0013_privacy_retention_recovery";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {
   users: [
@@ -12,6 +12,8 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "is_deleted",
     "subscription_price",
     "agreement_status",
+    "anonymized_at",
+    "anonymization_reason",
   ],
   content_items: [
     "id",
@@ -35,6 +37,9 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "adaptive_qualities",
     "source_width",
     "source_height",
+    "physical_deletion_status",
+    "physical_deletion_requested_at",
+    "physical_deleted_at",
   ],
   releases: [
     "id",
@@ -171,6 +176,23 @@ const REQUIRED_SCHEMA: Record<string, string[]> = {
     "created_at",
     "updated_at",
   ],
+  media_deletion_requests: [
+    "id",
+    "entity_type",
+    "entity_id",
+    "asset_kind",
+    "storage_provider",
+    "storage_key",
+    "provider_asset_id",
+    "status",
+    "attempt_count",
+    "last_error",
+    "requested_by",
+    "requested_at",
+    "next_attempt_at",
+    "completed_at",
+    "updated_at",
+  ],
   user_sessions: ["id", "user_id", "device_id", "last_active_at"],
   subscriptions: [
     "id",
@@ -286,6 +308,7 @@ const REQUIRED_CONSTRAINTS = [
   "content_items_adaptive_qualities_valid",
   "content_items_source_width_positive",
   "content_items_source_height_positive",
+  "content_items_physical_deletion_status_valid",
   "fk_content_items_release_track",
   "fk_releases_artist",
   "fk_releases_source_content",
@@ -340,6 +363,10 @@ const REQUIRED_CONSTRAINTS = [
   "user_media_assets_kind_valid",
   "user_media_assets_provider_valid",
   "user_media_assets_size_positive",
+  "media_deletion_requests_entity_type_valid",
+  "media_deletion_requests_status_valid",
+  "media_deletion_requests_provider_valid",
+  "media_deletion_requests_attempt_nonnegative",
   "fk_sessions_user",
   "fk_subscriptions_user",
   "fk_subscriptions_artist",
@@ -383,9 +410,16 @@ const REQUIRED_INDEXES = [
   "idx_analytics_events_content_created",
   "idx_analytics_events_user_created",
   "idx_analytics_events_session",
+  "idx_analytics_events_retention_cleanup",
   "idx_operational_job_runs_started",
   "idx_content_items_release_track_unique",
   "idx_content_items_adaptive_readiness",
+  "idx_content_items_physical_deletion",
+  "idx_users_anonymized_at",
+  "idx_user_sessions_retention_cleanup",
+  "idx_playback_sessions_retention_cleanup",
+  "idx_media_deletion_requests_asset_unique",
+  "idx_media_deletion_requests_pending",
   "idx_releases_artist_created",
   "idx_releases_phase",
   "idx_releases_distribution_status",
