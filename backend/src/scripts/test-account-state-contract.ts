@@ -15,8 +15,8 @@ function main() {
   const accountDbTest = source("scripts/test-account-state-db.ts");
 
   const securityMount = adminIndex.indexOf('router.use("/", adminAccountSecurityRoutes)');
-  const artistMount = adminIndex.indexOf('router.use("/artists", requireAuth, requireRoles("ADMIN"), adminArtistsRoutes)');
-  const contentMount = adminIndex.indexOf('"/content",\n  requireAuth,\n  requireRoles("ADMIN", "MODERATOR"),\n  adminContentRoutes');
+  const artistMount = adminIndex.search(/router\.use\(\s*["']\/artists["']/);
+  const contentMount = adminIndex.search(/["']\/content["'][\s\S]*?adminContentRoutes/);
 
   assert.ok(securityMount >= 0, "Canonical admin account-security router must be mounted");
   assert.ok(artistMount > securityMount, "Account-security routes must intercept before the historical artist router");

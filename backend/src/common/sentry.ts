@@ -44,7 +44,7 @@ function sanitizeValue(value: unknown, depth = 0): unknown {
   return sanitizeString(String(value));
 }
 
-function redactEvent(event: Sentry.Event): Sentry.Event {
+function redactEvent<T extends Sentry.ErrorEvent>(event: T): T {
   const request = event.request;
   if (request) {
     if (request.url) request.url = pathWithoutQuery(request.url);

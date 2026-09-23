@@ -63,7 +63,7 @@ function uploadOptionsFor(
   const isThumbnail = kind === "thumbnail";
   return {
     public_id: publicId,
-    resource_type: isThumbnail ? "image" : "video",
+    resource_type: isThumbnail ? ("image" as const) : ("video" as const),
     type: isThumbnail ? "upload" : "authenticated",
     overwrite: false,
     unique_filename: false,

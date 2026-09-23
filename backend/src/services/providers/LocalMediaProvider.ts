@@ -1,4 +1,5 @@
 import { MediaProvider, PlayerUrlResult, UploadResult } from './interfaces/MediaProvider';
+import type { VideoQuality } from '../../shared/delivery/interfaces/media-delivery-strategy.interface';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -64,7 +65,12 @@ export class LocalMediaProvider implements MediaProvider {
     };
   }
   
-  async generateSignedPlaybackUrl(providerAssetId: string, fileType: "audio" | "video"): Promise<PlayerUrlResult> {
+  async generateSignedPlaybackUrl(
+    providerAssetId: string,
+    fileType: "audio" | "video",
+    quality?: VideoQuality,
+    expiresInSeconds?: number
+  ): Promise<PlayerUrlResult> {
       return this.generatePlaybackUrlLocal(providerAssetId, fileType);
   }
 

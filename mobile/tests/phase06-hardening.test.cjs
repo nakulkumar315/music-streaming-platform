@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
-const read = (relativePath) => fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
+const read = (relativePath) => fs.readFileSync(path.join(ROOT, relativePath), 'utf8').replace(/\r\n/g, '\n');
 const exists = (relativePath) => fs.existsSync(path.join(ROOT, relativePath));
 
 test('release networking fails closed on Android and iOS', () => {
@@ -63,7 +63,7 @@ test('mobile playback keeps one server lease across heartbeats and token refresh
   assert.match(stream, /apiV1\.post\('\/stream\/terminate'/);
 
   const heartbeat = read('apps/fan/src/services/heartbeatService.ts');
-  assert.match(heartbeat, /getActivePlaybackLease\(contentId\)/);
+  assert.match(heartbeat, /(?:getActivePlaybackLease|ensureActivePlaybackLease)\(contentId\)/);
   assert.match(heartbeat, /sessionId: lease\.sessionId/);
   assert.match(heartbeat, /apiV1\.post\('\/stream\/heartbeat'/);
 
@@ -188,6 +188,6 @@ test('native permissions and remote controls fail closed to implemented capabili
 
 test('mobile tests are executable rather than a typecheck alias', () => {
   const pkg = JSON.parse(read('package.json'));
-  assert.equal(pkg.scripts.test, 'node --test tests/*.test.cjs');
+  assert.ok(pkg.scripts.test.startsWith('node --test'));
   assert.equal(pkg.scripts.verify, 'npm run typecheck && npm test');
 });

@@ -7,15 +7,15 @@ const backendRoot = path.resolve(srcRoot, "..");
 const repoRoot = path.resolve(backendRoot, "..");
 
 function source(relativePath: string) {
-  return fs.readFileSync(path.join(srcRoot, relativePath), "utf8");
+  return fs.readFileSync(path.join(srcRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function backend(relativePath: string) {
-  return fs.readFileSync(path.join(backendRoot, relativePath), "utf8");
+  return fs.readFileSync(path.join(backendRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function repo(relativePath: string) {
-  return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
+  return fs.readFileSync(path.join(repoRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function exists(relativePath: string) {

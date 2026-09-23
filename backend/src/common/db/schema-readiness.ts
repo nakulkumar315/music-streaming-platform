@@ -1,5 +1,6 @@
 import { pool } from "./index";
 
+export const PHASE05_SCHEMA_VERSION = "20260913_0008_user_media_assets";
 export const LATEST_SCHEMA_VERSION = "20260914_0013_privacy_retention_recovery";
 
 const REQUIRED_SCHEMA: Record<string, string[]> = {

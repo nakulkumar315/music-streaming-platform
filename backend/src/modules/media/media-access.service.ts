@@ -200,6 +200,8 @@ export async function requestPlaybackAccess(
   const expiresInSeconds = config.mediaUrlTtlSeconds;
   const expiresAtEpochSeconds = Math.floor(Date.now() / 1000) + expiresInSeconds;
 
+  // Playback authorization must never record listen time or play counts directly.
+  // Audited consumption is exclusively owned by the trusted heartbeat path.
   let sessionId: number;
   let createdNewSession = false;
   if (requestedSessionId) {

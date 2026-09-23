@@ -256,7 +256,8 @@ router.patch("/appeal", requireAuth, requireArtist, async (req: any, res: any) =
 });
 
 router.get("/me", requireAuth, requireArtist, async (req: any, res: any) => {
-  const artistId = Number(req.user?.id);
+  const artistUserId = req.user?.id;
+  const artistId = Number(artistUserId);
   try {
     const result = await pool.query(
       `SELECT id, email, name,

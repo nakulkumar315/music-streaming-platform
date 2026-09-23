@@ -16,8 +16,8 @@ function main() {
   assert.equal(route.includes("ArtistApprovalService.resolve"), true, "Sensitive artist approval decisions must go through the business service");
   assert.equal(route.includes("UPDATE users\n         SET artist_status"), false, "Approval SQL must not move back into the admin route");
   assert.equal(route.includes("invalidateArtistCache()"), true, "Approval changes must invalidate public artist visibility caches");
-  assert.equal(route.includes("admin.artist_approved"), true, "Approval must emit an audit event");
-  assert.equal(route.includes("admin.artist_rejected"), true, "Rejection must emit an audit event");
+  assert.equal(service.includes("admin.artist_approved"), true, "Approval must emit an audit event");
+  assert.equal(service.includes("admin.artist_rejected"), true, "Rejection must emit an audit event");
   assert.equal(route.includes("req.body"), true, "Route may parse request input but must not log the raw request body");
   assert.equal(route.includes("body: req.body"), false, "Raw approval request bodies must not be logged");
 

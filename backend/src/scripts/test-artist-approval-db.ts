@@ -48,6 +48,21 @@ async function main() {
     return { id, email };
   };
 
+  const createAdmin = async () => {
+    const email = `admin-approval-${suffix}@example.invalid`;
+    const result = await pool.query(
+      `INSERT INTO users (
+         email, password, role, status, is_deleted, name
+       )
+       VALUES ($1, 'approval-test-hash', 'ADMIN', 'ACTIVE', false, 'Approval Admin')
+       RETURNING id`,
+      [email]
+    );
+    const id = Number(result.rows[0].id);
+    userIds.push(id);
+    return id;
+  };
+
   const tokenFor = (user: { id: number; email: string }, sessionId: number) =>
     jwt.sign(
       { id: user.id, email: user.email, role: "ARTIST", sid: sessionId },
@@ -94,6 +109,7 @@ async function main() {
   };
 
   try {
+    const adminId = await createAdmin();
     const artist = await createArtist("lifecycle");
     const session = await SessionService.createSession({
       userId: artist.id,
@@ -110,6 +126,7 @@ async function main() {
     const approved = await ArtistApprovalService.resolve({
       artistId: artist.id,
       action: "APPROVE",
+      actorId: adminId,
     });
     assert.equal(approved.status, "APPROVED");
     assert.equal(approved.isVerified, true);
@@ -138,6 +155,7 @@ async function main() {
           artistId: artist.id,
           action: "REJECT",
           reason: "",
+          actorId: adminId,
         }),
       (error: any) => error?.code === "REJECTION_REASON_REQUIRED"
     );
@@ -146,6 +164,7 @@ async function main() {
       artistId: artist.id,
       action: "REJECT",
       reason: "Missing required artist documentation",
+      actorId: adminId,
     });
     assert.equal(rejected.status, "REJECTED");
     assert.equal(rejected.isVerified, false);
@@ -178,6 +197,7 @@ async function main() {
         ArtistApprovalService.resolve({
           artistId: inactiveArtist.id,
           action: "APPROVE",
+          actorId: adminId,
         }),
       (error: any) => error?.code === "ARTIST_ACCOUNT_INACTIVE"
     );
@@ -188,6 +208,7 @@ async function main() {
         ArtistApprovalService.resolve({
           artistId: deletedArtist.id,
           action: "APPROVE",
+          actorId: adminId,
         }),
       (error: any) => error?.code === "ARTIST_ACCOUNT_INACTIVE"
     );

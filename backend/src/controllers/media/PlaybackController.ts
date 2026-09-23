@@ -56,7 +56,9 @@ export const generatePlaybackUrl = async (req: Request | any, res: Response) => 
     
     const playbackMeta = await provider.generateSignedPlaybackUrl(
       item.provider_asset_id,
-      mediaType
+      mediaType,
+      undefined,
+      Number(process.env.MEDIA_URL_TTL_SECONDS || 300)
     );
 
     return res.json({

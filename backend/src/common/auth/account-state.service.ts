@@ -193,6 +193,7 @@ export class ArtistAccountStateService {
           RETURNING id, status, is_deleted, deleted_at, deletion_reason`,
         [artistId]
       );
+      // Reactivation revokes existing sessions and never revives a previously issued JWT.
       const sessionsRevoked = await revokeArtistSessions(client, artistId);
       const state = mapState(updated.rows[0], sessionsRevoked, "reactivate");
       await writeStateAudit(client, before, state, audit);
