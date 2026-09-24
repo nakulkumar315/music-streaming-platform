@@ -41,20 +41,43 @@ export function setUnauthorizedHandler(handler: (() => void | Promise<void>) | n
 export function normalizeApiError(error: unknown): NormalizedApiError {
   const axiosError = error as AxiosError<any>;
   const status = typeof axiosError?.response?.status === 'number' ? axiosError.response.status : null;
+  const isTimeout = axiosError?.code === 'ECONNABORTED' || /timeout/i.test(String(axiosError?.message ?? ''));
+  const isNetwork = !axiosError?.response;
+  const retryable = isTimeout || isNetwork;
+
+  const rawMessage = String(axiosError?.response?.data?.message || '');
+  const isTechnicalLeak =
+    !rawMessage ||
+    /prisma|syntaxerror|sql|database|econnrefused|failed with status code|\[object Object\]|column.*does not exist|relation.*does not exist|jwt malformed/i.test(
+      rawMessage
+    );
+
+  let message = rawMessage;
+  if (status === 401) {
+    message = 'Your session has expired. Please log in again.';
+  } else if (status === 403) {
+    message = "You don't have permission to access this content.";
+  } else if (status && status >= 500) {
+    message = 'Something went wrong. Please try again.';
+  } else if (isNetwork || isTimeout) {
+    message = 'Network connection error. Please try again.';
+  } else if (isTechnicalLeak) {
+    message = 'Something went wrong. Please try again.';
+  }
+
   const code = String(
     axiosError?.response?.data?.code ||
-      (status === 401 ? 'UNAUTHORIZED' : status === 403 ? 'FORBIDDEN' : 'REQUEST_FAILED')
-  );
-  const message = String(
-    axiosError?.response?.data?.message ||
       (status === 401
-        ? 'Your session has expired. Please sign in again.'
+        ? 'UNAUTHORIZED'
         : status === 403
-          ? 'This action is not allowed for your account.'
-          : 'Something went wrong. Please try again.')
+          ? 'FORBIDDEN'
+          : status && status >= 500
+            ? 'INTERNAL_ERROR'
+            : isNetwork
+              ? 'NETWORK_ERROR'
+              : 'REQUEST_FAILED')
   );
-  const isTimeout = axiosError?.code === 'ECONNABORTED' || /timeout/i.test(String(axiosError?.message ?? ''));
-  const retryable = isTimeout || !axiosError?.response;
+
   return { status, code, message, retryable };
 }
 

@@ -25,18 +25,18 @@ Prepare `FAN_FREE`, `FAN_ACTIVE_A`, `FAN_EXPIRED`, `FAN_REFUNDED`, `FAN_SUSPENDE
 
 ## Negative and ownership cases
 
-| ID | Test | Expected |
-|---|---|---|
-| FAN-NEG-001 | Request Fan B profile/private endpoint by ID | denied/no data leak |
-| FAN-NEG-002 | Request Fan B invoice/transaction ID | denied even if numeric ID guessed |
-| FAN-NEG-003 | Request Fan B subscription/library/session | denied |
-| FAN-NEG-004 | Alter response-side ownership parameter in client/devtools | server still uses authenticated identity |
-| FAN-NEG-005 | Update role/status/isVerified via profile payload | rejected/ignored; no privilege change |
-| FAN-NEG-006 | Update unknown/forbidden fields | safe validation response; no mass assignment |
-| FAN-NEG-007 | Suspended Fan reads private account APIs | denied according to account-state policy |
-| FAN-NEG-008 | Deleted/anonymized Fan token reused | denied |
-| FAN-NEG-009 | Invoice for missing or non-owned transaction | 404/403 without enumeration leak |
-| FAN-NEG-010 | Attempt offline download endpoint/UI | no downloadable protected media; out-of-scope feature not silently available |
+| ID | Test | Expected | Status | Evidence |
+|---|---|---|:---:|---|
+| FAN-NEG-001 | Request Fan B profile/private endpoint by ID | denied/no data leak | **PASS** | Server uses JWT session identity; query/body overrides ignored |
+| FAN-NEG-002 | Request Fan B invoice/transaction ID | denied even if numeric ID guessed | **PASS** | HTTP 404 Transaction not found; cross-tenant invoice blocked |
+| FAN-NEG-003 | Request Fan B subscription/library/session | denied | **PASS** | Query parameters ignored; strictly scopes to req.user.id |
+| FAN-NEG-004 | Alter response-side ownership parameter in client/devtools | server still uses authenticated identity | **PASS** | Server identity authoritative; spoofed client ID discarded |
+| FAN-NEG-005 | Update role/status/isVerified via profile payload | rejected/ignored; no privilege change | **PASS** | SQL update whitelist; role remains FAN, is_verified remains false |
+| FAN-NEG-006 | Update unknown/forbidden fields | safe validation response; no mass assignment | **PASS** | Forbidden password_hash/is_deleted rejected; DB uncorrupted |
+| FAN-NEG-007 | Suspended Fan reads private account APIs | denied according to account-state policy | **PASS** | HTTP 403 ACCOUNT_INACTIVE; private account routes blocked |
+| FAN-NEG-008 | Deleted/anonymized Fan token reused | denied | **PASS** | HTTP 401 SESSION_REVOKED; active session check prevents replay |
+| FAN-NEG-009 | Invoice for missing or non-owned transaction | 404/403 without enumeration leak | **PASS** | HTTP 404 returned without database error leak |
+| FAN-NEG-010 | Attempt offline download endpoint/UI | no downloadable protected media; out-of-scope feature not silently available | **PASS** | HTTP 404 on all /download/* routes; media served via HLS stream leases only |
 
 ## Profile input validation
 

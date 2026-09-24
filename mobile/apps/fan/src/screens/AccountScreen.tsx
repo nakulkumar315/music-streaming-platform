@@ -345,7 +345,8 @@ export default function AccountScreen() {
           asset.mimeType || 'image/jpeg',
           asset.fileName || 'profile.jpg'
         );
-        setProfileImageUrl(newImageUrl);
+        const freshUri = newImageUrl ? `${newImageUrl.split('?')[0]}?t=${Date.now()}` : '';
+        setProfileImageUrl(freshUri);
       } catch (error: any) {
         Alert.alert('Error', 'Failed to upload profile image. Please try again.');
       } finally {

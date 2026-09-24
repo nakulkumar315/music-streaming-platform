@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { ArrowLeft, Lock, Eye, EyeOff } from 'lucide-react-native';
 import { userService } from '../services/userService';
+import { normalizeApiError } from '../services/api';
 
 export default function ChangePasswordScreen() {
   const navigation = useNavigation();
@@ -52,8 +53,7 @@ export default function ChangePasswordScreen() {
         navigation.goBack();
       }, 1500);
     } catch (err: any) {
-      const msg = err.response?.data?.message || err.message || 'Failed to update password';
-      setErrorMsg(msg);
+      setErrorMsg(normalizeApiError(err).message);
     } finally {
       setIsLoading(false);
     }

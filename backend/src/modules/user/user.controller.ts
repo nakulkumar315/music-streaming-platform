@@ -402,7 +402,7 @@ export class UserController {
       );
 
       const baseUrl = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
-      const absoluteUrl = `${baseUrl}${avatarPath}`;
+      const absoluteUrl = `${baseUrl}${avatarPath}?t=${Date.now()}`;
 
       return res.json({
         success: true,
@@ -464,7 +464,7 @@ export class UserController {
       res.setHeader("Content-Type", String(asset.mime_type || read.contentType || "image/jpeg"));
       const size = Number(asset.size_bytes || read.contentLength);
       if (Number.isFinite(size) && size > 0) res.setHeader("Content-Length", String(size));
-      res.setHeader("Cache-Control", "public, max-age=300");
+      res.setHeader("Cache-Control", "no-cache, must-revalidate");
       read.stream.once("error", () => {
         if (!res.headersSent) res.status(502).end();
         else res.end();

@@ -18,6 +18,7 @@ import { ArrowLeft, Camera, Lock } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../store/authStore';
 import { userService, UserProfile } from '../services/userService';
+import { normalizeApiError } from '../services/api';
 import { getOptimizedImageUrl } from '../utils/cloudinary';
 
 export default function EditProfileScreen() {
@@ -163,12 +164,11 @@ export default function EditProfileScreen() {
         fileName,
         asset.base64
       );
-      setProfileImageUri(newImageUrl);
+      const freshUri = newImageUrl ? `${newImageUrl.split('?')[0]}?t=${Date.now()}` : '';
+      setProfileImageUri(freshUri);
       setSuccessMsg("Profile photo uploaded successfully!");
     } catch (err: any) {
-      setErrorMsg(
-        err.response?.data?.message || err.message || "Image upload failed"
-      );
+      setErrorMsg(normalizeApiError(err).message);
     } finally {
       setIsUploadingImage(false);
     }
@@ -208,7 +208,7 @@ export default function EditProfileScreen() {
       }, 1500);
       
     } catch (err: any) {
-      setErrorMsg(err.response?.data?.message || err.message || 'Failed to update profile');
+      setErrorMsg(normalizeApiError(err).message);
     } finally {
       setIsSaving(false);
     }

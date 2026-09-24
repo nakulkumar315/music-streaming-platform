@@ -1,7 +1,7 @@
 import 'react-native-gesture-handler';
 
 import React, { useCallback, useEffect, useRef } from 'react';
-import { AppState, Platform } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 import * as Sentry from '@sentry/react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import AppNavigator from './apps/fan/src/navigation/AppNavigator';
@@ -32,6 +32,27 @@ import { sanitizeSentryEvent } from './apps/fan/src/utils/sentrySanitizer';
 if (Platform.OS === 'web') {
   const savedTheme = localStorage.getItem('global-theme') || DEFAULT_THEME_ID;
   applyTheme(savedTheme);
+
+  if (typeof window !== 'undefined') {
+    Alert.alert = (title: string, message?: string, buttons?: any[]) => {
+      const text = message ? `${title}\n\n${message}` : title;
+      if (buttons && buttons.length > 1) {
+        const confirmed = window.confirm(text);
+        if (confirmed) {
+          const actionBtn = buttons.find((b) => b.style === 'destructive' || b.style === 'default') || buttons[0];
+          actionBtn?.onPress?.();
+        } else {
+          const cancelBtn = buttons.find((b) => b.style === 'cancel');
+          cancelBtn?.onPress?.();
+        }
+      } else {
+        window.alert(text);
+        if (buttons && buttons.length === 1) {
+          buttons[0]?.onPress?.();
+        }
+      }
+    };
+  }
 }
 
 if (SENTRY_DSN) {
