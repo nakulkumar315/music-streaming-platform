@@ -82,11 +82,24 @@ const parseImage = (req: any, res: any, next: any) => {
   });
 };
 
+const requireArtistRole = (req: any, res: any, next: any) => {
+  const role = String(req.user?.role || "").toUpperCase();
+  if (role !== "ARTIST") {
+    return res.status(403).json({
+      success: false,
+      code: "ARTIST_ROLE_REQUIRED",
+      message: "Artist role is required",
+      correlationId: req?.correlationId || "-",
+    });
+  }
+  return next();
+};
+
 uploadRouter.post(
   "/image",
   uploadLimiter,
   requireAuth,
-  requireVerifiedArtist,
+  requireArtistRole,
   parseImage,
   async (req: any, res: any) => {
     const correlationId = req?.correlationId || "-";

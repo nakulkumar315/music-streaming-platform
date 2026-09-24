@@ -16,8 +16,8 @@ function sslConfig(url: string | undefined) {
 export const pool = new Pool({
   connectionString: databaseUrl,
   ssl: sslConfig(databaseUrl),
-  connectionTimeoutMillis: 10_000,
-  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 30_000,
+  idleTimeoutMillis: 30_000,
   max: 5,
 });
 
@@ -26,8 +26,8 @@ const readDbUrl = process.env.DATABASE_URL_REPLICA || databaseUrl;
 export const poolRead = new Pool({
   connectionString: readDbUrl,
   ssl: sslConfig(readDbUrl),
-  connectionTimeoutMillis: 10_000,
-  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 30_000,
+  idleTimeoutMillis: 30_000,
   max: 5,
 });
 

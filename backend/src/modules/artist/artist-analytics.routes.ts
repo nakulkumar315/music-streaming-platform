@@ -4,7 +4,7 @@ import { pool } from "../../common/db";
 import { logger } from "../../common/logger";
 
 const router = Router();
-router.use(requireAuth, requireVerifiedArtist);
+router.use(["/analytics", "/dashboard"], requireAuth, requireVerifiedArtist);
 
 const PAYMENT_SUCCESS_STATUSES = ["SUCCESS", "PAID", "CAPTURED"] as const;
 

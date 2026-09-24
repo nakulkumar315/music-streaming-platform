@@ -87,11 +87,18 @@ export async function invalidateCachePattern(pattern: string): Promise<void> {
  * Invalidate artist-related caches.
  */
 export async function invalidateArtistCache(): Promise<void> {
-  await Promise.all([
-    invalidateCachePattern("artist_search:*"),
-    invalidateCachePattern("featured_artists:*"),
-    invalidateCachePattern("home_content_feed_rows*"),
-  ]);
+  try {
+    await Promise.race([
+      Promise.all([
+        invalidateCachePattern("artist_search:*"),
+        invalidateCachePattern("featured_artists:*"),
+        invalidateCachePattern("home_content_feed_rows*"),
+      ]),
+      new Promise((resolve) => setTimeout(resolve, 1500)),
+    ]);
+  } catch (err: any) {
+    console.error("[CACHE] invalidateArtistCache error:", err?.message);
+  }
 }
 
 /**

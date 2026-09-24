@@ -7,7 +7,7 @@ import { AuditService } from "../../shared/audit/audit.service";
 import type { NormalizedArtistPricingInput } from "./artist-pricing.validation";
 
 const router = Router();
-router.use(requireAuth, requireVerifiedArtist);
+router.use("/pricing", requireAuth, requireVerifiedArtist);
 
 function correlationId(req: any): string {
   return String(req?.correlationId || "-");
