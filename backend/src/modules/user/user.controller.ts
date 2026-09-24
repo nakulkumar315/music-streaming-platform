@@ -17,22 +17,10 @@ export class UserController {
         });
       }
 
-      let userRow: any;
-      try {
-        const q =
-          "SELECT id, name, full_name, email, profile_image_url, subscription_count, total_listen_time, audio_quality_pref, notifications_pref, status FROM users WHERE id = $1";
-        const r = await pool.query(q, [userId]);
-        userRow = r.rows?.[0];
-      } catch (err: any) {
-        if (err?.code === "42703") {
-          const q =
-            "SELECT id, name, full_name, email, status FROM users WHERE id = $1";
-          const r = await pool.query(q, [userId]);
-          userRow = r.rows?.[0];
-        } else {
-          throw err;
-        }
-      }
+      const q =
+        "SELECT id, name, email, profile_image_url, status FROM users WHERE id = $1";
+      const r = await pool.query(q, [userId]);
+      const userRow = r.rows?.[0];
 
       if (!userRow) {
         return res.status(404).json({
@@ -48,12 +36,12 @@ export class UserController {
            FROM subscriptions
            WHERE user_id = $1
              AND UPPER(COALESCE(status, '')) = 'ACTIVE'
-             AND (end_date IS NULL OR end_date > now())`,
+             AND (next_billing_date IS NULL OR next_billing_date > now())`,
           [userId]
         );
         subscriptionCount = Number(subs.rows?.[0]?.c ?? 0);
       } catch {
-        subscriptionCount = Number(userRow.subscription_count ?? 0);
+        subscriptionCount = 0;
       }
 
       return res.json({
@@ -61,12 +49,12 @@ export class UserController {
         profile: {
           id: userRow.id,
           name: userRow.name ?? null,
-          fullName: userRow.full_name ?? null,
+          fullName: userRow.name ?? null,
           email: userRow.email,
           profileImageUrl: userRow.profile_image_url ?? null,
-          audioQualityPref: userRow.audio_quality_pref ?? "HIGH",
-          notificationsPref: userRow.notifications_pref ?? true,
-          totalListenTimeSeconds: Number(userRow.total_listen_time ?? 0),
+          audioQualityPref: "HIGH",
+          notificationsPref: true,
+          totalListenTimeSeconds: 0,
         },
         premium: {
           isPremium: subscriptionCount > 0,
@@ -88,10 +76,10 @@ export class UserController {
 
     try {
       const rows = await pool.query(
-        `SELECT id, amount, currency, status, date, artist_name, razorpay_order_id, razorpay_payment_id
+        `SELECT id, amount, currency, status, created_at as date, artist_name, razorpay_order_id, razorpay_payment_id
          FROM transactions
          WHERE user_id = $1
-         ORDER BY date DESC LIMIT 50`,
+         ORDER BY created_at DESC LIMIT 50`,
         [userId]
       );
       if (rows.rows) {
@@ -204,25 +192,19 @@ export class UserController {
         }
       }
 
+      const resolvedName = fullName || req.body?.name;
       const updateQuery = `
         UPDATE users 
         SET 
-          full_name = COALESCE($1, full_name),
           name = COALESCE($1, name),
-          username = COALESCE($2, username),
-          bio = COALESCE($3, bio),
-          favorite_genre = COALESCE($4, favorite_genre),
-          location = COALESCE($5, location)
-        WHERE id = $6
-        RETURNING id, name, full_name as fullName, username, bio, favorite_genre as favoriteGenre, location, profile_image_url as profileImageUrl
+          bio = COALESCE($2, bio)
+        WHERE id = $3
+        RETURNING id, name, name as "fullName", bio, profile_image_url as "profileImageUrl"
       `;
 
       const result = await pool.query(updateQuery, [
-        fullName || null,
-        username || null,
+        resolvedName || null,
         bio || null,
-        favoriteGenre || null,
-        location || null,
         userId,
       ]);
 
@@ -480,7 +462,7 @@ export class UserController {
           .json({ success: false, message: "Unauthorized" });
 
       const txRes = await pool.query(
-        `SELECT t.id, t.amount, t.currency, t.artist_name, t.status, t.date, t.billing_cycle, u.full_name as customer_name, u.email as customer_email
+        `SELECT t.id, t.amount, t.currency, t.artist_name, t.status, t.created_at as date, t.billing_cycle, u.name as customer_name, u.email as customer_email
          FROM transactions t
          JOIN users u ON u.id = t.user_id
          WHERE t.id = $1 AND t.user_id = $2`,

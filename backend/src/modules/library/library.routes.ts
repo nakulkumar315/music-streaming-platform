@@ -47,7 +47,7 @@ router.get("/subscribed-artists", requireAuth, async (req: any, res) => {
        JOIN users u ON u.id = s.artist_id
        WHERE s.user_id = $1
          AND UPPER(COALESCE(s.status, 'ACTIVE')) = 'ACTIVE'
-         AND (s.end_date IS NULL OR s.end_date > now())
+         AND (s.next_billing_date IS NULL OR s.next_billing_date > now())
          AND UPPER(COALESCE(u.role, '')) = 'ARTIST'
          AND COALESCE(u.status, 'ACTIVE') = 'ACTIVE'
        ORDER BY s.updated_at DESC, s.created_at DESC
