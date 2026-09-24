@@ -15,3 +15,5 @@ coverage/
 *.tsbuildinfo
 *.log
 .DS_Store
+backend/storage/users/
+storage/users/

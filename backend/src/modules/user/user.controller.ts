@@ -2,6 +2,11 @@ import { Response } from "express";
 import { pool } from "../../common/db";
 import { Expo, ExpoPushMessage } from "expo-server-sdk";
 import { AuditService } from "../../shared/audit/audit.service";
+import { getStorageService } from "../../shared/storage/services/storage.service";
+import { getStorageConfig } from "../../config/storage.config";
+import { getStorageProviderByName } from "../../shared/storage/factory/storage-provider.factory";
+import { getExtensionFromMime } from "../../shared/storage/utils/file-metadata.util";
+import type { StorageProviderName } from "../../shared/storage/interfaces/storage-types.interface";
 
 const expo = new Expo();
 
@@ -18,7 +23,7 @@ export class UserController {
       }
 
       const q =
-        "SELECT id, name, email, profile_image_url, status FROM users WHERE id = $1";
+        "SELECT id, name, email, profile_image_url, bio, genre, username, location, status FROM users WHERE id = $1";
       const r = await pool.query(q, [userId]);
       const userRow = r.rows?.[0];
 
@@ -44,14 +49,24 @@ export class UserController {
         subscriptionCount = 0;
       }
 
+      const baseUrl = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+      let profileImageUrl = userRow.profile_image_url ?? null;
+      if (profileImageUrl && profileImageUrl.startsWith("/")) {
+        profileImageUrl = `${baseUrl}${profileImageUrl}`;
+      }
+
       return res.json({
         success: true,
         profile: {
           id: userRow.id,
           name: userRow.name ?? null,
           fullName: userRow.name ?? null,
+          username: userRow.username ?? null,
           email: userRow.email,
-          profileImageUrl: userRow.profile_image_url ?? null,
+          bio: userRow.bio ?? null,
+          favoriteGenre: userRow.genre ?? null,
+          location: userRow.location ?? null,
+          profileImageUrl,
           audioQualityPref: "HIGH",
           notificationsPref: true,
           totalListenTimeSeconds: 0,
@@ -180,10 +195,10 @@ export class UserController {
       const { fullName, username, bio, favoriteGenre, location } = req.body;
 
       // Uniqueness check for username
-      if (username) {
+      if (username && typeof username === "string" && username.trim().length > 0) {
         const usernameCheck = await pool.query(
-          "SELECT id FROM users WHERE username = $1 AND id != $2",
-          [username, userId]
+          "SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND id != $2",
+          [username.trim(), userId]
         );
         if (usernameCheck.rows.length > 0) {
           return res
@@ -192,21 +207,34 @@ export class UserController {
         }
       }
 
-      const resolvedName = fullName || req.body?.name;
+      const resolvedName = fullName !== undefined ? fullName : req.body?.name;
       const updateQuery = `
         UPDATE users 
         SET 
           name = COALESCE($1, name),
-          bio = COALESCE($2, bio)
-        WHERE id = $3
-        RETURNING id, name, name as "fullName", bio, profile_image_url as "profileImageUrl"
+          bio = COALESCE($2, bio),
+          genre = COALESCE($3, genre),
+          location = COALESCE($4, location),
+          username = COALESCE($5, username),
+          updated_at = now()
+        WHERE id = $6
+        RETURNING id, name, name as "fullName", username, bio, genre as "favoriteGenre", location, profile_image_url as "profileImageUrl"
       `;
 
       const result = await pool.query(updateQuery, [
-        resolvedName || null,
-        bio || null,
+        resolvedName !== undefined ? (resolvedName ? String(resolvedName).trim() : null) : null,
+        bio !== undefined ? (bio ? String(bio).trim() : null) : null,
+        favoriteGenre !== undefined ? (favoriteGenre ? String(favoriteGenre).trim() : null) : null,
+        location !== undefined ? (location ? String(location).trim() : null) : null,
+        username !== undefined ? (username ? String(username).trim() : null) : null,
         userId,
       ]);
+
+      const updatedProfile = result.rows[0] || {};
+      const baseUrl = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+      if (updatedProfile.profileImageUrl && updatedProfile.profileImageUrl.startsWith("/")) {
+        updatedProfile.profileImageUrl = `${baseUrl}${updatedProfile.profileImageUrl}`;
+      }
 
       AuditService.log({
         action: "user.profile_updated",
@@ -215,13 +243,13 @@ export class UserController {
         performedBy: userId,
         role: "fan",
         status: "success",
-        metadata: { fullName, username },
+        metadata: { fullName: resolvedName, username },
       });
 
       return res.json({
         success: true,
         message: "Profile updated successfully",
-        profile: result.rows[0],
+        profile: updatedProfile,
       });
     } catch (error: any) {
       console.error("[UserController.update] error:", error);
@@ -291,53 +319,160 @@ export class UserController {
           .status(401)
           .json({ success: false, message: "Unauthorized" });
 
-      const file = req.file;
-      if (!file)
+      let fileBuffer: Buffer | null = null;
+      let fileMime: string = "image/jpeg";
+      let fileSize: number = 0;
+
+      if (req.file) {
+        fileBuffer = req.file.buffer;
+        fileMime = req.file.mimetype || "image/jpeg";
+        fileSize = req.file.size;
+      } else if (req.body?.image && typeof req.body.image === "string") {
+        const rawImage = req.body.image.trim();
+        if (rawImage.startsWith("data:")) {
+          const matches = rawImage.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+          if (matches && matches.length === 3) {
+            fileMime = matches[1];
+            fileBuffer = Buffer.from(matches[2], "base64");
+            fileSize = fileBuffer.length;
+          }
+        } else if (rawImage.length > 0 && rawImage !== "[object Object]") {
+          fileBuffer = Buffer.from(rawImage, "base64");
+          fileSize = fileBuffer.length;
+        }
+      }
+
+      if (!fileBuffer || fileSize === 0) {
         return res
           .status(400)
           .json({ success: false, message: "No image file provided" });
+      }
 
-      // ============================================
-      // BUG FIX: File size limit check (2MB)
-      // ============================================
       const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
-      if (file.size > MAX_FILE_SIZE) {
+      if (fileSize > MAX_FILE_SIZE) {
         return res.status(400).json({
           success: false,
           message: `Please keep image under 2MB. Your file is ${(
-            file.size /
+            fileSize /
             (1024 * 1024)
           ).toFixed(2)}MB.`,
         });
       }
 
-      const cloudinary = require("cloudinary").v2;
+      const extension = getExtensionFromMime(fileMime) || "jpg";
+      const storageKey = `users/${userId}/profile/${Date.now()}.${extension}`;
+      const storage = getStorageService();
+      const config = getStorageConfig();
 
-      const b64 = Buffer.from(file.buffer).toString("base64");
-      const dataURI = "data:" + file.mimetype + ";base64," + b64;
-
-      const uploadOptions = {
-        folder: `users/${userId}/profile`,
-        use_filename: true,
-        unique_filename: true,
-      };
-
-      const cRes = await cloudinary.uploader.upload(dataURI, uploadOptions);
-      const secureUrl = cRes.secure_url;
+      const uploadResult = await storage.upload({
+        storageKey,
+        body: fileBuffer,
+        contentType: fileMime,
+        contentLength: fileSize,
+        metadata: { userId: String(userId), assetKind: "PROFILE" },
+      });
 
       await pool.query(
-        "UPDATE users SET profile_image_url = $1 WHERE id = $2",
-        [secureUrl, userId]
+        `INSERT INTO user_media_assets (
+           user_id, kind, storage_provider, storage_key, provider_asset_id,
+           mime_type, size_bytes, created_at, updated_at
+         ) VALUES ($1, 'PROFILE', $2, $3, $4, $5, $6, now(), now())
+         ON CONFLICT (user_id, kind)
+         DO UPDATE SET
+           storage_provider = EXCLUDED.storage_provider,
+           storage_key = EXCLUDED.storage_key,
+           provider_asset_id = EXCLUDED.provider_asset_id,
+           mime_type = EXCLUDED.mime_type,
+           size_bytes = EXCLUDED.size_bytes,
+           updated_at = now()`,
+        [
+          userId,
+          config.provider,
+          storageKey,
+          uploadResult.providerAssetId || null,
+          fileMime,
+          fileSize,
+        ]
       );
+
+      const avatarPath = `/api/v1/fan/user/avatar/${userId}`;
+      await pool.query(
+        "UPDATE users SET profile_image_url = $1, updated_at = now() WHERE id = $2",
+        [avatarPath, userId]
+      );
+
+      const baseUrl = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+      const absoluteUrl = `${baseUrl}${avatarPath}`;
 
       return res.json({
         success: true,
         message: "Profile image updated",
-        profileImageUrl: secureUrl,
+        profileImageUrl: absoluteUrl,
       });
     } catch (error: any) {
       console.error("[UserController.updateProfileImage] error:", error);
       return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+
+  async getAvatar(req: any, res: Response) {
+    try {
+      const targetUserId = parseInt(req.params.id, 10);
+      if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+        return res.status(400).json({ success: false, message: "Invalid user ID" });
+      }
+
+      const result = await pool.query(
+        `SELECT storage_provider, storage_key, provider_asset_id, mime_type, size_bytes
+         FROM user_media_assets
+         WHERE user_id = $1 AND kind = 'PROFILE'
+         LIMIT 1`,
+        [targetUserId]
+      );
+      const asset = result.rows[0];
+
+      if (!asset) {
+        const userRes = await pool.query(
+          "SELECT profile_image_url FROM users WHERE id = $1 LIMIT 1",
+          [targetUserId]
+        );
+        const externalUrl = userRes.rows[0]?.profile_image_url;
+        if (externalUrl && (externalUrl.startsWith("http://") || externalUrl.startsWith("https://"))) {
+          res.setHeader("Cache-Control", "public, max-age=300");
+          return res.redirect(302, externalUrl);
+        }
+        return res.status(404).json({ success: false, message: "Avatar not found" });
+      }
+
+      const storage = getStorageProviderByName(asset.storage_provider as StorageProviderName);
+      if (asset.provider_asset_id && storage.getPublicObjectUrl) {
+        const url = await storage.getPublicObjectUrl({
+          providerAssetId: String(asset.provider_asset_id),
+          mediaType: "thumbnail",
+        });
+        if (url) {
+          res.setHeader("Cache-Control", "public, max-age=300");
+          return res.redirect(302, url);
+        }
+      }
+
+      if (!storage.openReadStream) {
+        return res.status(404).json({ success: false, message: "Image delivery unavailable" });
+      }
+
+      const read = await storage.openReadStream({ storageKey: String(asset.storage_key) });
+      res.setHeader("Content-Type", String(asset.mime_type || read.contentType || "image/jpeg"));
+      const size = Number(asset.size_bytes || read.contentLength);
+      if (Number.isFinite(size) && size > 0) res.setHeader("Content-Length", String(size));
+      res.setHeader("Cache-Control", "public, max-age=300");
+      read.stream.once("error", () => {
+        if (!res.headersSent) res.status(502).end();
+        else res.end();
+      });
+      return read.stream.pipe(res);
+    } catch (error) {
+      console.error("[UserController.getAvatar] error:", error);
+      return res.status(500).json({ success: false, message: "Failed to load avatar" });
     }
   }
   async updateSettings(req: any, res: Response) {

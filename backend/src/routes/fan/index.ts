@@ -3,7 +3,7 @@ import { Router } from "express";
 import { requireAuth } from "../../common/auth/requireAuth";
 import { requireRoles } from "../../common/auth/requireRoles";
 import authRoutes from "../../modules/auth/auth.routes";
-import userRoutes from "../../modules/user/user.routes";
+import userRoutes, { publicUserRouter } from "../../modules/user/user.routes";
 import trustedListenTimeRoutes from "../../modules/user/listen-time.routes";
 import artistRoutes from "../../modules/artist/public-artist.routes";
 import contentRoutes from "../../modules/content/content.routes";
@@ -17,6 +17,9 @@ const router = Router();
 const requireFan = requireRoles("FAN");
 
 router.use("/auth", authRoutes);
+
+// Public fan avatar delivery (must not require Bearer token for <img>/<Image> rendering)
+router.use("/user", publicUserRouter);
 
 // Private fan account domains are mounted behind an explicit FAN boundary.
 // Trusted listening-time shadows the legacy user handler so raw sessions/play

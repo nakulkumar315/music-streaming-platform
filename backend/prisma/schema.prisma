@@ -55,6 +55,8 @@ model users {
   signatureIpAddress        String?                   @map("signature_ip_address") @db.VarChar(50)
   signatureUserAgent        String?                   @map("signature_user_agent")
   genre                     String?                   @db.VarChar(50)
+  username                  String?                   @unique(map: "idx_users_username_unique") @db.VarChar(100)
+  location                  String?                   @db.VarChar(255)
   featured_artists          featured_artists[]
   user_media_assets         user_media_assets[]
   media_deletion_requests   media_deletion_requests[]

@@ -13,6 +13,10 @@ const upload = multer({
   limits: { fileSize: 1024 * 1024 * 10 } // 10MB limit
 });
 
+export const publicUserRouter = Router();
+publicUserRouter.get("/avatar/:id", (req, res) => userController.getAvatar(req as any, res));
+
+router.get("/avatar/:id", (req, res) => userController.getAvatar(req as any, res));
 router.get("/profile", requireAuth, (req, res) => userController.profile(req as any, res));
 router.get("/transactions", requireAuth, (req, res) => userController.transactions(req as any, res));
 router.put("/update", requireAuth, (req, res) => userController.update(req as any, res));
